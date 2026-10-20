@@ -33,9 +33,17 @@ from database import (
     scan_library,
     ensure_tag,
     refresh_tag_counts,
+    log_operation,
 )
 from renamer import win_natural_key
+from file_safety import validate_source, prune_directories, content_hash
+from background_work import atomic_json, update_job
+from processing_state import record as record_processing, AI_MODEL_VERSION
 from zh_dict import DANBOORU_ARTIST_TO_FOLDER, resolve_artist_folder_name
+from background_work import (
+    BackgroundBusy, acquire_job, exclusive_job, start_job_thread,
+    background_status, background_checkpoint, claim_schedule_slot, latest_schedule_slot,
+)
 
 SCHEDULER_CONFIG_PATH = DATA_DIR / "scheduler_config.json"
 
@@ -75,17 +83,24 @@ def load_scheduler_config() -> Dict[str, Any]:
 
 
 def save_scheduler_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    merged = load_scheduler_config() if SCHEDULER_CONFIG_PATH.exists() else dict(DEFAULT_CONFIG)
-    merged.update(cfg)
-    # 限制歷史紀錄最多保留 30 筆
-    if "history_logs" in merged and isinstance(merged["history_logs"], list):
-        merged["history_logs"] = merged["history_logs"][:30]
-    SCHEDULER_CONFIG_PATH.write_text(
-        json.dumps(merged, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    return merged
+    from background_work import FileLock
+    lock=FileLock(SCHEDULER_CONFIG_PATH.with_suffix(".lock"))
+    deadline=time.monotonic()+3
+    while not lock.acquire():
+        if time.monotonic()>deadline:
+            raise RuntimeError("排程設定正在更新，請稍後重試")
+        time.sleep(0.02)
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        merged = load_scheduler_config() if SCHEDULER_CONFIG_PATH.exists() else dict(DEFAULT_CONFIG)
+        merged.update(cfg)
+        # 限制歷史紀錄最多保留 30 筆
+        if "history_logs" in merged and isinstance(merged["history_logs"], list):
+            merged["history_logs"] = merged["history_logs"][:30]
+        atomic_json(SCHEDULER_CONFIG_PATH,merged)
+        return merged
+    finally:
+        lock.release()
 
 
 def remove_empty_subdirectories(root_dir: Path) -> int:
@@ -139,6 +154,11 @@ def scan_source_directory_preview(source_dirs: List[str]) -> Dict[str, Any]:
         if not p_str:
             continue
         p = Path(p_str)
+        try:
+            p = validate_source(GALLERY_ROOT,p)
+        except ValueError as error:
+            details.append({"path":p_str,"exists":p.exists(),"file_count":0,"subdir_count":0,"sample_files":[],"error":str(error)})
+            continue
         if not p.exists() or not p.is_dir():
             details.append({
                 "path": p_str,
@@ -155,6 +175,7 @@ def scan_source_directory_preview(source_dirs: List[str]) -> Dict[str, Any]:
         gallery_resolved = GALLERY_ROOT.resolve()
 
         for dirpath, dirnames, filenames in os.walk(str(p)):
+            dirnames[:] = prune_directories(dirpath,dirnames)
             curr_p = Path(dirpath).resolve()
             # 防止誤把 D:\圖檔\twitter 本身當成來源資料夾造成無限搬移
             if curr_p == gallery_resolved or gallery_resolved in curr_p.parents:
@@ -193,6 +214,7 @@ class AutoIngestScheduler:
         self.current_step = ""
         self.total_target = 100
         self.processed_count = 0
+        update_job(processed_count=self.processed_count,total_target=self.total_target,stage=self.status_message)
         self._lock = threading.Lock()
         self._daemon_started = False
         self._daemon_thread: Optional[threading.Thread] = None
@@ -215,8 +237,9 @@ class AutoIngestScheduler:
                     now_ymd_hm = now.strftime("%Y-%m-%d %H:%M")
                     times = [t.strip() for t in cfg.get("schedule_times", []) if t.strip()]
                     if now_hm in times and cfg.get("last_triggered_date_time") != now_ymd_hm:
-                        save_scheduler_config({"last_triggered_date_time": now_ymd_hm})
-                        self.trigger_pipeline_async(trigger_reason=f"定時排程 ({now_hm})")
+                        self.trigger_pipeline_async(
+                            trigger_reason=f"定時排程 ({now_hm})", schedule_slot=now_ymd_hm
+                        )
             except Exception:
                 pass
             time.sleep(15)
@@ -230,23 +253,51 @@ class AutoIngestScheduler:
             "total_target": self.total_target,
             "processed_count": self.processed_count,
             "config": cfg,
+            "background_job": background_status(),
         }
 
-    def trigger_pipeline_async(self, trigger_reason: str = "手動立即執行") -> Dict[str, Any]:
+    def trigger_pipeline_async(self, trigger_reason: str = "手動立即執行", schedule_slot=None) -> Dict[str, Any]:
         with self._lock:
             if self.running_job:
                 return {"status": "already_running", "message": "排程匯入與分類任務正在執行中"}
+            try:
+                lease = acquire_job("排程匯入與歸檔")
+            except BackgroundBusy as exc:
+                return exc.response()
             self.running_job = True
             self.total_target = 100
             self.processed_count = 2
+            update_job(processed_count=self.processed_count,total_target=self.total_target,stage=self.status_message)
             self.status_message = f"正在執行排程匯入與自動歸檔 ({trigger_reason})"
             self.current_step = ""
 
-        t = threading.Thread(target=self._execute_pipeline, args=(trigger_reason,), daemon=True)
-        t.start()
+        t = threading.Thread(
+            target=self._execute_pipeline, args=(trigger_reason,),
+            kwargs={"schedule_slot": schedule_slot, "_job_lease": lease}, daemon=True,
+        )
+        lease.publish(force=True,recipe={"kind":"schedule","options":{}})
+        try:
+            start_job_thread(t, lease)
+        except BaseException:
+            self.running_job = False
+            raise
         return {"status": "started", "trigger_reason": trigger_reason}
 
-    def _execute_pipeline(self, trigger_reason: str):
+    @exclusive_job("排程匯入與歸檔")
+    def _execute_pipeline(self, trigger_reason: str, schedule_slot=None):
+        try:
+            return self._execute_pipeline_owned(trigger_reason, schedule_slot)
+        finally:
+            self.running_job = False
+
+    def _execute_pipeline_owned(self, trigger_reason: str, schedule_slot=None):
+        if schedule_slot:
+            if not claim_schedule_slot(schedule_slot):
+                self.running_job = False
+                self.status_message = "此時段排程已由另一個程序執行"
+                return {"status": "already_triggered"}
+            save_scheduler_config({"last_triggered_date_time": schedule_slot})
+        self.running_job = True
         start_ts = time.time()
         started_at_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         cfg = load_scheduler_config()
@@ -268,6 +319,7 @@ class AutoIngestScheduler:
 
             # === STEP 1: 從來源資料夾（含子資料夾）依自然排序搬移圖片至 D:\圖檔\twitter ===
             self.processed_count = 5
+            update_job(processed_count=self.processed_count,total_target=self.total_target,stage=self.status_message)
             self.status_message = f"正在執行排程自動處理 ({trigger_reason})"
 
             for raw_src in source_dirs:
@@ -279,13 +331,15 @@ class AutoIngestScheduler:
                     errors.append(f"來源路徑不存在: {src_str}")
                     continue
 
-                src_root_resolved = src_root.resolve()
-                if src_root_resolved == gallery_resolved or gallery_resolved in src_root_resolved.parents:
-                    errors.append(f"略過屬於圖庫內部的路徑: {src_str}")
+                try:
+                    src_root = validate_source(GALLERY_ROOT,src_root)
+                except ValueError as error:
+                    errors.append(str(error))
                     continue
 
                 found_files: List[Tuple[str, Path]] = []
                 for dirpath, dirnames, filenames in os.walk(str(src_root)):
+                    dirnames[:] = prune_directories(dirpath,dirnames)
                     curr_dir = Path(dirpath)
                     for fn in filenames:
                         ext = os.path.splitext(fn)[1].lower()
@@ -296,21 +350,40 @@ class AutoIngestScheduler:
 
                 found_files.sort(key=lambda item: win_natural_key(item[0]))
 
+                conn = get_db()
+                try:
+                    known_hashes = {row[0] for row in conn.execute("SELECT content_hash FROM images WHERE content_hash IS NOT NULL AND missing_since IS NULL")}
+                finally:
+                    conn.close()
+                imports, reserved = [], set()
+                duplicates = 0
                 for rel_str, src_file in found_files:
+                    background_checkpoint()
                     try:
+                        digest = content_hash(src_file)
+                        if digest in known_hashes:
+                            duplicates += 1
+                            continue  # Leave the user's duplicate source intact.
                         dest_file = GALLERY_ROOT / src_file.name
-                        if dest_file.exists():
+                        if dest_file.exists() or str(dest_file).casefold() in reserved:
                             stem = dest_file.stem
                             ext = dest_file.suffix
                             counter = 1
-                            while dest_file.exists():
+                            while dest_file.exists() or str(dest_file).casefold() in reserved:
                                 dest_file = GALLERY_ROOT / f"{stem}_{counter}{ext}"
                                 counter += 1
-                        shutil.move(str(src_file), str(dest_file))
-                        moved_from_source += 1
-                        moved_dest_filenames.append(dest_file.name)
+                        reserved.add(str(dest_file).casefold())
+                        known_hashes.add(digest)
+                        imports.append({"old_rel_path":rel_str,"new_rel_path":dest_file.name})
                     except Exception as e:
                         errors.append(f"搬移失敗 ({src_file.name}): {e}")
+
+                if imports:
+                    from file_operations import execute
+                    execute(GALLERY_ROOT,DATA_DIR,get_db,imports,kind="import",source_root=src_root)
+                    moved_from_source += len(imports)
+                    moved_dest_filenames.extend(item["new_rel_path"] for item in imports)
+                update_job(stage="匯入完成",checkpoint={"moved":moved_from_source,"duplicates_skipped":duplicates})
 
                 # === STEP 2: 搬移完成後清空來源路徑下的所有空子資料夾 ===
                 if cfg.get("remove_empty_subdirs", True):
@@ -318,6 +391,7 @@ class AutoIngestScheduler:
 
             # === STEP 3: 更新圖庫索引 ===
             self.processed_count = 15
+            update_job(processed_count=self.processed_count,total_target=self.total_target,stage=self.status_message)
             scan_res = scan_library()
             new_indexed = scan_res.get("new_added", 0)
 
@@ -336,6 +410,7 @@ class AutoIngestScheduler:
 
             # === STEP 4: 執行 Pixiv ID 反查 / 以圖搜圖 / 本地 GPU AI 視覺打標 ===
             self.processed_count = 25
+            update_job(processed_count=self.processed_count,total_target=self.total_target,stage=self.status_message)
             if cfg.get("run_pixiv_lookup", True):
                 from ai_tagger import lookup_pixiv_artists_batch
                 px_res = lookup_pixiv_artists_batch(limit=250, auto_move_to_artist_folder=False)
@@ -347,6 +422,7 @@ class AutoIngestScheduler:
                 rev_targets = target_rows[:rev_limit]
                 for idx, r in enumerate(rev_targets, 1):
                     self.processed_count = 25 + int((idx / max(1, len(rev_targets))) * 25)
+                    update_job(processed_count=self.processed_count,total_target=self.total_target,stage=self.status_message)
                     rs = reverse_search_and_tag_image(
                         image_id=r["id"],
                         min_similarity=72.0,
@@ -362,28 +438,34 @@ class AutoIngestScheduler:
                 conn = get_db()
                 if moved_dest_filenames:
                     placeholders = ",".join(["?"] * len(moved_dest_filenames))
-                    ai_rows = conn.execute(
-                        f"SELECT id, rel_path, filename FROM images WHERE folder = '' AND media_type = 'image' AND filename IN ({placeholders}) AND ai_tagged = 0",
-                        moved_dest_filenames,
-                    ).fetchall()
+                    ai_rows = [
+                        dict(r)
+                        for r in conn.execute(
+                            f"SELECT id, rel_path, filename FROM images WHERE folder = '' AND media_type = 'image' AND filename IN ({placeholders}) AND ai_tagged = 0",
+                            moved_dest_filenames,
+                        ).fetchall()
+                    ]
                 else:
-                    ai_rows = conn.execute(
-                        "SELECT id, rel_path, filename FROM images WHERE folder = '' AND media_type = 'image' AND ai_tagged = 0 ORDER BY mtime DESC LIMIT 200"
-                    ).fetchall()
+                    ai_rows = [
+                        dict(r)
+                        for r in conn.execute(
+                            "SELECT id, rel_path, filename FROM images WHERE folder = '' AND media_type = 'image' AND ai_tagged = 0 ORDER BY mtime DESC LIMIT 200"
+                        ).fetchall()
+                    ]
+                conn.close()
 
                 if ai_rows:
                     tagger_engine.ensure_model_loaded()
-                    tag_cache: Dict[str, int] = {}
-                    for r in conn.execute("SELECT id, name FROM tags"):
-                        tag_cache[r["name"]] = r["id"]
-
                     gen_t = max(0.70, float(cfg.get("general_thresh", 0.70)))
                     art_t = max(0.70, float(cfg.get("artist_thresh", 0.70)))
 
-                    db_links = []
+                    pending_tag_entries = []
                     img_updates = []
+                    failed_ids = []
                     for idx, r in enumerate(ai_rows, 1):
+                        background_checkpoint()
                         self.processed_count = 50 + int((idx / max(1, len(ai_rows))) * 35)
+                        update_job(processed_count=self.processed_count,total_target=self.total_target,stage=self.status_message)
                         full_p = str(GALLERY_ROOT / r["rel_path"])
                         tensor = preprocess_image_fast(full_p, 512)
                         if tensor is not None:
@@ -395,40 +477,56 @@ class AutoIngestScheduler:
                                 artist_thresh=art_t,
                             )
                             for tname, cat, conf in preds:
-                                tid = ensure_tag(conn, tag_cache, tname, cat)
-                                if tid > 0:
-                                    db_links.append((r["id"], tid, round(conf, 4), "ai"))
-                                    if cat == "artist" and tname.lower() in DANBOORU_ARTIST_TO_FOLDER:
-                                        fa = DANBOORU_ARTIST_TO_FOLDER[tname.lower()]
-                                        tid_fa = ensure_tag(conn, tag_cache, fa, "artist")
-                                        if tid_fa > 0:
-                                            db_links.append((r["id"], tid_fa, round(conf, 4), "ai"))
+                                pending_tag_entries.append((r["id"], tname, cat, conf))
+                                if cat == "artist" and tname.lower() in DANBOORU_ARTIST_TO_FOLDER:
+                                    fa = DANBOORU_ARTIST_TO_FOLDER[tname.lower()]
+                                    pending_tag_entries.append((r["id"], fa, "artist", conf))
                             img_updates.append((sug_folder, r["id"]))
                             ai_tagged_count += 1
+                        else:
+                            failed_ids.append(r["id"])
 
-                    if img_updates:
-                        with conn:
-                            conn.executemany(
-                                """
-                                INSERT INTO image_tags (image_id, tag_id, confidence, source)
-                                VALUES (?, ?, ?, ?)
-                                ON CONFLICT(image_id, tag_id) DO UPDATE SET
-                                confidence = MAX(image_tags.confidence, excluded.confidence)
-                                """,
-                                db_links,
-                            )
-                            conn.executemany(
-                                "UPDATE images SET ai_tagged = 1, suggested_folder = COALESCE(?, suggested_folder) WHERE id = ?",
-                                img_updates,
-                            )
-                            refresh_tag_counts(conn)
-                conn.close()
+                    if img_updates or failed_ids:
+                        conn = get_db()
+                        try:
+                            tag_cache: Dict[str, int] = {
+                                r["name"]: r["id"]
+                                for r in conn.execute("SELECT id, name FROM tags").fetchall()
+                            }
+                            with conn:
+                                db_links = []
+                                for iid, tname, cat, conf in pending_tag_entries:
+                                    tid = ensure_tag(conn, tag_cache, tname, cat)
+                                    if tid > 0:
+                                        db_links.append((iid, tid, round(conf, 4), "ai"))
+                                if db_links:
+                                    conn.executemany(
+                                        """
+                                        INSERT INTO image_tags (image_id, tag_id, confidence, source)
+                                        VALUES (?, ?, ?, ?)
+                                        ON CONFLICT(image_id, tag_id) DO UPDATE SET
+                                        confidence = MAX(image_tags.confidence, excluded.confidence)
+                                        """,
+                                        db_links,
+                                    )
+                                conn.executemany(
+                                    "UPDATE images SET ai_tagged = 1, suggested_folder = COALESCE(?, suggested_folder) WHERE id = ?",
+                                    img_updates,
+                                )
+                                for _,iid in img_updates:
+                                    record_processing(conn,iid,"ai","succeeded",model_version=AI_MODEL_VERSION)
+                                for iid in failed_ids:
+                                    record_processing(conn,iid,"ai","failed",error="圖片解碼失敗",retry_at=time.time()+300,model_version=AI_MODEL_VERSION)
+                                refresh_tag_counts(conn)
+                        finally:
+                            conn.close()
 
             from semantic_engine import apply_semantic_theme_tags_batch
             apply_semantic_theme_tags_batch()
 
             # === STEP 5: 自動建立繪師資料夾並將圖片歸檔 ===
             self.processed_count = 90
+            update_job(processed_count=self.processed_count,total_target=self.total_target,stage=self.status_message)
             if cfg.get("auto_create_artist_folders", True):
                 from app import move_images_to_folder, sync_root_suggested_folders
                 min_conf = max(0.70, float(cfg.get("min_artist_confidence", 0.70)))
@@ -479,14 +577,22 @@ class AutoIngestScheduler:
                     by_artist_folder.setdefault(resolved_f, []).append(rm["id"])
 
                 for folder_name, iids in by_artist_folder.items():
+                    background_checkpoint()
                     is_new = folder_name not in existing_folders_set
-                    mres = move_images_to_folder(iids, folder_name, auto_rename=auto_rn)
+                    mres = move_images_to_folder(iids, folder_name, auto_rename=auto_rn, refresh_counts=False)
                     moved_cnt = mres.get("moved", 0)
                     if moved_cnt > 0:
                         organized_to_artist_folders += moved_cnt
                         if is_new:
                             new_artist_folders_created += 1
                             existing_folders_set.add(folder_name)
+                if organized_to_artist_folders > 0:
+                    conn = get_db()
+                    try:
+                        with conn:
+                            refresh_tag_counts(conn)
+                    finally:
+                        conn.close()
 
             elapsed_sec = round(time.time() - start_ts, 2)
             summary_msg = (
@@ -514,10 +620,27 @@ class AutoIngestScheduler:
             logs = latest_cfg.get("history_logs", [])
             logs.insert(0, log_entry)
             save_scheduler_config({"history_logs": logs[:30]})
+            log_operation(
+                category="schedule",
+                action=f"自動匯入與歸檔排程 ({trigger_reason})",
+                summary=summary_msg,
+                status="warning" if errors else "success",
+                affected_count=moved_from_source + ai_tagged_count + organized_to_artist_folders,
+                duration_sec=elapsed_sec,
+                details=log_entry,
+            )
 
         except Exception as e:
             self.status_message = f"❌ 排程執行發生錯誤: {e}"
+            update_job(status="failed",last_error=str(e))
             self.current_step = "error"
+            log_operation(
+                category="schedule",
+                action=f"自動匯入與歸檔排程 ({trigger_reason})",
+                summary=self.status_message,
+                status="error",
+                details={"trigger_reason": trigger_reason, "error": str(e)},
+            )
         finally:
             self.running_job = False
 
@@ -659,37 +782,11 @@ def browse_filesystem_directory(path_str: str = "") -> Dict[str, Any]:
 
 
 def pick_folder_dialog(initial_dir: str = "") -> str:
-    """呼叫 Windows 原生最上層 (TopMost) 資料夾選擇視窗，讓使用者直接點選來源資料夾"""
-    import subprocess
-    init_escaped = (initial_dir or "").replace("'", "''")
-    ps_script = (
-        "Add-Type -AssemblyName System.Windows.Forms; "
-        "[System.Windows.Forms.Application]::EnableVisualStyles(); "
-        "$topForm = New-Object System.Windows.Forms.Form; "
-        "$topForm.TopMost = $true; "
-        "$topForm.StartPosition = 'CenterScreen'; "
-        "$topForm.Width = 1; $topForm.Height = 1; "
-        "$topForm.ShowInTaskbar = $false; "
-        "$topForm.Opacity = 0; "
-        "$topForm.Show(); "
-        "$topForm.Activate(); "
-        "$f = New-Object System.Windows.Forms.FolderBrowserDialog; "
-        "$f.Description = '請選擇要定時自動搬移圖片的來源資料夾 (支援含子資料夾)'; "
-        "$f.ShowNewFolderButton = $true; "
-        f"if ('{init_escaped}' -ne '' -and (Test-Path '{init_escaped}')) {{ $f.SelectedPath = '{init_escaped}' }}; "
-        "if ($f.ShowDialog($topForm) -eq 'OK') { Write-Output $f.SelectedPath }; "
-        "$topForm.Close()"
-    )
-    try:
-        res = subprocess.run(
-            ["powershell", "-NoProfile", "-Sta", "-Command", ps_script],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        return (res.stdout or "").strip()
-    except Exception:
-        return ""
+    """使用現代 Windows 檔案總管樣式的資料夾選擇視窗。"""
+    from native_folder_picker import pick_folder
+
+    return pick_folder(initial_dir)
+
 
 
 def sync_windows_task_scheduler(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -756,6 +853,13 @@ if __name__ == "__main__":
     import sys
     if "--run-once" in sys.argv:
         print("正在執行定時排程任務 (CLI 模式)...")
-        scheduler_engine._execute_pipeline(trigger_reason="Windows 系統排程器自動觸發")
+        cfg = load_scheduler_config()
+        try:
+            scheduler_engine._execute_pipeline(
+                trigger_reason="Windows 系統排程器自動觸發",
+                schedule_slot=latest_schedule_slot(cfg.get("schedule_times", [])),
+            )
+        except BackgroundBusy as exc:
+            scheduler_engine.status_message = str(exc)
         print(scheduler_engine.status_message)
 

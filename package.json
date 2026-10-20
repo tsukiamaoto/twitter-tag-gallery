@@ -1,0 +1,11 @@
+{
+  "name": "twitter-tag-gallery-ui",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/*.test.cjs",
+    "test:browser": "node tests/gallery-shell.spec.cjs && node tests/smart-tag-ui.spec.cjs && node tests/integration-settings.spec.cjs && node tests/image-deletion.spec.cjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.56.0"
+  }
+}

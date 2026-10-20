@@ -21,7 +21,8 @@ import uuid
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
-from database import GALLERY_ROOT, DATA_DIR, VALID_EXTENSIONS, NON_ARTIST_FOLDERS, get_db
+from database import GALLERY_ROOT, DATA_DIR, VALID_EXTENSIONS, NON_ARTIST_FOLDERS, get_db, get_preview_db, log_operation
+from background_work import exclusive_job, atomic_json
 
 RENAME_LOG_DIR = DATA_DIR / "rename_logs"
 RENAME_LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -126,16 +127,27 @@ def generate_rename_plan_for_folder(
     產生指定資料夾（或根目錄 '__ROOT__'）的改名預覽計畫，不會直接修改檔案。
     """
     conn = get_db()
-    if folder_name == "__ROOT__":
-        rows = conn.execute(
-            "SELECT id, rel_path, filename, folder, ext, mtime FROM images WHERE folder = ''"
-        ).fetchall()
-    else:
+    try:
         rows = conn.execute(
             "SELECT id, rel_path, filename, folder, ext, mtime FROM images WHERE folder = ?",
-            (folder_name,),
+            ("" if folder_name == "__ROOT__" else folder_name,),
         ).fetchall()
-    conn.close()
+    finally:
+        conn.close()
+    return generate_rename_plan_from_rows(
+        folder_name, rows, pad_digits, custom_date, custom_artist, keep_existing_batch_dates
+    )
+
+
+def generate_rename_plan_from_rows(
+    folder_name: str,
+    rows,
+    pad_digits: int = 4,
+    custom_date: Optional[str] = None,
+    custom_artist: Optional[str] = None,
+    keep_existing_batch_dates: bool = True,
+) -> Dict[str, Any]:
+    """Build the same rename plan from an already-fetched database snapshot."""
 
     files_info = [dict(r) for r in rows]
     if not files_info:
@@ -243,96 +255,97 @@ def generate_rename_plan_for_folder(
     }
 
 
-def execute_rename_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    安全執行改名計畫（採用兩階段暫存檔名，防止如 001->002 與既有 002 撞名），
-    並同步更新 SQLite 資料庫與寫入還原日誌。
-    """
-    items_to_change = [it for it in plan.get("items", []) if it.get("changed")]
-    if not items_to_change:
-        return {"renamed": 0, "message": "所有檔案皆已符合目標命名格式，無需更動"}
+def generate_rename_preview(
+    folder: str,
+    pad_digits: int = 4,
+    custom_date: Optional[str] = None,
+    custom_artist: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Fetch once, return the connection, then calculate the preview in memory."""
+    all_folders = folder == "__ALL_ARTIST_FOLDERS__"
+    with get_preview_db() as conn:
+        if all_folders:
+            rows = conn.execute(
+                "SELECT id, rel_path, filename, folder, ext, mtime FROM images "
+                "WHERE folder != '' ORDER BY folder ASC, id ASC"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, rel_path, filename, folder, ext, mtime FROM images WHERE folder = ?",
+                ("" if folder == "__ROOT__" else folder,),
+            ).fetchall()
 
-    batch_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
-    stage1_records = []
+    if not all_folders:
+        plan = generate_rename_plan_from_rows(folder, rows, pad_digits, custom_date, custom_artist)
+        return {
+            "mode": "single_folder",
+            "folder": plan["folder"],
+            "artist_name": plan.get("artist_name", ""),
+            "base_date": plan.get("base_date", ""),
+            "total": plan["total"],
+            "changed_count": plan["changed_count"],
+            "items": plan["items"][:300],
+        }
 
-    # Phase 1: Rename old -> temporary unique name on disk
-    for it in items_to_change:
-        old_rel = it["old_rel_path"]
-        old_full = GALLERY_ROOT / old_rel
-        if not old_full.exists():
-            continue
-
-        parent_dir = old_full.parent
-        tmp_name = f"__renaming_{batch_id}_{it['id']}{old_full.suffix}"
-        tmp_full = parent_dir / tmp_name
-
-        try:
-            os.rename(str(old_full), str(tmp_full))
-            stage1_records.append((it, tmp_full))
-        except Exception as e:
-            # Rollback any already staged files if error occurs
-            for prev_it, prev_tmp in stage1_records:
-                try:
-                    os.rename(str(prev_tmp), str(GALLERY_ROOT / prev_it["old_rel_path"]))
-                except Exception:
-                    pass
-            raise RuntimeError(f"檔案重新命名失敗 ({old_rel}): {e}")
-
-    # Phase 2: Rename temporary name -> final target filename and update DB
-    conn = get_db()
-    history_entries = []
-    db_updates = []
-
-    for it, tmp_full in stage1_records:
-        parent_dir = tmp_full.parent
-        target_name = it["new_filename"]
-        target_full = parent_dir / target_name
-
-        if target_full.exists():
-            stem = target_full.stem
-            ext = target_full.suffix
-            c = 1
-            while target_full.exists():
-                target_full = parent_dir / f"{stem}_dup{c}{ext}"
-                c += 1
-            target_name = target_full.name
-
-        os.rename(str(tmp_full), str(target_full))
-        new_rel = str(target_full.relative_to(GALLERY_ROOT)).replace("\\", "/")
-
-        history_entries.append({
-            "id": it["id"],
-            "old_rel_path": it["old_rel_path"],
-            "old_filename": it["old_filename"],
-            "new_rel_path": new_rel,
-            "new_filename": target_name,
+    grouped = {}
+    for row in rows:
+        if row["folder"] not in NON_ARTIST_FOLDERS:
+            grouped.setdefault(row["folder"], []).append(row)
+    summary_items = []
+    total_files = total_changed = 0
+    for folder_name, folder_rows in grouped.items():
+        # All-folder mode preserves the existing per-folder date/artist settings.
+        plan = generate_rename_plan_from_rows(folder_name, folder_rows, pad_digits)
+        first_it, last_it = plan["items"][0], plan["items"][-1]
+        total_files += plan["total"]
+        total_changed += plan["changed_count"]
+        summary_items.append({
+            "folder": folder_name,
+            "base_date": plan["base_date"],
+            "total": plan["total"],
+            "changed_count": plan["changed_count"],
+            "sample_first_old": first_it["old_filename"],
+            "sample_first_new": first_it["new_filename"],
+            "sample_last_old": last_it["old_filename"],
+            "sample_last_new": last_it["new_filename"],
         })
-        db_updates.append((new_rel, target_name, it["id"]))
-
-    with conn:
-        conn.executemany(
-            "UPDATE images SET rel_path = ?, filename = ? WHERE id = ?",
-            db_updates,
-        )
-    conn.close()
-
-    # Save undo log
-    log_file = RENAME_LOG_DIR / f"rename_{batch_id}.json"
-    log_data = {
-        "batch_id": batch_id,
-        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
-        "folder": plan.get("folder"),
-        "count": len(history_entries),
-        "entries": history_entries,
-    }
-    log_file.write_text(json.dumps(log_data, ensure_ascii=False, indent=2), encoding="utf-8")
-
     return {
-        "batch_id": batch_id,
-        "folder": plan.get("folder"),
-        "renamed": len(history_entries),
-        "log_file": str(log_file),
+        "mode": "all_folders",
+        "folder_count": len(summary_items),
+        "total": total_files,
+        "changed_count": total_changed,
+        "folders": summary_items,
     }
+
+
+@exclusive_job("批次改名")
+def execute_rename_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
+    from file_operations import execute
+    from file_safety import gallery_path
+    items = [item for item in plan.get("items", []) if item.get("changed")]
+    entries = []
+    source_paths = {str(gallery_path(GALLERY_ROOT, item["old_rel_path"])).casefold() for item in items}
+    reserved = set()
+    for item in items:
+        old = gallery_path(GALLERY_ROOT, item["old_rel_path"])
+        target = gallery_path(GALLERY_ROOT, str(Path(item["old_rel_path"]).parent / item["new_filename"]))
+        count = 1
+        original = target
+        while (target.exists() and str(target).casefold() not in source_paths) or str(target).casefold() in reserved:
+            target = original.with_name(f"{original.stem}_dup{count}{original.suffix}")
+            count += 1
+        reserved.add(str(target).casefold())
+        entries.append({"id":item["id"],"old_rel_path":item["old_rel_path"],"old_filename":old.name,
+                        "new_rel_path":str(target.relative_to(GALLERY_ROOT.resolve())).replace("\\","/"),"new_filename":target.name})
+    if not entries:
+        return {"renamed":0,"message":"所有檔案皆已符合目標命名格式，無需更動"}
+    result = execute(GALLERY_ROOT, DATA_DIR, get_db, entries, kind="rename")
+    batch_id = result["operation_id"]
+    log = {"batch_id":batch_id,"timestamp":datetime.datetime.now().isoformat(timespec="seconds"),
+           "folder":plan.get("folder"),"count":len(entries),"entries":entries}
+    atomic_json(RENAME_LOG_DIR / f"rename_{batch_id}.json", log)
+    log_operation(category="rename",action="批次改名",summary=f"完成 {len(entries)} 張圖片改名",affected_count=len(entries),details={"batch_id":batch_id})
+    return {"batch_id":batch_id,"folder":plan.get("folder"),"renamed":len(entries),"log_file":result["journal"]}
 
 
 def list_rename_logs() -> List[Dict[str, Any]]:
@@ -340,6 +353,8 @@ def list_rename_logs() -> List[Dict[str, Any]]:
     for p in sorted(RENAME_LOG_DIR.glob("rename_*.json"), reverse=True):
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
+            if data.get("undone"):
+                continue
             logs.append({
                 "batch_id": data["batch_id"],
                 "timestamp": data["timestamp"],
@@ -348,59 +363,56 @@ def list_rename_logs() -> List[Dict[str, Any]]:
             })
         except Exception:
             continue
-    return logs[:30]
-
-
-def undo_rename_batch(batch_id: str) -> Dict[str, Any]:
-    log_file = RENAME_LOG_DIR / f"rename_{batch_id}.json"
-    if not log_file.exists():
-        raise FileNotFoundError(f"找不到改名紀錄: {batch_id}")
-
-    data = json.loads(log_file.read_text(encoding="utf-8"))
-    entries = data.get("entries", [])
-    if not entries:
-        return {"restored": 0}
-
-    # Two-phase restore
-    stage1 = []
-    for ent in entries:
-        cur_full = GALLERY_ROOT / ent["new_rel_path"]
-        if not cur_full.exists():
+    known = {item["batch_id"] for item in logs}
+    for path in (DATA_DIR / "file_journals").glob("*.json"):
+        try:
+            journal = json.loads(path.read_text(encoding="utf-8"))
+            if journal["kind"] == "rename" and journal["status"] == "committed" and journal["id"] not in known:
+                logs.append({"batch_id":journal["id"],"timestamp":datetime.datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),"folder":"(復原日誌)","count":len(journal["entries"])})
+        except (OSError,ValueError,KeyError):
             continue
-        tmp_full = cur_full.parent / f"__undo_{batch_id}_{ent['id']}{cur_full.suffix}"
-        os.rename(str(cur_full), str(tmp_full))
-        stage1.append((ent, tmp_full))
-
-    conn = get_db()
-    db_updates = []
-    for ent, tmp_full in stage1:
-        old_full = GALLERY_ROOT / ent["old_rel_path"]
-        old_full.parent.mkdir(parents=True, exist_ok=True)
-        os.rename(str(tmp_full), str(old_full))
-        db_updates.append((ent["old_rel_path"], ent["old_filename"], ent["id"]))
-
-    with conn:
-        conn.executemany(
-            "UPDATE images SET rel_path = ?, filename = ? WHERE id = ?",
-            db_updates,
-        )
-    conn.close()
-    log_file.unlink(missing_ok=True)
-    return {"restored": len(db_updates), "folder": data.get("folder")}
+    return sorted(logs,key=lambda item:item["batch_id"],reverse=True)[:30]
 
 
-def get_next_sequence_filename_for_folder(folder_name: str, ext: str, pad_digits: int = 4) -> str:
+@exclusive_job("還原批次改名")
+def undo_rename_batch(batch_id: str) -> Dict[str, Any]:
+    from file_operations import execute
+    if not re.fullmatch(r"[A-Za-z0-9_-]+",batch_id):
+        raise ValueError("無效的批次 ID")
+    log_file = RENAME_LOG_DIR / f"rename_{batch_id}.json"
+    if log_file.exists():
+        data = json.loads(log_file.read_text(encoding="utf-8"))
+    else:
+        data = json.loads((DATA_DIR / "file_journals" / f"{batch_id}.json").read_text(encoding="utf-8"))
+        if data.get("kind") != "rename" or data.get("status") != "committed":
+            raise ValueError("此批次尚未完成，請先執行檔案復原")
+    if data.get("undone"):
+        return {"restored":0,"folder":data.get("folder")}
+    entries = [{"id":entry["id"],"old_rel_path":entry["new_rel_path"],"new_rel_path":entry["old_rel_path"]} for entry in data.get("entries",[])]
+    execute(GALLERY_ROOT, DATA_DIR, get_db, entries, kind="undo")
+    data["undone"] = True
+    atomic_json(log_file,data)
+    log_operation(category="rename",action="還原批次改名",summary=f"還原 {len(entries)} 張圖片",affected_count=len(entries),details={"batch_id":batch_id})
+    return {"restored":len(entries),"folder":data.get("folder")}
+
+
+def get_folder_sequence_state(folder_name: str, conn=None) -> Tuple[str, int, str]:
     """
-    當把新圖片「歸檔移入繪師資料夾」時，自動算出該資料夾最後一號 + 1 的檔名：
-    例如資料夾內最後一張是 20230515_0336_千種みのり.jpg，
-    新移入的圖片就會自動命名為 20230515_0337_千種みのり.jpg（接在最後，絕不打亂順序！）
+    取得指定繪師資料夾目前的 (base_date, max_seq, artist_label)，
+    供批次歸檔在記憶體中連續遞增流水號，避免每移一張圖就重新查詢一次資料庫。
     """
-    conn = get_db()
-    rows = conn.execute(
-        "SELECT id, rel_path, filename, mtime FROM images WHERE folder = ?",
-        (folder_name,),
-    ).fetchall()
-    conn.close()
+    own_conn = False
+    if conn is None:
+        conn = get_db()
+        own_conn = True
+    try:
+        rows = conn.execute(
+            "SELECT id, rel_path, filename, mtime FROM images WHERE folder = ?",
+            (folder_name,),
+        ).fetchall()
+    finally:
+        if own_conn:
+            conn.close()
 
     files_info = [dict(r) for r in rows]
     artist_label = clean_artist_display_name(folder_name)
@@ -417,6 +429,16 @@ def get_next_sequence_filename_for_folder(folder_name: str, ext: str, pad_digits
             if m.group(1) > base_date:
                 base_date = m.group(1)
 
+    return base_date, max_seq, artist_label
+
+
+def get_next_sequence_filename_for_folder(folder_name: str, ext: str, pad_digits: int = 4) -> str:
+    """
+    當把新圖片「歸檔移入繪師資料夾」時，自動算出該資料夾最後一號 + 1 的檔名：
+    例如資料夾內最後一張是 20230515_0336_千種みのり.jpg，
+    新移入的圖片就會自動命名為 20230515_0337_千種みのり.jpg（接在最後，絕不打亂順序！）
+    """
+    base_date, max_seq, artist_label = get_folder_sequence_state(folder_name)
     next_seq = max_seq + 1
     actual_pad = max(pad_digits, len(str(next_seq)))
     return f"{base_date}_{str(next_seq).zfill(actual_pad)}_{artist_label}{ext}"

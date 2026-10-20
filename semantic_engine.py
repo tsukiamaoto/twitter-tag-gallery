@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-標籤相關性分析與 Gemini Flash 語意處理引擎 (semantic_engine.py)
+標籤相關性分析與 MCP 語意處理引擎 (semantic_engine.py)
 功能：
 1. 計算圖庫內所有標籤的共現率 (Co-occurrence)、Jaccard 相似度與互資訊 (PMI)，
    找出「某畫師最常畫的角色/服裝」、「某標籤最常搭配的相關標籤」。
-2. 支援透過 Gemini Flash (google-generativeai / Antigravity SDK) 進行：
+2. 支援由 Antigravity 或 Gemini CLI 經 MCP 處理：
    - 自然語言意圖展開為多重標籤組合搜尋 (例如「白髮紅瞳的兔女郎或女僕」 -> 自動推理出對應 Danbooru 標籤組合)
    - 自動為未翻譯的英文/日文標籤生成精準的繁體中文翻譯並寫回資料庫
    - 將零散的視覺標籤歸納為高階「主題合成標籤」(例如：黑絲美腿、泳裝特輯、女僕裝、蔚藍檔案等)
@@ -18,6 +18,7 @@ from typing import List, Dict, Any, Optional, Tuple
 
 from database import get_db, ensure_tag, refresh_tag_counts
 from zh_dict import TAG_ZH_DICT, get_tag_zh
+from background_work import exclusive_job, background_checkpoint
 
 # 內建高階語意主題叢集規則 (即使離線或透過 MCP 皆可秒級聚合相關性標籤)
 SEMANTIC_THEME_CLUSTERS = {
@@ -256,6 +257,7 @@ def semantic_search_expand(query_text: str) -> Dict[str, Any]:
     }
 
 
+@exclusive_job("語意主題標籤整理")
 def apply_semantic_theme_tags_batch() -> Dict[str, Any]:
     """
     自動掃描圖庫中所有已打標的圖片，根據標籤相關性叢集 (SEMANTIC_THEME_CLUSTERS)，
@@ -263,137 +265,88 @@ def apply_semantic_theme_tags_batch() -> Dict[str, Any]:
     並補齊所有已知標籤的繁體中文翻譯。
     """
     conn = get_db()
-    tag_cache: Dict[str, int] = {}
-    for r in conn.execute("SELECT id, name FROM tags"):
-        tag_cache[r["name"]] = r["id"]
+    try:
+        tag_cache: Dict[str, int] = {}
+        for r in conn.execute("SELECT id, name FROM tags"):
+            tag_cache[r["name"]] = r["id"]
 
-    # Update any missing zh_name from TAG_ZH_DICT
-    zh_updated = 0
-    with conn:
-        for r in conn.execute("SELECT id, name, category, zh_name FROM tags"):
-            if not r["zh_name"]:
-                zh = get_tag_zh(r["name"], r["category"])
-                if zh:
-                    conn.execute("UPDATE tags SET zh_name = ? WHERE id = ?", (zh, r["id"]))
-                    zh_updated += 1
+        zh_updated = 0
+        links_added = 0
+        changed_theme_ids = set()
+        themes_applied = {}
+        old_rules={row[0] for row in conn.execute("SELECT theme FROM semantic_rules")}
+        for obsolete in old_rules-set(SEMANTIC_THEME_CLUSTERS):
+            tid=tag_cache.get(obsolete)
+            with conn:
+                if tid:
+                    conn.execute("DELETE FROM image_tags WHERE tag_id=? AND source='semantic'",(tid,))
+                    changed_theme_ids.add(tid)
+                conn.execute("DELETE FROM semantic_rules WHERE theme=?",(obsolete,))
 
-    theme_links = []
-    themes_applied = {}
+        with conn:
+            for r in conn.execute("SELECT id, name, category, zh_name FROM tags").fetchall():
+                if not r["zh_name"]:
+                    zh = get_tag_zh(r["name"], r["category"])
+                    if zh:
+                        conn.execute("UPDATE tags SET zh_name = ? WHERE id = ?", (zh, r["id"]))
+                        zh_updated += 1
 
-    for theme_name, info in SEMANTIC_THEME_CLUSTERS.items():
-        core_tags = info["core_tags"]
-        placeholders = ",".join(["?"] * len(core_tags))
-        rows = conn.execute(
-            f"""
-            SELECT DISTINCT it.image_id
-            FROM image_tags it
-            JOIN tags t ON t.id = it.tag_id
-            WHERE t.name IN ({placeholders})
-            """,
-            core_tags,
-        ).fetchall()
+        for theme_name, info in SEMANTIC_THEME_CLUSTERS.items():
+            background_checkpoint()
+            core_tags = info["core_tags"]
+            placeholders = ",".join(["?"] * len(core_tags))
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT it.image_id
+                FROM image_tags it
+                JOIN tags t ON t.id = it.tag_id
+                WHERE t.name IN ({placeholders})
+                """,
+                core_tags,
+            ).fetchall()
 
-        if rows:
-            tid_theme = ensure_tag(conn, tag_cache, theme_name, "general")
-            conn.execute("UPDATE tags SET zh_name = ? WHERE id = ?", (theme_name, tid_theme))
-            for r in rows:
-                theme_links.append((r["image_id"], tid_theme, 1.0, "semantic"))
-            themes_applied[theme_name] = len(rows)
+            tid_existing = tag_cache.get(theme_name)
+            if tid_existing:
+                desired = {row["image_id"] for row in rows}
+                stale = [row[0] for row in conn.execute("SELECT image_id FROM image_tags WHERE tag_id=? AND source='semantic'",(tid_existing,)) if row[0] not in desired]
+                for start in range(0,len(stale),500):
+                    with conn:
+                        conn.executemany("DELETE FROM image_tags WHERE image_id=? AND tag_id=? AND source='semantic'",[(iid,tid_existing) for iid in stale[start:start+500]])
+                changed_theme_ids.add(tid_existing)
 
-    with conn:
-        if theme_links:
-            conn.executemany(
-                "INSERT OR IGNORE INTO image_tags (image_id, tag_id, confidence, source) VALUES (?, ?, ?, ?)",
-                theme_links,
-            )
-        refresh_tag_counts(conn)
+            if rows:
+                with conn:
+                    tid_theme = ensure_tag(conn, tag_cache, theme_name, "general")
+                    conn.execute("UPDATE tags SET zh_name = ? WHERE id = ?", (theme_name, tid_theme))
+                existing = {r[0] for r in conn.execute("SELECT image_id FROM image_tags WHERE tag_id = ?", (tid_theme,))}
+                theme_links = [(r["image_id"], tid_theme, 1.0, "semantic") for r in rows if r["image_id"] not in existing]
+                themes_applied[theme_name] = len(rows)
+                changed_theme_ids.add(tid_theme)
+                for start in range(0, len(theme_links), 500):
+                    # Yield outside transactions, so foreground tag edits can write.
+                    background_checkpoint()
+                    with conn:
+                        added = conn.executemany(
+                            "INSERT OR IGNORE INTO image_tags (image_id, tag_id, confidence, source) VALUES (?, ?, ?, ?)",
+                            theme_links[start:start + 500],
+                        )
+                        links_added += added.rowcount
+            import hashlib
+            rule_hash=hashlib.sha256(json.dumps(info,sort_keys=True,ensure_ascii=False).encode("utf-8")).hexdigest()
+            with conn:
+                conn.execute("INSERT INTO semantic_rules VALUES(?,?) ON CONFLICT(theme) DO UPDATE SET rule_hash=excluded.rule_hash",(theme_name,rule_hash))
 
-    conn.close()
+        with conn:
+            for tid in changed_theme_ids:
+                conn.execute(
+                    "UPDATE tags SET post_count = (SELECT COUNT(*) FROM image_tags WHERE tag_id = ?) WHERE id = ?",
+                    (tid, tid),
+                )
+
+    finally:
+        conn.close()
     return {
         "zh_translations_updated": zh_updated,
-        "theme_links_added": len(theme_links),
+        "theme_links_added": links_added,
         "themes_summary": themes_applied,
-    }
-
-
-def call_gemini_flash_for_tags(prompt_task: str, api_key: Optional[str] = None) -> Dict[str, Any]:
-    """
-    若環境變數 GEMINI_API_KEY / GOOGLE_API_KEY 或傳入 api_key 存在，
-    可直接呼叫 Gemini Flash 模型對圖庫中的標籤進行相關性語意分析與自動翻譯。
-    同時也支援透過 Antigravity MCP 直接由 Antigravity Agent 的 Gemini Flash 處理。
-    """
-    key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    conn = get_db()
-    top_tags = conn.execute(
-        "SELECT name, category, zh_name, post_count FROM tags WHERE post_count > 0 ORDER BY post_count DESC LIMIT 200"
-    ).fetchall()
-    conn.close()
-
-    tag_summary = [
-        {"name": r["name"], "category": r["category"], "zh": r["zh_name"], "count": r["post_count"]}
-        for r in top_tags
-    ]
-
-    if not key:
-        return {
-            "mode": "mcp_or_local_graph",
-            "message": "已準備好標籤共現圖譜！你可以在 Antigravity 對話框直接請 Gemini Flash 透過 MCP 工具處理，或在下方填入 API Key 由網頁直接呼叫。",
-            "top_tags_sample": tag_summary[:30],
-        }
-
-    import google.generativeai as genai
-    genai.configure(api_key=key)
-    model = genai.GenerativeModel("gemini-2.5-flash")
-
-    sys_prompt = (
-        "你是一個專門整理二次元插畫圖庫 (Twitter/Pixiv/Danbooru) 的標籤相關性 AI 助手。\n"
-        f"目前圖庫的前 200 個高頻標籤如下：\n{json.dumps(tag_summary, ensure_ascii=False)}\n\n"
-        f"使用者需求：{prompt_task}\n"
-        "請回傳 JSON 格式：\n"
-        "{\n"
-        '  "analysis": "針對使用者需求的標籤相關性分析說明",\n'
-        '  "recommended_include_tags": ["建議篩選的標籤name清單"],\n'
-        '  "recommended_exclude_tags": ["建議排除的標籤name清單"],\n'
-        '  "new_zh_translations": {"英文tag_name": "繁體中文翻譯"},\n'
-        '  "suggested_theme_groups": [{"theme_name": "主題:名稱", "member_tags": ["tag1", "tag2"]}]\n'
-        "}"
-    )
-    resp = model.generate_content(
-        sys_prompt,
-        generation_config={"response_mime_type": "application/json"},
-    )
-    parsed = json.loads(resp.text)
-
-    # Automatically apply any new translations and theme groups returned by Gemini Flash!
-    conn = get_db()
-    tag_cache: Dict[str, int] = {}
-    for r in conn.execute("SELECT id, name FROM tags"):
-        tag_cache[r["name"]] = r["id"]
-
-    with conn:
-        for eng, zh in parsed.get("new_zh_translations", {}).items():
-            conn.execute("UPDATE tags SET zh_name = ? WHERE name = ? AND zh_name = ''", (zh, eng))
-
-        for tg in parsed.get("suggested_theme_groups", []):
-            tname = tg.get("theme_name", "").strip()
-            members = tg.get("member_tags", [])
-            if tname and members:
-                placeholders = ",".join(["?"] * len(members))
-                rows = conn.execute(
-                    f"SELECT DISTINCT it.image_id FROM image_tags it JOIN tags t ON t.id = it.tag_id WHERE t.name IN ({placeholders})",
-                    members,
-                ).fetchall()
-                if rows:
-                    tid = ensure_tag(conn, tag_cache, tname, "general")
-                    conn.execute("UPDATE tags SET zh_name = ? WHERE id = ?", (tname, tid))
-                    conn.executemany(
-                        "INSERT OR IGNORE INTO image_tags (image_id, tag_id, confidence, source) VALUES (?, ?, 1.0, 'gemini_flash')",
-                        [(r["image_id"], tid) for r in rows],
-                    )
-        refresh_tag_counts(conn)
-    conn.close()
-
-    return {
-        "mode": "gemini_flash_direct",
-        "result": parsed,
     }

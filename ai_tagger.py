@@ -15,8 +15,15 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
 import numpy as np
+from model_control import operation as model_operation, configure_directml, snapshot as model_snapshot
+from processing_state import record as record_processing, AI_MODEL_VERSION
+from background_work import update_job
 import requests
 from PIL import Image, ImageFile
+from background_work import (
+    BackgroundBusy, acquire_job, exclusive_job, start_job_thread,
+    background_checkpoint, media_io,
+)
 
 from database import (
     GALLERY_ROOT,
@@ -24,6 +31,8 @@ from database import (
     get_db,
     ensure_tag,
     refresh_tag_counts,
+    run_db_write_with_retry,
+    log_operation,
 )
 from zh_dict import (
     DANBOORU_ARTIST_TO_FOLDER,
@@ -40,6 +49,11 @@ PAD_COLOR = (124, 116, 104)
 
 
 def preprocess_image_fast(image_path: str, image_size: int = 512) -> Optional[np.ndarray]:
+    with media_io(background=True):
+        return _preprocess_image(image_path, image_size)
+
+
+def _preprocess_image(image_path: str, image_size: int = 512) -> Optional[np.ndarray]:
     """將圖片預處理為 (1, 3, 512, 512) float32 Tensor，保持長寬比並做 ImageNet 標準化"""
     try:
         with Image.open(image_path) as img:
@@ -93,6 +107,7 @@ class AITaggerEngine:
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
 
+    @model_operation("loading")
     def ensure_model_loaded(self):
         if self.model_loaded and self.session is not None:
             return
@@ -142,7 +157,10 @@ class AITaggerEngine:
         providers.append("CPUExecutionProvider")
 
         sess_opts = ort.SessionOptions()
+        sess_opts.intra_op_num_threads = 2
+        sess_opts.inter_op_num_threads = 1
         sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        configure_directml(sess_opts,ort,providers)
 
         self.session = ort.InferenceSession(onnx_path, sess_options=sess_opts, providers=providers)
         self.active_provider = self.session.get_providers()[0]
@@ -160,6 +178,7 @@ class AITaggerEngine:
             "message": f"已成功將 AI 視覺模型載入顯卡記憶體 ({self.active_provider})",
         }
 
+    @model_operation("inference")
     def predict_single(
         self,
         tensor: np.ndarray,
@@ -247,6 +266,12 @@ class AITaggerEngine:
                     break
                 time.sleep(0.1)
 
+        if stop_running_task and self.running:
+            return {"status":"busy","message":"正在停止推論；請待任務結束後再卸載","model_loaded":self.model_loaded}
+        return self._unload_model_now(delete_disk_files,stop_running_task)
+
+    @model_operation("unloading")
+    def _unload_model_now(self,delete_disk_files=False,stop_running_task=True):
         with self._lock:
             was_loaded = self.model_loaded
             self.session = None
@@ -313,6 +338,10 @@ class AITaggerEngine:
         with self._lock:
             if self.running:
                 return {"status": "already_running", "message": "智慧標籤任務已在執行中"}
+            try:
+                lease = acquire_job("AI 批次打標")
+            except BackgroundBusy as exc:
+                return exc.response()
             self.running = True
             self.stop_requested = False
             self.processed_count = 0
@@ -345,9 +374,18 @@ class AITaggerEngine:
                 run_decensor,
                 decensor_save_mode,
             ),
+            kwargs={"_job_lease": lease},
             daemon=True,
         )
-        self._thread.start()
+        lease.publish(force=True,recipe={"kind":"ai","options":{"scope":scope,"limit":limit,"general_thresh":general_thresh,"artist_thresh":artist_thresh,
+                      "auto_move_to_artist_folder":auto_move_to_artist_folder,"auto_unload":auto_unload,"run_local_ai":run_local_ai,
+                      "run_reverse_search_calibrate":run_reverse_search_calibrate,"reverse_search_limit":reverse_search_limit,"min_similarity":min_similarity,
+                      "run_semantic_themes":run_semantic_themes,"run_decensor":run_decensor,"decensor_save_mode":decensor_save_mode}})
+        try:
+            start_job_thread(self._thread, lease)
+        except BaseException:
+            self.running = False
+            raise
         return {
             "status": "started",
             "scope": scope,
@@ -377,6 +415,7 @@ class AITaggerEngine:
             pass
         return {
             "running": self.running,
+            "lifecycle": model_snapshot(),
             "model_loaded": self.model_loaded or dec_loaded,
             "disk_cached": disk_cached,
             "disk_size_mb": disk_size_mb,
@@ -388,6 +427,7 @@ class AITaggerEngine:
             "current_file": self.current_file,
         }
 
+    @exclusive_job("AI 批次打標")
     def _batch_worker(
         self,
         scope: str,
@@ -405,28 +445,49 @@ class AITaggerEngine:
         run_decensor: bool = False,
         decensor_save_mode: str = "new_copy",
     ):
+        ai_failures_count=0
         try:
             self.current_file = ""
             ai_rows = []
             rev_rows = []
+            low_conf_rev_candidates: Dict[int, Dict[str, Any]] = {}
 
             # 若勾選第一階段本機 AI 打標，第一時間先載入模型至 GPU，確保使用者立即看到模型載入就緒！
             if run_local_ai and not self.stop_requested:
                 self.ensure_model_loaded()
 
             conn = get_db()
+            # 查詢目前已具備可靠畫師標籤的圖片集合（避免本機 AI 誤覆蓋或重複排入慢速搜圖）
+            verified_artist_img_ids = set(
+                r[0]
+                for r in conn.execute(
+                    """
+                    SELECT DISTINCT it.image_id
+                    FROM image_tags it
+                    JOIN tags t ON it.tag_id = t.id
+                    WHERE t.category = 'artist'
+                      AND it.source IN ('pixiv', 'saucenao', 'iqdb', 'danbooru', 'twitter', 'gemini_mcp', 'folder', 'manual', 'filename')
+                    """
+                ).fetchall()
+            )
+
             # 1. 準備階段一 (本機 GPU AI 視覺打標) 目標清單
+            # 分開判定「缺視覺內容標籤 (general/character/copyright)」與「缺畫師標籤 (artist)」
             if run_local_ai and not self.stop_requested:
                 limit_sql = f" LIMIT {int(limit)}" if (limit and int(limit) > 0) else ""
                 if scope == "root_untagged":
-                    # 優先抓取根目錄 ai_tagged = 0 或尚未有畫師標籤的圖片
                     sql = f"""
                         SELECT i.id, i.rel_path, i.filename, i.folder
                         FROM images i
-                        WHERE i.media_type IN ('image', 'gif')
+                        WHERE i.missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=i.id AND p.stage='ai' AND p.status='failed' AND p.retry_at>strftime('%s','now')) AND i.media_type IN ('image', 'gif')
                           AND i.folder = ''
                           AND (
                               i.ai_tagged = 0
+                              OR NOT EXISTS (
+                                  SELECT 1 FROM image_tags it
+                                  JOIN tags t ON it.tag_id = t.id
+                                  WHERE it.image_id = i.id AND t.category IN ('general', 'character', 'copyright')
+                              )
                               OR NOT EXISTS (
                                   SELECT 1 FROM image_tags it
                                   JOIN tags t ON it.tag_id = t.id
@@ -436,52 +497,89 @@ class AITaggerEngine:
                         ORDER BY i.ai_tagged ASC, i.mtime DESC
                         {limit_sql}
                     """
-                    ai_rows = conn.execute(sql).fetchall()
+                    ai_rows = [dict(r) for r in conn.execute(sql).fetchall()]
                     if not ai_rows:
-                        ai_rows = conn.execute(
-                            f"SELECT id, rel_path, filename, folder FROM images WHERE media_type IN ('image', 'gif') AND folder = '' ORDER BY mtime DESC{limit_sql}"
-                        ).fetchall()
+                        ai_rows = [
+                            dict(r)
+                            for r in conn.execute(
+                                f"SELECT id, rel_path, filename, folder FROM images WHERE missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=images.id AND p.stage='ai' AND p.status='failed' AND p.retry_at>strftime('%s','now')) AND media_type IN ('image', 'gif') AND folder = '' ORDER BY mtime DESC{limit_sql}"
+                            ).fetchall()
+                        ]
                 elif scope == "all_untagged":
                     sql = f"""
                         SELECT i.id, i.rel_path, i.filename, i.folder
                         FROM images i
-                        WHERE i.media_type IN ('image', 'gif')
+                        WHERE i.missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=i.id AND p.stage='ai' AND p.status='failed' AND p.retry_at>strftime('%s','now')) AND i.media_type IN ('image', 'gif')
                           AND (
                               i.ai_tagged = 0
                               OR NOT EXISTS (
                                   SELECT 1 FROM image_tags it
-                                  WHERE it.image_id = i.id AND it.source = 'ai'
+                                  JOIN tags t ON it.tag_id = t.id
+                                  WHERE it.image_id = i.id AND t.category IN ('general', 'character', 'copyright')
+                              )
+                              OR (
+                                  i.folder = ''
+                                  AND NOT EXISTS (
+                                      SELECT 1 FROM image_tags it
+                                      JOIN tags t ON it.tag_id = t.id
+                                      WHERE it.image_id = i.id AND t.category = 'artist'
+                                  )
                               )
                           )
                         ORDER BY i.ai_tagged ASC, i.mtime DESC
                         {limit_sql}
                     """
-                    ai_rows = conn.execute(sql).fetchall()
+                    ai_rows = [dict(r) for r in conn.execute(sql).fetchall()]
                 elif scope == "root_all":
-                    ai_rows = conn.execute(
-                        f"SELECT id, rel_path, filename, folder FROM images WHERE media_type IN ('image', 'gif') AND folder = '' ORDER BY mtime DESC{limit_sql}"
-                    ).fetchall()
+                    ai_rows = [
+                        dict(r)
+                        for r in conn.execute(
+                            f"SELECT id, rel_path, filename, folder FROM images WHERE missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=images.id AND p.stage='ai' AND p.status='failed' AND p.retry_at>strftime('%s','now')) AND media_type IN ('image', 'gif') AND folder = '' ORDER BY mtime DESC{limit_sql}"
+                        ).fetchall()
+                    ]
                 elif scope == "ai_low_conf":
-                    ai_rows = conn.execute(
-                        f"SELECT id, rel_path, filename, folder FROM images WHERE media_type IN ('image', 'gif') AND folder = '' AND ai_tagged = 0 ORDER BY mtime DESC{limit_sql}"
-                    ).fetchall()
+                    ai_rows = [
+                        dict(r)
+                        for r in conn.execute(
+                            f"""
+                            SELECT i.id, i.rel_path, i.filename, i.folder
+                            FROM images i
+                            WHERE i.missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=i.id AND p.stage='ai' AND p.status='failed' AND p.retry_at>strftime('%s','now')) AND i.media_type IN ('image', 'gif')
+                              AND (
+                                  i.ai_tagged = 0
+                                  OR NOT EXISTS (
+                                      SELECT 1 FROM image_tags it
+                                      JOIN tags t ON it.tag_id = t.id
+                                      WHERE it.image_id = i.id AND t.category IN ('general', 'character', 'copyright')
+                                  )
+                              )
+                            ORDER BY i.ai_tagged ASC, i.mtime DESC
+                            {limit_sql}
+                            """
+                        ).fetchall()
+                    ]
 
-            # 2. 準備階段二 (以圖搜圖 & Gemini 畫師校正) 目標清單
+            if scope in ("root_untagged","all_untagged") and ai_rows:
+                pending = {row[0] for row in conn.execute("SELECT id FROM images WHERE ai_tagged=0 AND missing_since IS NULL")}
+                ai_rows = [row for row in ai_rows if row["id"] in pending]
+
+            # 2. 準備階段二 (以圖搜圖 & Gemini 畫師校正) 基礎候選清單
             if run_reverse_search_calibrate and not self.stop_requested:
                 rev_limit_val = int(reverse_search_limit) if reverse_search_limit and int(reverse_search_limit) > 0 else 30
                 if scope == "ai_low_conf":
                     rev_sql = """
                         SELECT DISTINCT i.id, i.rel_path, i.filename, i.folder
                         FROM images i
-                        JOIN image_tags it ON i.id = it.image_id
-                        JOIN tags t ON it.tag_id = t.id
-                        WHERE i.media_type IN ('image', 'gif')
-                          AND t.category = 'artist' AND it.source = 'ai'
+                        LEFT JOIN image_tags it ON i.id = it.image_id
+                        LEFT JOIN tags t ON it.tag_id = t.id AND t.category = 'artist'
+                        WHERE i.missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=i.id AND p.stage='ai' AND p.status='failed' AND p.retry_at>strftime('%s','now')) AND i.media_type IN ('image', 'gif')
+                          AND i.folder = ''
                           AND i.id NOT IN (
                               SELECT it2.image_id FROM image_tags it2
                               JOIN tags t2 ON it2.tag_id = t2.id
                               WHERE t2.category = 'artist' AND it2.source IN ('pixiv', 'saucenao', 'iqdb', 'danbooru', 'twitter', 'gemini_mcp', 'folder', 'manual')
                           )
+                          AND (it.confidence IS NULL OR it.confidence < 0.70 OR it.source = 'ai')
                         ORDER BY i.mtime DESC
                         LIMIT ?
                     """
@@ -489,20 +587,8 @@ class AITaggerEngine:
                     rev_sql = """
                         SELECT i.id, i.rel_path, i.filename, i.folder
                         FROM images i
-                        WHERE i.media_type IN ('image', 'gif')
-                          AND i.id NOT IN (
-                              SELECT it.image_id FROM image_tags it
-                              JOIN tags t ON it.tag_id = t.id
-                              WHERE t.category = 'artist' AND it.source IN ('pixiv', 'saucenao', 'iqdb', 'danbooru', 'twitter', 'gemini_mcp', 'folder', 'manual')
-                          )
-                        ORDER BY i.mtime DESC
-                        LIMIT ?
-                    """
-                else:
-                    rev_sql = """
-                        SELECT i.id, i.rel_path, i.filename, i.folder
-                        FROM images i
-                        WHERE i.media_type IN ('image', 'gif') AND i.folder = ''
+                        WHERE i.missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=i.id AND p.stage='ai' AND p.status='failed' AND p.retry_at>strftime('%s','now')) AND i.media_type IN ('image', 'gif')
+                          AND i.folder = ''
                           AND i.id NOT IN (
                               SELECT it.image_id FROM image_tags it
                               JOIN tags t ON it.tag_id = t.id
@@ -513,27 +599,48 @@ class AITaggerEngine:
                           i.mtime DESC
                         LIMIT ?
                     """
-                rev_rows = conn.execute(rev_sql, (rev_limit_val,)).fetchall()
+                else:
+                    rev_sql = """
+                        SELECT i.id, i.rel_path, i.filename, i.folder
+                        FROM images i
+                        WHERE i.missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=i.id AND p.stage='ai' AND p.status='failed' AND p.retry_at>strftime('%s','now')) AND i.media_type IN ('image', 'gif') AND i.folder = ''
+                          AND i.id NOT IN (
+                              SELECT it.image_id FROM image_tags it
+                              JOIN tags t ON it.tag_id = t.id
+                              WHERE t.category = 'artist' AND it.source IN ('pixiv', 'saucenao', 'iqdb', 'danbooru', 'twitter', 'gemini_mcp', 'folder', 'manual')
+                          )
+                        ORDER BY
+                          CASE WHEN i.pixiv_id IS NULL THEN 0 ELSE 1 END,
+                          i.mtime DESC
+                        LIMIT ?
+                    """
+                rev_rows = [dict(r) for r in conn.execute(rev_sql, (rev_limit_val,)).fetchall()]
             conn.close()
 
-            total_steps = len(ai_rows) + len(rev_rows) + (1 if run_semantic_themes else 0)
+            total_steps = len(ai_rows) + len(rev_rows) + (1 if run_semantic_themes else 0) + (1 if run_decensor else 0)
             self.total_target = max(1, total_steps)
             self.processed_count = 0
 
-            if len(ai_rows) == 0 and len(rev_rows) == 0 and not run_semantic_themes:
+            if len(ai_rows) == 0 and len(rev_rows) == 0 and not run_semantic_themes and not run_decensor:
                 self.status_message = "沒有符合條件的待分析或待校正圖片"
                 self.running = False
                 return
 
             t_start = time.time()
             ai_done_count = 0
+            danbooru_md5_found = 0
             rev_found_count = 0
             rev_purged_count = 0
             moved_total = 0
             pending_moves: Dict[str, List[int]] = {}
 
             # =========================================================================
-            # 階段 ①：本機 GPU AI 視覺打標 (Camie Tagger v2)
+            # 階段 ①：三段式智慧分流 — 第 1 段：本機 GPU AI 視覺打標 (Camie Tagger v2)
+            # 修正重點：
+            # 1) CPU 預處理與 GPU 推論期間不開啟資料庫連線、不執行 ensure_tag 隱式交易
+            # 2) 每 96 張開啟一次毫秒級短交易寫入，徹底消除 database is locked
+            # 3) 已在繪師子資料夾或已有可靠畫師的圖片，只補齊內容標籤，不覆蓋畫師，也不排入慢速搜圖
+            # 4) 僅將「無可靠畫師 或 AI 畫師/角色最高信心度 < 0.70」的根目錄圖片排入後續網路搜圖
             # =========================================================================
             if run_local_ai and len(ai_rows) > 0 and not self.stop_requested:
                 self.ensure_model_loaded()
@@ -541,13 +648,60 @@ class AITaggerEngine:
                     f"[1/3 本機 AI 視覺打標] 模型已載入 ({self.active_provider})，開始分析 {len(ai_rows):,} 張圖片..."
                 )
 
-                conn = get_db()
-                tag_cache: Dict[str, int] = {}
-                for r in conn.execute("SELECT id, name FROM tags"):
-                    tag_cache[r["name"]] = r["id"]
+                # 記憶體暫存區：(img_id, tname, cat, conf) 與 (sug_folder, img_id)
+                pending_tag_entries: List[Tuple[int, str, str, float]] = []
+                batch_img_updates: List[Tuple[Optional[str], int]] = []
+                failed_ai_ids = []
 
-                batch_db_links = []
-                batch_img_updates = []
+                def flush_ai_batch():
+                    if not batch_img_updates and not pending_tag_entries and not failed_ai_ids:
+                        return
+                    entries_snapshot = list(pending_tag_entries)
+                    updates_snapshot = list(batch_img_updates)
+                    failures_snapshot = list(failed_ai_ids)
+                    pending_tag_entries.clear()
+                    batch_img_updates.clear()
+                    failed_ai_ids.clear()
+
+                    db_conn = get_db()
+                    try:
+                        tag_cache: Dict[str, int] = {
+                            r["name"]: r["id"]
+                            for r in db_conn.execute("SELECT id, name FROM tags").fetchall()
+                        }
+
+                        def _do_flush(c):
+                            for _,iid in updates_snapshot:
+                                c.execute("DELETE FROM image_tags WHERE image_id=? AND source='ai'",(iid,))
+                            db_links = []
+                            for iid, tname, cat, conf in entries_snapshot:
+                                tid = ensure_tag(c, tag_cache, tname, cat)
+                                if tid > 0:
+                                    db_links.append((iid, tid, round(conf, 4), "ai"))
+                            if db_links:
+                                c.executemany(
+                                    """
+                                    INSERT INTO image_tags (image_id, tag_id, confidence, source)
+                                    VALUES (?, ?, ?, ?)
+                                    ON CONFLICT(image_id, tag_id) DO UPDATE SET
+                                    confidence = MAX(image_tags.confidence, excluded.confidence)
+                                    """,
+                                    db_links,
+                                )
+                            if updates_snapshot:
+                                c.executemany(
+                                    "UPDATE images SET ai_tagged = 1, suggested_folder = COALESCE(?, suggested_folder) WHERE id = ?",
+                                    updates_snapshot,
+                                )
+                            for _,iid in updates_snapshot:
+                                record_processing(c,iid,"ai","succeeded",model_version=AI_MODEL_VERSION)
+                            for iid in failures_snapshot:
+                                record_processing(c,iid,"ai","failed",error="圖片解碼失敗",retry_at=time.time()+300,model_version=AI_MODEL_VERSION)
+                            refresh_tag_counts(c)
+
+                        run_db_write_with_retry(db_conn, _do_flush)
+                    finally:
+                        db_conn.close()
 
                 def load_item(row_item):
                     full_p = str(GALLERY_ROOT / row_item["rel_path"])
@@ -557,18 +711,22 @@ class AITaggerEngine:
                 eff_gen_t = max(0.25, float(general_thresh))
                 eff_art_t = max(0.65, float(artist_thresh))
 
-                with ThreadPoolExecutor(max_workers=4) as pool:
-                    chunk_size = 24
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    chunk_size = 8
                     for c_start in range(0, len(ai_rows), chunk_size):
                         if self.stop_requested:
                             break
                         chunk = ai_rows[c_start : c_start + chunk_size]
                         for row_item, tensor in pool.map(load_item, chunk):
+                            background_checkpoint()
                             if self.stop_requested:
                                 break
 
                             img_id = row_item["id"]
+                            in_artist_subfolder = bool(row_item["folder"] and row_item["folder"].strip())
+                            has_verified_artist = in_artist_subfolder or (img_id in verified_artist_img_ids)
                             self.current_file = row_item["filename"]
+
                             if tensor is not None:
                                 preds, sug_folder = self.predict_single(
                                     tensor,
@@ -577,117 +735,168 @@ class AITaggerEngine:
                                     copyright_thresh=max(0.40, eff_gen_t),
                                     artist_thresh=eff_art_t,
                                 )
+                                best_artist_conf = 0.0
+                                best_char_conf = 0.0
                                 for tname, cat, conf in preds:
-                                    tid = ensure_tag(conn, tag_cache, tname, cat)
-                                    if tid > 0:
-                                        batch_db_links.append((img_id, tid, round(conf, 4), "ai"))
-                                        if cat == "artist" and tname.lower() in DANBOORU_ARTIST_TO_FOLDER:
-                                            folder_artist = DANBOORU_ARTIST_TO_FOLDER[tname.lower()]
-                                            tid_fa = ensure_tag(conn, tag_cache, folder_artist, "artist")
-                                            if tid_fa > 0:
-                                                batch_db_links.append((img_id, tid_fa, round(conf, 4), "ai"))
+                                    if cat == "artist":
+                                        best_artist_conf = max(best_artist_conf, conf)
+                                        # 若圖片已在繪師資料夾或已有可靠畫師，不讓 AI 猜測的畫師覆蓋或混入
+                                        if has_verified_artist:
+                                            continue
+                                    elif cat == "character":
+                                        best_char_conf = max(best_char_conf, conf)
 
-                                batch_img_updates.append((sug_folder, img_id))
-                                if auto_move_to_artist_folder and sug_folder and row_item["folder"] == "":
-                                    pending_moves.setdefault(sug_folder, []).append(img_id)
+                                    pending_tag_entries.append((img_id, tname, cat, conf))
+                                    if cat == "artist" and not has_verified_artist and tname.lower() in DANBOORU_ARTIST_TO_FOLDER:
+                                        folder_artist = DANBOORU_ARTIST_TO_FOLDER[tname.lower()]
+                                        pending_tag_entries.append((img_id, folder_artist, "artist", conf))
+
+                                # 若已有繪師資料夾，確保其資料夾名稱也作為可靠的 folder 來源畫師標籤
+                                effective_sug_folder = None if has_verified_artist else sug_folder
+                                batch_img_updates.append((effective_sug_folder, img_id))
+
+                                if auto_move_to_artist_folder and effective_sug_folder and not in_artist_subfolder:
+                                    pending_moves.setdefault(effective_sug_folder, []).append(img_id)
+
+                                # 第 2 & 3 段智慧分流判定：
+                                # 只有「尚未歸檔且無可靠畫師」或「在根目錄且 AI 畫師/角色信心度 < 0.70」才需要進入網路搜圖
+                                if not has_verified_artist and not in_artist_subfolder:
+                                    if best_artist_conf < 0.70 or best_char_conf < 0.70:
+                                        low_conf_rev_candidates[img_id] = row_item
                             else:
-                                batch_img_updates.append((None, img_id))
+                                failed_ai_ids.append(img_id)
+                                ai_failures_count+=1
 
                             ai_done_count += 1
                             self.processed_count += 1
+                            update_job(stage="本機 AI 分析",processed_count=self.processed_count,total_target=self.total_target,current_file=self.current_file,checkpoint={"last_image_id":img_id})
                             elapsed = max(0.001, time.time() - t_start)
-                            self.speed_img_per_sec = self.processed_count / elapsed
+                            self.speed_img_per_sec = ai_done_count / elapsed
                             self.status_message = (
                                 f"[1/3 本機 AI 視覺打標] 整體進度：{self.processed_count:,} / {self.total_target:,} "
                                 f"（已完成 AI 打標 {ai_done_count:,} / {len(ai_rows):,} 張，速度 {self.speed_img_per_sec:.1f} 張/秒）"
                             )
 
-                            if len(batch_img_updates) >= 24:
-                                with conn:
-                                    conn.executemany(
-                                        """
-                                        INSERT INTO image_tags (image_id, tag_id, confidence, source)
-                                        VALUES (?, ?, ?, ?)
-                                        ON CONFLICT(image_id, tag_id) DO UPDATE SET
-                                        confidence = MAX(image_tags.confidence, excluded.confidence)
-                                        """,
-                                        batch_db_links,
-                                    )
-                                    conn.executemany(
-                                        "UPDATE images SET ai_tagged = 1, suggested_folder = COALESCE(?, suggested_folder) WHERE id = ?",
-                                        batch_img_updates,
-                                    )
-                                batch_db_links.clear()
-                                batch_img_updates.clear()
+                            if len(batch_img_updates)+len(failed_ai_ids) >= 96:
+                                flush_ai_batch()
 
-                with conn:
-                    if batch_img_updates:
-                        conn.executemany(
-                            """
-                            INSERT INTO image_tags (image_id, tag_id, confidence, source)
-                            VALUES (?, ?, ?, ?)
-                            ON CONFLICT(image_id, tag_id) DO UPDATE SET
-                            confidence = MAX(image_tags.confidence, excluded.confidence)
-                            """,
-                            batch_db_links,
-                        )
-                        conn.executemany(
-                            "UPDATE images SET ai_tagged = 1, suggested_folder = COALESCE(?, suggested_folder) WHERE id = ?",
-                            batch_img_updates,
-                        )
-                    refresh_tag_counts(conn)
-                conn.close()
+                flush_ai_batch()
+                db_conn = get_db()
+                try:
+                    run_db_write_with_retry(db_conn, lambda c: refresh_tag_counts(c))
+                finally:
+                    db_conn.close()
 
             # 階段 ① 結束後，若開啟 auto_unload 立即先釋放 GPU VRAM，讓後續以圖搜圖完全不佔顯卡記憶體！
             if auto_unload and self.model_loaded and not self.stop_requested:
                 self.unload_model(delete_disk_files=False, stop_running_task=False)
 
             # =========================================================================
-            # 階段 ②：深度以圖搜圖 & Gemini 畫師與標籤校正 (Danbooru / IQDB / SauceNAO)
+            # 階段 ②：三段式智慧分流 — 第 2 & 3 段：
+            # 先執行 Danbooru 批次 MD5 高速精準秒查 (75 hashes/req)，
+            # 再針對仍無可靠畫師或 AI 信心度 < 0.70 的圖片執行深度以圖搜圖 (IQDB / SauceNAO)
             # =========================================================================
-            if run_reverse_search_calibrate and len(rev_rows) > 0 and not self.stop_requested:
-                from reverse_search import reverse_search_and_tag_image
-                saucenao_rate_limited = False
+            if run_reverse_search_calibrate and not self.stop_requested:
+                from reverse_search import (
+                    reverse_search_and_tag_image,
+                    search_danbooru_by_md5_batch,
+                    apply_danbooru_posts_batch_to_db,
+                )
 
-                for idx, r_item in enumerate(rev_rows):
-                    if self.stop_requested:
+                # 合併「原本選入的 rev_rows」與「階段 ① 判定信心度 < 0.70 且在根目錄的候選圖片」
+                rev_limit_val = int(reverse_search_limit) if reverse_search_limit and int(reverse_search_limit) > 0 else 30
+                merged_rev_map: Dict[int, Dict[str, Any]] = {}
+                for r_item in rev_rows:
+                    if not (r_item.get("folder") or "").strip():
+                        merged_rev_map[r_item["id"]] = dict(r_item)
+                for iid, r_item in low_conf_rev_candidates.items():
+                    if len(merged_rev_map) >= max(rev_limit_val, len(rev_rows)):
                         break
+                    merged_rev_map.setdefault(iid, dict(r_item))
 
-                    img_id = r_item["id"]
-                    self.current_file = r_item["filename"]
+                effective_rev_rows = list(merged_rev_map.values())[: max(rev_limit_val, len(rev_rows))]
+                self.total_target = max(
+                    1,
+                    len(ai_rows) + len(effective_rev_rows) + (1 if run_semantic_themes else 0),
+                )
+
+                if effective_rev_rows:
+                    # 2A. 先用 Danbooru Batch MD5 一次批次秒查所有候選圖 (75 張僅需 1 次 API 請求！)
                     self.status_message = (
-                        f"[2/3 以圖搜圖 & 畫師校正] 整體進度：{self.processed_count:,} / {self.total_target:,} "
-                        f"— 正在搜圖比對 ({idx + 1}/{len(rev_rows)}): {r_item['filename']}"
+                        f"[2/3 批次 MD5 雜湊秒查] 正在對 {len(effective_rev_rows)} 張待查圖片進行 Danbooru 批次 MD5 秒查..."
                     )
+                    id_to_full_path = {
+                        r["id"]: str(GALLERY_ROOT / r["rel_path"]) for r in effective_rev_rows
+                    }
+                    md5_matched_posts = search_danbooru_by_md5_batch(id_to_full_path, chunk_size=75)
+                    if md5_matched_posts:
+                        batch_res = apply_danbooru_posts_batch_to_db(
+                            md5_matched_posts,
+                            source_label="danbooru",
+                            purge_ai_artist=True,
+                        )
+                        danbooru_md5_found = batch_res.get("updated", 0)
+                        rev_found_count += danbooru_md5_found
+                        rev_purged_count += batch_res.get("purged_ai_tags", 0)
+                        if auto_move_to_artist_folder:
+                            for sug_f, iids in batch_res.get("suggested_moves", {}).items():
+                                pending_moves.setdefault(sug_f, []).extend(iids)
 
-                    use_sn = "" if saucenao_rate_limited else (saucenao_api_key or "")
-                    res = reverse_search_and_tag_image(
-                        image_id=img_id,
-                        saucenao_api_key=use_sn if not saucenao_rate_limited else None,
-                        min_similarity=min_similarity,
-                        fallback_to_ai=False,
-                        include_google_lens_url=False,
-                    )
-                    if res.get("rate_limited"):
-                        saucenao_rate_limited = True
+                    # 扣除已被 MD5 命中的圖片，僅對剩餘圖片進行慢速視覺搜圖 (IQDB / SauceNAO)
+                    remaining_rev_rows = []
+                    for r_item in effective_rev_rows:
+                        if r_item["id"] in md5_matched_posts:
+                            self.processed_count += 1
+                        else:
+                            remaining_rev_rows.append(r_item)
 
-                    if res.get("found"):
-                        rev_found_count += 1
-                        rev_purged_count += res.get("purged_wrong_ai_tags", 0)
-                        sug_f = res.get("suggested_folder")
-                        if auto_move_to_artist_folder and sug_f and r_item["folder"] == "":
-                            pending_moves.setdefault(sug_f, []).append(img_id)
+                    saucenao_rate_limited = False
+                    for idx, r_item in enumerate(remaining_rev_rows):
+                        if self.stop_requested:
+                            break
 
-                    self.processed_count += 1
-                    elapsed = max(0.001, time.time() - t_start)
-                    self.speed_img_per_sec = self.processed_count / elapsed
-                    self.status_message = (
-                        f"[2/3 以圖搜圖 & 畫師校正] 整體進度：{self.processed_count:,} / {self.total_target:,} "
-                        f"（搜圖認證 {rev_found_count} 位畫師 / 校正清除 {rev_purged_count} 個誤猜標籤）"
-                    )
+                        img_id = r_item["id"]
+                        self.current_file = r_item["filename"]
+                        self.status_message = (
+                            f"[2/3 以圖搜圖 & 畫師校正] 整體進度：{self.processed_count:,} / {self.total_target:,} "
+                            f"— 正在搜圖比對 ({idx + 1}/{len(remaining_rev_rows)}): {r_item['filename']}"
+                        )
 
-                    if idx < len(rev_rows) - 1 and not self.stop_requested:
-                        time.sleep(0.35)
+                        use_sn = "" if saucenao_rate_limited else (saucenao_api_key or "")
+                        res = reverse_search_and_tag_image(
+                            image_id=img_id,
+                            saucenao_api_key=use_sn if not saucenao_rate_limited else None,
+                            min_similarity=min_similarity,
+                            fallback_to_ai=False,
+                            include_google_lens_url=False,
+                            run_refresh_counts=False,
+                        )
+                        if res.get("rate_limited"):
+                            saucenao_rate_limited = True
+
+                        if res.get("found"):
+                            rev_found_count += 1
+                            rev_purged_count += res.get("purged_wrong_ai_tags", 0)
+                            sug_f = res.get("suggested_folder")
+                            if auto_move_to_artist_folder and sug_f and r_item["folder"] == "":
+                                pending_moves.setdefault(sug_f, []).append(img_id)
+
+                        self.processed_count += 1
+                        elapsed = max(0.001, time.time() - t_start)
+                        self.speed_img_per_sec = self.processed_count / elapsed
+                        self.status_message = (
+                            f"[2/3 以圖搜圖 & 畫師校正] 整體進度：{self.processed_count:,} / {self.total_target:,} "
+                            f"（MD5 秒查 {danbooru_md5_found} 張 + 搜圖認證 {rev_found_count - danbooru_md5_found} 位畫師 / 校正清除 {rev_purged_count} 個誤猜標籤）"
+                        )
+
+                        if idx < len(remaining_rev_rows) - 1 and not self.stop_requested:
+                            time.sleep(0.25)
+
+                    db_conn = get_db()
+                    try:
+                        run_db_write_with_retry(db_conn, lambda c: refresh_tag_counts(c))
+                    finally:
+                        db_conn.close()
 
             # =========================================================================
             # 階段 ③：語意相關性主題聚合 & 自動建立繪師資料夾歸檔
@@ -707,6 +916,7 @@ class AITaggerEngine:
             if run_decensor and not self.stop_requested:
                 try:
                     from decensor_engine import decensor_engine
+                    dec_limit = int(limit) if (limit and int(limit) > 0) else 100
                     conn = get_db()
                     cand_ids = [r["id"] for r in ai_rows] if ai_rows else [r["id"] for r in rev_rows]
                     if cand_ids:
@@ -719,9 +929,9 @@ class AITaggerEngine:
                             JOIN tags t ON it.tag_id = t.id
                             WHERE i.id IN ({placeholders})
                               AND t.name IN ('mosaic_censoring', 'bar_censor', 'censored')
-                            LIMIT 30
+                            LIMIT ?
                             """,
-                            cand_ids,
+                            (*cand_ids, dec_limit),
                         ).fetchall()
                     else:
                         censor_rows = conn.execute(
@@ -737,10 +947,15 @@ class AITaggerEngine:
                                   WHERE t2.name = 'AI去馬賽克'
                               )
                             ORDER BY i.mtime DESC
-                            LIMIT 20
-                            """
+                            LIMIT ?
+                            """,
+                            (dec_limit,),
                         ).fetchall()
                     conn.close()
+
+                    if censor_rows and not ai_rows and not rev_rows:
+                        self.total_target = len(censor_rows)
+                        self.processed_count = 0
 
                     for d_idx, c_row in enumerate(censor_rows):
                         if self.stop_requested:
@@ -753,140 +968,426 @@ class AITaggerEngine:
                             image_id=c_row["id"],
                             save_mode=decensor_save_mode or "new_copy",
                             mode="auto",
+                            refresh_counts=False,
                         )
                         if d_res.get("success"):
                             decensored_count += 1
+                        if not ai_rows and not rev_rows:
+                            self.processed_count = d_idx + 1
+
+                    if decensored_count > 0:
+                        db_conn = get_db()
+                        try:
+                            run_db_write_with_retry(db_conn, lambda c: refresh_tag_counts(c))
+                        finally:
+                            db_conn.close()
                 except Exception:
                     pass
 
             if auto_move_to_artist_folder and pending_moves and not self.stop_requested:
-                from app import move_images_to_folder
+                from gallery_service import move_images_to_folder
                 for target_f, iids in pending_moves.items():
                     unique_iids = list(dict.fromkeys(iids))
-                    m_res = move_images_to_folder(unique_iids, target_f, auto_rename=True)
+                    m_res = move_images_to_folder(unique_iids, target_f, auto_rename=True, refresh_counts=False)
                     moved_total += m_res.get("moved", 0)
+                db_conn = get_db()
+                try:
+                    run_db_write_with_retry(db_conn, lambda c: refresh_tag_counts(c))
+                finally:
+                    db_conn.close()
 
+            total_elapsed = round(time.time() - t_start, 2)
             if self.stop_requested:
                 self.status_message = (
-                    f"已暫停（完成 AI 打標 {ai_done_count} 張、以圖搜圖認證 {rev_found_count} 張、歸檔 {moved_total} 張）"
+                    f"已暫停（完成 AI 打標 {ai_done_count} 張、搜圖/MD5 認證 {rev_found_count} 張、歸檔 {moved_total} 張）"
                 )
             else:
                 dec_txt = f" ➔ AI 去馬賽克 {decensored_count} 張" if run_decensor else ""
                 self.status_message = (
                     f"✅ 智慧標籤處理完成！AI 打標 {ai_done_count} 張 ➔ "
-                    f"搜圖認證 {rev_found_count} 位畫師 (校正 {rev_purged_count} 標籤){dec_txt} ➔ "
+                    f"搜圖/MD5 認證 {rev_found_count} 位畫師 (校正 {rev_purged_count} 標籤){dec_txt} ➔ "
                     f"歸入繪師資料夾 {moved_total} 張"
                     + ("（已自動卸載模型釋放 VRAM）" if auto_unload else "")
                 )
+            if ai_failures_count:
+                self.status_message+=f"；{ai_failures_count} 張圖片解碼失敗，保留待重試"
+                update_job(status="failed",last_error=f"{ai_failures_count} 張圖片解碼失敗",stage="部分完成")
+            log_operation(
+                category="ai",
+                action="智慧標籤批次處理 (已暫停)" if self.stop_requested else "智慧標籤三段式批次處理",
+                summary=self.status_message,
+                status="warning" if self.stop_requested or ai_failures_count else "success",
+                affected_count=ai_done_count + rev_found_count + moved_total,
+                duration_sec=total_elapsed,
+                details={
+                    "scope": scope,
+                    "ai_tagged": ai_done_count,
+                    "danbooru_md5_found": danbooru_md5_found,
+                    "reverse_search_found": rev_found_count,
+                    "purged_wrong_ai_tags": rev_purged_count,
+                    "decensored_count": decensored_count if run_decensor else 0,
+                    "moved_to_artist_folders": moved_total,
+                    "speed_img_per_sec": round(self.speed_img_per_sec, 2),
+                    "provider": self.active_provider,
+                },
+            )
         except Exception as e:
             self.status_message = f"❌ 發生錯誤: {str(e)}"
+            update_job(status="failed",last_error=str(e))
+            log_operation(
+                category="ai",
+                action="智慧標籤批次處理",
+                summary=self.status_message,
+                status="error",
+                details={"scope": scope, "error": str(e)},
+            )
         finally:
             self.running = False
+            if "flush_ai_batch" in locals():
+                flush_ai_batch()
+            if self.stop_requested:
+                update_job(status="cancelled",stage="已停止")
             if auto_unload:
                 final_msg = self.status_message
                 self.unload_model(delete_disk_files=False, stop_running_task=False)
                 self.status_message = final_msg
 
 
-def lookup_pixiv_artists_batch(limit: int = 100, auto_move_to_artist_folder: bool = False) -> Dict[str, Any]:
+@exclusive_job("Pixiv 批次反查")
+def lookup_pixiv_artists_batch(
+    limit: int = 200,
+    auto_move_to_artist_folder: bool = False,
+    enable_google_web_fallback: bool = True,
+) -> Dict[str, Any]:
     """
-    針對檔名含有 Pixiv ID 的圖片，透過 Pixiv 公開 Ajax 介面反查真實繪師名稱與原作者標籤，
-    並同步填入 suggested_folder（或直接建立繪師資料夾歸檔）。
+    針對檔名含有 Pixiv ID 的圖片進行三層高速反查與救援：
+    1. 批次透過 Danbooru `pixiv:<id1>,<id2>,...` 介面一次秒查 40 個 Pixiv ID（即使 Pixiv 原作已 404 刪除也能救回約 85% 真實畫師與完整標籤！）
+    2. 對剩餘未命中的 Pixiv ID 透過平行執行緒呼叫 Pixiv 公開 Ajax 介面反查（網路 I/O 期間完全不持有資料庫鎖）
+    3. 若 Pixiv 已 404 刪除且 Danbooru 未收錄，自動啟動 Google Lens 搜圖 + Yande.re / Google 網頁線索救援與視覺搜圖
+    4. 所有查驗完畢的圖片（含確認 404 絕版作品）皆會寫入 `source IN ('pixiv', 'pixiv_checked')` 標記，徹底解除 LIMIT 佇列死鎖！
     """
+    from reverse_search import (
+        search_danbooru_by_pixiv_ids_batch,
+        search_danbooru_by_md5_batch,
+        apply_danbooru_posts_batch_to_db,
+        search_google_and_web_by_clues,
+        reverse_search_and_tag_image,
+        save_persistent_artist_cache,
+    )
+
+    t_pixiv_start = time.time()
     conn = get_db()
-    rows = conn.execute(
-        """
-        SELECT id, pixiv_id, filename, folder
-        FROM images
-        WHERE pixiv_id IS NOT NULL
-          AND id NOT IN (SELECT image_id FROM image_tags WHERE source = 'pixiv')
-        LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
+    rows = [
+        dict(r)
+        for r in conn.execute(
+            """
+            SELECT id, pixiv_id, rel_path, filename, folder
+            FROM images
+            WHERE pixiv_id IS NOT NULL
+              AND missing_since IS NULL
+              AND id NOT IN (
+                  SELECT image_id FROM image_tags WHERE source = 'pixiv'
+              )
+              AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=images.id AND p.stage='pixiv'
+                  AND (p.status='succeeded' OR p.retry_at > strftime('%s','now')))
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    ]
+    conn.close()
 
     if not rows:
-        conn.close()
         return {"checked": 0, "found": 0, "message": "所有含 Pixiv ID 的圖片皆已查詢過"}
 
-    tag_cache: Dict[str, int] = {}
-    for r in conn.execute("SELECT id, name FROM tags"):
-        tag_cache[r["name"]] = r["id"]
+    # 依 pixiv_id 分組，讓多頁作品 (_p0, _p1) 只查詢一次網路
+    pid_to_img_ids: Dict[str, List[int]] = {}
+    pid_to_sample_row: Dict[str, Dict[str, Any]] = {}
+    img_id_to_folder: Dict[int, str] = {}
+    id_to_full_path: Dict[int, str] = {}
 
+    for r in rows:
+        pid = str(r["pixiv_id"])
+        iid = r["id"]
+        pid_to_img_ids.setdefault(pid, []).append(iid)
+        pid_to_sample_row.setdefault(pid, r)
+        img_id_to_folder[iid] = r["folder"]
+        id_to_full_path[iid] = str(GALLERY_ROOT / r["rel_path"])
+
+    all_pids = list(pid_to_img_ids.keys())
+    found_works = 0
+    rescued_by_danbooru = 0
+    rescued_by_pixiv_api = 0
+    rescued_by_google_web = 0
+    pending_moves: Dict[str, List[int]] = {}
+    resolved_pids = set()
+
+    # =========================================================================
+    # 第 1 層：Danbooru 批次 `pixiv:<id>` + `md5` 高速反查 (不鎖 DB，一次查 40 個 ID)
+    # =========================================================================
+    danbooru_pid_map = search_danbooru_by_pixiv_ids_batch(all_pids, chunk_size=40)
+    matched_img_to_post: Dict[int, Dict[str, Any]] = {}
+    for pid, post in danbooru_pid_map.items():
+        resolved_pids.add(pid)
+        found_works += 1
+        rescued_by_danbooru += 1
+        for iid in pid_to_img_ids.get(pid, []):
+            matched_img_to_post[iid] = post
+
+    # 針對還沒被 pixiv_id 命中的圖片，順便跑一次批次 MD5 雜湊秒查
+    unmatched_id_to_path = {
+        iid: path
+        for pid, iids in pid_to_img_ids.items()
+        if pid not in resolved_pids
+        for iid in iids
+        if ( path := id_to_full_path.get(iid) )
+    }
+    if unmatched_id_to_path:
+        md5_posts = search_danbooru_by_md5_batch(unmatched_id_to_path, chunk_size=75)
+        for iid, post in md5_posts.items():
+            matched_img_to_post[iid] = post
+        for pid, iids in pid_to_img_ids.items():
+            if pid not in resolved_pids and any(iid in md5_posts for iid in iids):
+                resolved_pids.add(pid)
+                found_works += 1
+                rescued_by_danbooru += 1
+
+    if matched_img_to_post:
+        batch_res = apply_danbooru_posts_batch_to_db(
+            matched_img_to_post,
+            source_label="pixiv",
+            purge_ai_artist=True,
+        )
+        if auto_move_to_artist_folder:
+            for sug_f, iids in batch_res.get("suggested_moves", {}).items():
+                for iid in iids:
+                    if img_id_to_folder.get(iid, "") == "":
+                        pending_moves.setdefault(sug_f, []).append(iid)
+
+    # =========================================================================
+    # 第 2 層：對剩餘未命中的 Pixiv ID 執行平行 Pixiv Ajax 查詢 (8 執行緒，完全不開 DB)
+    # =========================================================================
+    remaining_pids = [pid for pid in all_pids if pid not in resolved_pids]
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Referer": "https://www.pixiv.net/",
     }
 
-    # Group by pixiv_id so multi-page works (_p0, _p1) only request once
-    pid_to_img_ids: Dict[str, List[int]] = {}
-    img_id_to_folder: Dict[int, str] = {}
-    for r in rows:
-        pid_to_img_ids.setdefault(r["pixiv_id"], []).append(r["id"])
-        img_id_to_folder[r["id"]] = r["folder"]
+    pixiv_api_results: Dict[str, Dict[str, Any]] = {}
+    not_found_404_pids: List[str] = []
+    pixiv_results = {}
 
-    found_works = 0
-    links = []
-    sug_updates = []
-    pending_moves: Dict[str, List[int]] = {}
-
-    for pid, img_ids in pid_to_img_ids.items():
+    def fetch_single_pixiv(pid: str) -> Tuple[str, int, Dict[str, Any]]:
         try:
             resp = requests.get(f"https://www.pixiv.net/ajax/illust/{pid}", headers=headers, timeout=6)
             if resp.status_code == 200:
-                body = resp.json().get("body", {})
-                if body:
-                    user_name = body.get("userName")
-                    if user_name:
-                        found_works += 1
-                        tid_artist = ensure_tag(conn, tag_cache, user_name, "artist")
-                        sug_folder = resolve_artist_folder_name(user_name)
-                        for iid in img_ids:
-                            links.append((iid, tid_artist, 1.0, "pixiv"))
-                            if sug_folder:
-                                sug_updates.append((sug_folder, iid))
-                                if auto_move_to_artist_folder and img_id_to_folder.get(iid, "") == "":
-                                    pending_moves.setdefault(sug_folder, []).append(iid)
+                body = resp.json().get("body", {}) or {}
+                return pid, 200, body
+            return pid, resp.status_code, {}
+        except Exception:
+            return pid, 0, {}
 
-                    tags_obj = body.get("tags", {}).get("tags", [])
-                    for t_item in tags_obj:
-                        t_str = t_item.get("tag")
-                        if t_str and t_str not in ("R-18", "オリジナル"):
-                            tid_t = ensure_tag(conn, tag_cache, t_str, "general")
+    if remaining_pids:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            for pid, status_code, body in pool.map(fetch_single_pixiv, remaining_pids):
+                pixiv_results[pid] = status_code
+                if status_code == 200 and body and body.get("userName"):
+                    pixiv_api_results[pid] = body
+                    resolved_pids.add(pid)
+                    found_works += 1
+                    rescued_by_pixiv_api += 1
+                elif status_code in (404, 410):
+                    not_found_404_pids.append(pid)
+                else:
+                    not_found_404_pids.append(pid)
+
+    # =========================================================================
+    # 第 3 層：針對 Pixiv 404 已刪除作品，啟動平行 Yande.re / Google 網頁線索與視覺搜圖救援
+    # =========================================================================
+    google_web_rescued: Dict[str, Dict[str, Any]] = {}
+    if enable_google_web_fallback and not_found_404_pids:
+        def _rescue_404_pid(pid: str) -> Tuple[str, Dict[str, Any]]:
+            sample_row = pid_to_sample_row.get(pid)
+            if not sample_row:
+                return pid, {}
+            try:
+                clue_res = search_google_and_web_by_clues(
+                    pixiv_id=pid,
+                    filename=sample_row["filename"],
+                    thumb_bytes=None,
+                )
+                return pid, clue_res
+            except Exception:
+                return pid, {}
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            for pid, clue_res in pool.map(_rescue_404_pid, not_found_404_pids):
+                if clue_res.get("found") and (clue_res.get("artists") or clue_res.get("tags")):
+                    google_web_rescued[pid] = clue_res
+                    resolved_pids.add(pid)
+                    found_works += 1
+                    rescued_by_google_web += 1
+
+        # 對仍未找到的少數 404 作品 (最多抽查 5 張) 執行 IQDB / SauceNAO 視覺搜圖
+        still_unfound_pids = [p for p in not_found_404_pids if p not in resolved_pids][:5]
+        for pid in still_unfound_pids:
+            sample_row = pid_to_sample_row.get(pid)
+            if not sample_row:
+                continue
+            rev_res = reverse_search_and_tag_image(
+                image_id=sample_row["id"],
+                min_similarity=70.0,
+                fallback_to_ai=False,
+                include_google_lens_url=False,
+                run_refresh_counts=False,
+            )
+            if rev_res.get("found"):
+                resolved_pids.add(pid)
+                found_works += 1
+                rescued_by_google_web += 1
+                sug_f = rev_res.get("suggested_folder")
+                if auto_move_to_artist_folder and sug_f:
+                    for iid in pid_to_img_ids.get(pid, []):
+                        if img_id_to_folder.get(iid, "") == "":
+                            pending_moves.setdefault(sug_f, []).append(iid)
+
+    # =========================================================================
+    # 第 4 層：一次性開啟短交易寫入所有結果，並為所有查驗過的圖片加上 pixiv_checked 標記
+    # =========================================================================
+    db_conn = get_db()
+    try:
+        tag_cache: Dict[str, int] = {
+            r["name"]: r["id"]
+            for r in db_conn.execute("SELECT id, name FROM tags").fetchall()
+        }
+
+        initial_moves={name:list(ids) for name,ids in pending_moves.items()}
+        def _write_pixiv_batch(c):
+            pending_moves.clear()  # Callback may be retried after a rollback.
+            pending_moves.update({name:list(ids) for name,ids in initial_moves.items()})
+            links = []
+            sug_updates = []
+            # 確保系統有處理完成標記用的虛擬標籤，防止 404 刪除作品永遠卡死在佇列頂端
+            checked_tid = ensure_tag(c, tag_cache, "Pixiv已查驗", "source")
+
+            # 寫入 Pixiv Ajax 查獲的結果
+            for pid, body in pixiv_api_results.items():
+                img_ids = pid_to_img_ids.get(pid, [])
+                user_name = body.get("userName")
+                if user_name:
+                    tid_artist = ensure_tag(c, tag_cache, user_name, "artist")
+                    sug_folder = resolve_artist_folder_name(user_name)
+                    for iid in img_ids:
+                        if tid_artist > 0:
+                            links.append((iid, tid_artist, 1.0, "pixiv"))
+                        if sug_folder:
+                            sug_updates.append((sug_folder, iid))
+                            if auto_move_to_artist_folder and img_id_to_folder.get(iid, "") == "":
+                                pending_moves.setdefault(sug_folder, []).append(iid)
+
+                tags_obj = body.get("tags", {}).get("tags", [])
+                for t_item in tags_obj:
+                    t_str = t_item.get("tag")
+                    if t_str and t_str not in ("R-18", "オリジナル"):
+                        tid_t = ensure_tag(c, tag_cache, t_str, "general")
+                        if tid_t > 0:
                             for iid in img_ids:
                                 links.append((iid, tid_t, 1.0, "pixiv"))
-            time.sleep(0.25)
-        except Exception:
-            continue
 
-    with conn:
-        if links:
-            conn.executemany(
-                "INSERT OR IGNORE INTO image_tags (image_id, tag_id, confidence, source) VALUES (?, ?, ?, ?)",
-                links,
-            )
-        if sug_updates:
-            conn.executemany(
-                "UPDATE images SET suggested_folder = COALESCE(?, suggested_folder) WHERE id = ?",
-                sug_updates,
-            )
-        refresh_tag_counts(conn)
-    conn.close()
+            # 寫入 Google / Yande.re 救援查獲的結果
+            for pid, clue in google_web_rescued.items():
+                img_ids = pid_to_img_ids.get(pid, [])
+                for art_name in clue.get("artists", []):
+                    tid_artist = ensure_tag(c, tag_cache, art_name, "artist")
+                    sug_folder = resolve_artist_folder_name(art_name)
+                    for iid in img_ids:
+                        if tid_artist > 0:
+                            links.append((iid, tid_artist, 0.95, "pixiv"))
+                        if sug_folder:
+                            sug_updates.append((sug_folder, iid))
+                            if auto_move_to_artist_folder and img_id_to_folder.get(iid, "") == "":
+                                pending_moves.setdefault(sug_folder, []).append(iid)
+                for t_name, t_cat in clue.get("tags", []):
+                    tid_t = ensure_tag(c, tag_cache, t_name, t_cat)
+                    if tid_t > 0:
+                        for iid in img_ids:
+                            links.append((iid, tid_t, 0.92, "pixiv"))
+
+            # 對本次所有查驗過的圖片寫入 source='pixiv_checked'，徹底解決 404 死鎖
+            if checked_tid > 0:
+                for r in rows:
+                    pid = str(r["pixiv_id"])
+                    status_code = pixiv_results.get(pid)
+                    if pid in resolved_pids:
+                        state, retry, error = "succeeded",None,""
+                    elif status_code in (404,410):
+                        state, retry, error = "not_found",time.time()+7*86400,f"HTTP {status_code}"
+                    else:
+                        state, retry, error = "failed",time.time()+300,f"HTTP {status_code or 'timeout'}"
+                    record_processing(c,r["id"],"pixiv",state,error=error,retry_at=retry)
+                    if state != "failed":
+                        links.append((r["id"], checked_tid, 1.0, "pixiv_checked"))
+                    else:
+                        c.execute("DELETE FROM image_tags WHERE image_id=? AND source='pixiv_checked'",(r["id"],))
+
+            if links:
+                c.executemany(
+                    "INSERT OR IGNORE INTO image_tags (image_id, tag_id, confidence, source) VALUES (?, ?, ?, ?)",
+                    links,
+                )
+            if sug_updates:
+                c.executemany(
+                    "UPDATE images SET suggested_folder = COALESCE(?, suggested_folder) WHERE id = ?",
+                    sug_updates,
+                )
+            refresh_tag_counts(c)
+
+        run_db_write_with_retry(db_conn, _write_pixiv_batch)
+    finally:
+        db_conn.close()
+
+    save_persistent_artist_cache()
 
     moved_total = 0
     if auto_move_to_artist_folder and pending_moves:
-        from app import move_images_to_folder
+        from gallery_service import move_images_to_folder
         for target_f, iids in pending_moves.items():
-            m_res = move_images_to_folder(iids, target_f, auto_rename=True)
+            unique_iids = list(dict.fromkeys(iids))
+            m_res = move_images_to_folder(unique_iids, target_f, auto_rename=True, refresh_counts=False)
             moved_total += m_res.get("moved", 0)
+        db_conn = get_db()
+        try:
+            run_db_write_with_retry(db_conn, lambda c: refresh_tag_counts(c))
+        finally:
+            db_conn.close()
 
-    return {
+    pixiv_elapsed = round(time.time() - t_pixiv_start, 2)
+    not_found_404 = len(pid_to_img_ids) - found_works
+    result_dict = {
         "checked_illusts": len(pid_to_img_ids),
         "found_illusts": found_works,
+        "rescued_by_danbooru": rescued_by_danbooru,
+        "rescued_by_pixiv_api": rescued_by_pixiv_api,
+        "rescued_by_google_web": rescued_by_google_web,
+        "not_found_404_marked_checked": not_found_404,
         "images_updated": len(rows),
         "moved_to_artist_folders": moved_total,
     }
+    log_operation(
+        category="search_calibrate",
+        action="Pixiv ID 批次反查與 404 救援",
+        summary=(
+            f"查驗 {len(pid_to_img_ids)} 個作品 ({len(rows)} 張圖片)：命中/救回 {found_works} 個 "
+            f"(Danbooru {rescued_by_danbooru}、Pixiv API {rescued_by_pixiv_api}、網頁搜圖 {rescued_by_google_web})，"
+            f"標記已查驗 404 共 {not_found_404} 個"
+            + (f"，自動歸檔 {moved_total} 張" if moved_total else "")
+        ),
+        status="success",
+        affected_count=len(rows),
+        duration_sec=pixiv_elapsed,
+        details=result_dict,
+    )
+    return result_dict
 
 
 tagger_engine = AITaggerEngine()
-

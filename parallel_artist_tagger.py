@@ -30,6 +30,7 @@ if sys.platform == "win32":
 sys.path.insert(0, str(Path(__file__).parent))
 
 from database import GALLERY_ROOT, DB_PATH, ensure_tag, refresh_tag_counts
+from background_work import exclusive_job, background_checkpoint
 from zh_dict import resolve_artist_folder_name
 from reverse_search import (
     search_danbooru_by_md5,
@@ -194,67 +195,56 @@ def analyze_image_in_memory(
     }
 
 
-def commit_batch_with_retry(
-    conn: sqlite3.Connection,
-    tag_cache: Dict[str, int],
-    results: List[Dict[str, Any]],
-    max_retries: int = 15,
-) -> int:
-    for attempt in range(max_retries):
-        try:
-            with conn:
-                for item in results:
-                    iid = item["image_id"]
-                    tags = item["tags_to_add"]
-                    sug_folder = item["suggested_folder"]
+def commit_batch_with_retry(conn, tag_cache, results, max_retries=15):
+    from database import run_db_write_with_retry
+    def write(conn):
+        for item in results:
+            iid = item["image_id"]
+            tags = item["tags_to_add"]
+            sug_folder = item["suggested_folder"]
 
-                    if item["has_verified_artist"]:
+            if item["has_verified_artist"]:
+                conn.execute(
+                    "DELETE FROM image_tags WHERE image_id = ? AND source = 'ai' AND tag_id IN (SELECT id FROM tags WHERE category = 'artist')",
+                    (iid,),
+                )
+
+            links = []
+            for t_name, t_cat, t_zh, t_conf, t_src in tags:
+                tid = ensure_tag(conn, tag_cache, t_name, t_cat)
+                if tid > 0:
+                    if t_zh:
                         conn.execute(
-                            "DELETE FROM image_tags WHERE image_id = ? AND source = 'ai' AND tag_id IN (SELECT id FROM tags WHERE category = 'artist')",
-                            (iid,),
+                            "UPDATE tags SET zh_name = COALESCE(NULLIF(zh_name,''), ?) WHERE id = ?",
+                            (t_zh, tid),
                         )
+                    links.append((iid, tid, t_conf, t_src))
 
-                    links = []
-                    for t_name, t_cat, t_zh, t_conf, t_src in tags:
-                        tid = ensure_tag(conn, tag_cache, t_name, t_cat)
-                        if tid > 0:
-                            if t_zh:
-                                conn.execute(
-                                    "UPDATE tags SET zh_name = COALESCE(NULLIF(zh_name,''), ?) WHERE id = ?",
-                                    (t_zh, tid),
-                                )
-                            links.append((iid, tid, t_conf, t_src))
+            if links:
+                conn.executemany(
+                    """
+                    INSERT INTO image_tags (image_id, tag_id, confidence, source)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(image_id, tag_id) DO UPDATE SET
+                    confidence = MAX(image_tags.confidence, excluded.confidence),
+                    source = CASE
+                        WHEN excluded.source IN ('danbooru', 'pixiv', 'saucenao', 'iqdb', 'twitter', 'gemini_mcp', 'filename') THEN excluded.source
+                        ELSE image_tags.source
+                    END
+                    """,
+                    links,
+                )
 
-                    if links:
-                        conn.executemany(
-                            """
-                            INSERT INTO image_tags (image_id, tag_id, confidence, source)
-                            VALUES (?, ?, ?, ?)
-                            ON CONFLICT(image_id, tag_id) DO UPDATE SET
-                            confidence = MAX(image_tags.confidence, excluded.confidence),
-                            source = CASE
-                                WHEN excluded.source IN ('danbooru', 'pixiv', 'saucenao', 'iqdb', 'twitter', 'gemini_mcp', 'filename') THEN excluded.source
-                                ELSE image_tags.source
-                            END
-                            """,
-                            links,
-                        )
-
-                    if sug_folder or links:
-                        conn.execute(
-                            "UPDATE images SET ai_tagged = 1, suggested_folder = COALESCE(?, suggested_folder) WHERE id = ?",
-                            (sug_folder, iid),
-                        )
-            return len(results)
-        except sqlite3.OperationalError as e:
-            if "locked" in str(e) or "busy" in str(e):
-                backoff = random.uniform(0.1, 0.4) * (attempt + 1)
-                time.sleep(backoff)
-            else:
-                raise
-    return 0
+            if sug_folder or links:
+                conn.execute(
+                    "UPDATE images SET suggested_folder = COALESCE(?, suggested_folder) WHERE id = ?",
+                    (sug_folder, iid),
+                )
+        return len(results)
+    return run_db_write_with_retry(conn,write,max_retries=max_retries)
 
 
+@exclusive_job("畫師標籤整理")
 def run_worker(worker_id: int, total_workers: int, batch_size: int = 50, limit: Optional[int] = None):
     print(f"[Worker {worker_id}/{total_workers}] 啟動任務...")
     conn = get_worker_db()
@@ -292,13 +282,15 @@ def run_worker(worker_id: int, total_workers: int, batch_size: int = 50, limit: 
     t0 = time.time()
 
     for i in range(0, total_count, batch_size):
+        background_checkpoint()
         chunk = rows[i : i + batch_size]
         batch_results = []
 
         # 記憶體分析，不佔用任何資料庫連線
-        for r in chunk:
-            res = analyze_image_in_memory(r, artist_cache)
-            batch_results.append(res)
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            batch_results = list(executor.map(lambda row: analyze_image_in_memory(row, artist_cache), chunk))
+        for res in batch_results:
             if res["tags_to_add"]:
                 tagged_count += 1
             processed += 1

@@ -3,40 +3,68 @@ import os
 import re
 import shutil
 import subprocess
+import asyncio
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, Response, HTMLResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, Response, HTMLResponse, JSONResponse
+from starlette.concurrency import run_in_threadpool
+from fastapi.staticfiles import StaticFiles
 from PIL import Image
-from pydantic import BaseModel
+from pydantic import BaseModel,Field
+from file_safety import UnsafePath,validate_source
+from query_cache import natural_order, recent_tags, newest_tag_rows
+from background_work import BackgroundBusy, mark_interactive, exclusive_job, background_checkpoint
+from thumbnail_cache import ThumbnailCache, ThumbnailQueueFull
 
 from database import (
     GALLERY_ROOT,
     THUMB_DIR,
     NON_ARTIST_FOLDERS,
     RE_DATE_SEQ,
+    ACTIVITY_LOG_FILE,
     get_db,
     init_db,
     scan_library,
     ensure_tag,
     refresh_tag_counts,
+    run_db_write_with_retry,
+    log_operation,
+    get_operation_logs,
+    clear_operation_logs,
 )
 from ai_tagger import tagger_engine, preprocess_image_fast, lookup_pixiv_artists_batch
 from zh_dict import get_tag_zh, resolve_artist_folder_name, DANBOORU_ARTIST_TO_FOLDER
 from renamer import (
     win_natural_key,
     generate_rename_plan_for_folder,
+    generate_rename_preview,
     execute_rename_plan,
     list_rename_logs,
     undo_rename_batch,
     get_next_sequence_filename_for_folder,
+    get_folder_sequence_state,
 )
 
 app = FastAPI(title="Twitter & Pixiv AI 智慧標籤圖庫系統")
+from management_api import router as management_router
+app.include_router(management_router)
 
 STATIC_DIR = Path(__file__).parent / "static"
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+thumbnail_cache = ThumbnailCache(GALLERY_ROOT, THUMB_DIR, get_db)
+
+
+@app.exception_handler(BackgroundBusy)
+async def background_busy_response(request: Request, exc: BackgroundBusy):
+    return JSONResponse(status_code=409, content=exc.response())
+
+
+@app.exception_handler(UnsafePath)
+async def unsafe_path_response(request: Request, exc: UnsafePath):
+    return JSONResponse(status_code=400,content={"detail":str(exc)})
 
 
 class BatchTagRequest(BaseModel):
@@ -58,11 +86,12 @@ class MoveFilesRequest(BaseModel):
 
 class RenameExecuteRequest(BaseModel):
     folder: str  # Specific folder name, "__ROOT__", or "__ALL_ARTIST_FOLDERS__"
-    pad_digits: int = 4
+    pad_digits: int = Field(4,ge=3,le=6)
     custom_date: Optional[str] = None
     custom_artist: Optional[str] = None
 
 
+@exclusive_job("繪師歸檔索引同步")
 def sync_root_suggested_folders(min_confidence: float = 0.25) -> int:
     """
     確保所有根目錄 (folder = '') 中已經擁有「已認證畫師標籤」（來自 Gemini MCP、Danbooru、Pixiv、SauceNAO、IQDB、Twitter 或高信心度 >= 0.75 AI）的圖片，
@@ -143,6 +172,12 @@ def sync_root_suggested_folders(min_confidence: float = 0.25) -> int:
 @app.on_event("startup")
 def on_startup():
     init_db()
+    from file_operations import recover
+    from database import DATA_DIR
+    try:
+        app.state.recovery_report = recover(GALLERY_ROOT,DATA_DIR,get_db)
+    except BackgroundBusy:
+        app.state.recovery_report = {"deferred":True}
     conn = get_db()
     cnt = conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]
     conn.close()
@@ -150,9 +185,18 @@ def on_startup():
         print("初次啟動，正在建立 D:\\圖檔\\twitter 索引資料庫...")
         res = scan_library()
         print(f"索引完成：{res}")
-    sync_root_suggested_folders()
+    try:
+        sync_root_suggested_folders()
+    except BackgroundBusy:
+        pass  # An existing pipeline owns this maintenance; browsing can start.
     from scheduler import scheduler_engine
     scheduler_engine.start_daemon()
+    thumbnail_cache.start_warming()
+
+
+@app.on_event("shutdown")
+def on_shutdown():
+    thumbnail_cache.close()
 
 
 
@@ -162,7 +206,10 @@ def index():
     html_file = STATIC_DIR / "index.html"
     if not html_file.exists():
         return HTMLResponse("<h1>UI loading...</h1>")
-    return HTMLResponse(html_file.read_text(encoding="utf-8"))
+    html = html_file.read_text(encoding="utf-8")
+    for name in ("gallery-core.js","gallery-app.js","gallery-base.css","gallery-shell.css","gallery-shell.js","integration-settings.js"):
+        html = html.replace(f'/static/{name}"',f'/static/{name}?v={(STATIC_DIR/name).stat().st_mtime_ns}"')
+    return HTMLResponse(html)
 
 
 @app.get("/api/stats")
@@ -205,7 +252,7 @@ def api_folders():
     conn = get_db()
     rows = conn.execute(
         """
-        SELECT folder, COUNT(*) as count
+        SELECT folder, COUNT(*) as count, COALESCE(MAX(mtime), 0) as last_updated
         FROM images
         WHERE folder != ''
         GROUP BY folder
@@ -213,7 +260,10 @@ def api_folders():
         """
     ).fetchall()
     conn.close()
-    return [{"name": r["folder"], "count": r["count"]} for r in rows]
+    return [
+        {"name": r["folder"], "count": r["count"], "last_updated": r["last_updated"]}
+        for r in rows
+    ]
 
 
 @app.get("/api/tags")
@@ -258,19 +308,7 @@ def api_tags(
                     })
 
             # 同時列出最近編輯圖片中最常出現的畫師與標籤（依圖片最新 mtime 排序）
-            recent_tag_rows = conn.execute(
-                """
-                SELECT t.id, t.name, t.category, t.zh_name, t.post_count, MAX(i.mtime) as latest_mtime
-                FROM tags t
-                JOIN image_tags it ON t.id = it.tag_id
-                JOIN images i ON i.id = it.image_id
-                WHERE t.post_count > 0
-                GROUP BY t.id
-                ORDER BY latest_mtime DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+            recent_tag_rows = recent_tags.get(("recent",limit), lambda: newest_tag_rows(conn,limit))
             conn.close()
             for r in recent_tag_rows:
                 zh = r["zh_name"] or get_tag_zh(r["name"], r["category"])
@@ -331,202 +369,9 @@ def api_images(
     page: int = Query(1, ge=1),
     page_size: int = Query(60, ge=10, le=200),
 ):
-    import datetime as _dt
-    import time as _time
-    conn = get_db()
-    where = ["1=1"]
-    params: List[Any] = []
-
-    if folder == "__ROOT__":
-        where.append("i.folder = ''")
-    elif folder == "__FOLDERS__":
-        where.append("i.folder != ''")
-    elif folder == "__SUGGESTED__":
-        where.append("i.folder = '' AND i.suggested_folder IS NOT NULL AND i.suggested_folder != ''")
-    elif folder != "__ALL__":
-        where.append("i.folder = ?")
-        params.append(folder)
-
-    if media_type == "gif_video":
-        where.append("i.media_type IN ('gif', 'video')")
-    elif media_type in ("image", "gif", "video"):
-        where.append("i.media_type = ?")
-        params.append(media_type)
-
-    if ai_status == "tagged":
-        where.append("i.ai_tagged = 1")
-    elif ai_status == "untagged":
-        where.append("i.ai_tagged = 0")
-
-    if q.strip():
-        q_clean = f"%{q.strip()}%"
-        where.append("""
-            (i.filename LIKE ? OR i.folder LIKE ? OR EXISTS (
-                SELECT 1 FROM image_tags it
-                JOIN tags t ON t.id = it.tag_id
-                WHERE it.image_id = i.id AND (t.name LIKE ? OR t.zh_name LIKE ?)
-            ))
-        """)
-        params.extend([q_clean, q_clean, q_clean, q_clean])
-
-    now_ts = _time.time()
-    recent_bucket_days = {
-        "最近:24小時內": 1,
-        "最近:7天內": 7,
-        "最近:30天內": 30,
-        "最近:90天內": 90,
-        "最近:1年內": 365,
-    }
-
-    inc_list = [t.strip() for t in include_tags.split(",") if t.strip()]
-    force_mtime_desc = False
-    for tname in inc_list:
-        if tname == "最近":
-            # 「最近」代表包含所有圖片，並強制使用編輯時間 (mtime) 由最新排到最舊
-            force_mtime_desc = True
-            continue
-        elif tname in recent_bucket_days:
-            force_mtime_desc = True
-            days = recent_bucket_days[tname]
-            where.append("i.mtime >= ?")
-            params.append(now_ts - 86400 * days)
-            continue
-
-        where.append("""
-            EXISTS (
-                SELECT 1 FROM image_tags it
-                JOIN tags t ON t.id = it.tag_id
-                WHERE it.image_id = i.id AND t.name = ?
-            )
-        """)
-        params.append(tname)
-
-    if force_mtime_desc:
-        sort = "mtime_desc"
-
-    exc_list = [t.strip() for t in exclude_tags.split(",") if t.strip()]
-    for tname in exc_list:
-        if tname == "最近" or tname in recent_bucket_days:
-            continue
-        where.append("""
-            NOT EXISTS (
-                SELECT 1 FROM image_tags it
-                JOIN tags t ON t.id = it.tag_id
-                WHERE it.image_id = i.id AND t.name = ?
-            )
-        """)
-        params.append(tname)
-
-    where_sql = " AND ".join(where)
-    offset = (page - 1) * page_size
-
-    if sort in ("natural_asc", "name_asc"):
-        # Fetch matching rows and sort via Windows native StrCmpLogicalW so _2 is always before _10!
-        all_rows = conn.execute(
-            f"""
-            SELECT i.id, i.rel_path, i.filename, i.folder, i.ext, i.size_bytes,
-                   i.mtime, i.media_type, i.pixiv_id, i.ai_tagged, i.suggested_folder
-            FROM images i
-            WHERE {where_sql}
-            """,
-            params,
-        ).fetchall()
-        total_matches = len(all_rows)
-        sorted_all = sorted(all_rows, key=lambda r: win_natural_key(r["rel_path"]))
-        rows = sorted_all[offset : offset + page_size]
-    else:
-        order_by = "i.mtime DESC, i.id DESC"
-        if sort == "mtime_asc":
-            order_by = "i.mtime ASC, i.id ASC"
-        elif sort == "size_desc":
-            order_by = "i.size_bytes DESC"
-
-        count_sql = f"SELECT COUNT(*) FROM images i WHERE {where_sql}"
-        total_matches = conn.execute(count_sql, params).fetchone()[0]
-
-        data_sql = f"""
-            SELECT i.id, i.rel_path, i.filename, i.folder, i.ext, i.size_bytes,
-                   i.mtime, i.media_type, i.pixiv_id, i.ai_tagged, i.suggested_folder
-            FROM images i
-            WHERE {where_sql}
-            ORDER BY {order_by}
-            LIMIT ? OFFSET ?
-        """
-        rows = conn.execute(data_sql, params + [page_size, offset]).fetchall()
-
-
-    img_ids = [r["id"] for r in rows]
-    tags_by_img: Dict[int, List[Dict[str, Any]]] = {iid: [] for iid in img_ids}
-
-    if img_ids:
-        placeholders = ",".join(["?"] * len(img_ids))
-        tag_rows = conn.execute(
-            f"""
-            SELECT it.image_id, t.name, t.category, t.zh_name, it.confidence, it.source
-            FROM image_tags it
-            JOIN tags t ON t.id = it.tag_id
-            WHERE it.image_id IN ({placeholders})
-            ORDER BY
-                CASE t.category
-                    WHEN 'artist' THEN 1
-                    WHEN 'character' THEN 2
-                    WHEN 'copyright' THEN 3
-                    WHEN 'rating' THEN 4
-                    ELSE 5
-                END,
-                it.confidence DESC
-            """,
-            img_ids,
-        ).fetchall()
-
-        for tr in tag_rows:
-            zh = tr["zh_name"] or get_tag_zh(tr["name"], tr["category"])
-            tags_by_img[tr["image_id"]].append({
-                "name": tr["name"],
-                "category": tr["category"],
-                "zh_name": zh,
-                "confidence": tr["confidence"],
-                "source": tr["source"],
-            })
-
-    conn.close()
-
-    items = []
-    for r in rows:
-        iid = r["id"]
-        all_t = tags_by_img.get(iid, [])
-        artists = [t for t in all_t if t["category"] == "artist"]
-        chars = [t for t in all_t if t["category"] == "character"]
-        copyrights = [t for t in all_t if t["category"] == "copyright"]
-        ratings = [t for t in all_t if t["category"] == "rating"]
-        generals = [t for t in all_t if t["category"] == "general"][:6]
-
-        items.append({
-            "id": iid,
-            "rel_path": r["rel_path"],
-            "filename": r["filename"],
-            "folder": r["folder"],
-            "ext": r["ext"],
-            "size_kb": round(r["size_bytes"] / 1024, 1),
-            "mtime": r["mtime"],
-            "media_type": r["media_type"],
-            "pixiv_id": r["pixiv_id"],
-            "ai_tagged": bool(r["ai_tagged"]),
-            "suggested_folder": r["suggested_folder"],
-            "artists": artists,
-            "characters": chars,
-            "copyrights": copyrights,
-            "rating": ratings[0]["name"] if ratings else None,
-            "preview_tags": generals,
-            "total_tags": len(all_t),
-        })
-
-    return {
-        "total": total_matches,
-        "page": page,
-        "page_size": page_size,
-        "items": items,
-    }
+    from gallery_query import search_images
+    return search_images(include_tags, exclude_tags, folder, media_type, ai_status,
+                         q, sort, page, page_size, connect=get_db, prefetch=thumbnail_cache.prefetch)
 
 
 @app.get("/api/image/{image_id}")
@@ -586,39 +431,33 @@ def api_image_detail(image_id: int):
 
 
 @app.get("/api/thumb/{image_id}")
-def api_thumb(image_id: int):
-    thumb_file = THUMB_DIR / f"{image_id}.jpg"
-    if thumb_file.exists():
-        return FileResponse(str(thumb_file), media_type="image/jpeg")
+async def api_thumb(image_id: int, request: Request):
+    mark_interactive()
+    try:
+        result = await run_in_threadpool(thumbnail_cache.cached, image_id)
+        if result is None:
+            future = thumbnail_cache.submit(image_id, foreground=True)
+            # A disconnected browser must not cancel work shared by other tabs.
+            result = await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), timeout=30)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Image or file not found")
+    except (ThumbnailQueueFull, asyncio.TimeoutError):
+        raise HTTPException(status_code=503, detail="縮圖處理中，請稍後重試", headers={"Retry-After": "1"})
+    except (OSError, ValueError, SyntaxError):
+        raise HTTPException(status_code=422, detail="Unable to generate thumbnail")
 
-    conn = get_db()
-    row = conn.execute("SELECT rel_path, media_type FROM images WHERE id = ?", (image_id,)).fetchone()
-    conn.close()
-    if not row:
-        raise HTTPException(status_code=404, detail="Image not found")
-
-    full_path = GALLERY_ROOT / row["rel_path"]
-    if not full_path.exists():
-        raise HTTPException(status_code=404, detail="File missing on disk")
-
-    if row["media_type"] == "video":
+    headers = {"ETag": result.etag, "Cache-Control": "public, max-age=0, must-revalidate"}
+    if request.headers.get("if-none-match") == result.etag:
+        return Response(status_code=304, headers=headers)
+    if result.video:
         svg = """<svg xmlns="http://www.w3.org/2000/svg" width="320" height="320" viewBox="0 0 320 320">
         <rect width="320" height="320" fill="#1e1e2e"/>
         <circle cx="160" cy="160" r="48" fill="#6366f1" opacity="0.9"/>
         <polygon points="145,135 145,185 188,160" fill="#ffffff"/>
         <text x="160" y="245" text-anchor="middle" fill="#a1a1aa" font-family="sans-serif" font-size="16">MP4 影片 (點擊播放)</text>
         </svg>"""
-        return Response(content=svg, media_type="image/svg+xml")
-
-    try:
-        with Image.open(str(full_path)) as img:
-            if img.mode != "RGB":
-                img = img.convert("RGB")
-            img.thumbnail((380, 380), Image.Resampling.BILINEAR)
-            img.save(str(thumb_file), "JPEG", quality=82)
-        return FileResponse(str(thumb_file), media_type="image/jpeg")
-    except Exception:
-        return FileResponse(str(full_path))
+        return Response(content=svg, media_type="image/svg+xml", headers=headers)
+    return FileResponse(str(result.path), media_type="image/jpeg", headers=headers)
 
 
 @app.get("/api/raw/{image_id}")
@@ -635,129 +474,51 @@ def api_raw(image_id: int):
 
 
 @app.post("/api/tags/batch")
+@exclusive_job("編輯圖片標籤")
 def api_batch_tags(req: BatchTagRequest):
     if not req.image_ids:
         return {"updated": 0}
 
-    conn = get_db()
-    tag_cache: Dict[str, int] = {}
-    for r in conn.execute("SELECT id, name FROM tags"):
-        tag_cache[r["name"]] = r["id"]
-
-    with conn:
-        links = []
-        for t_info in req.add_tags:
-            tname = t_info.get("name", "").strip()
-            tcat = t_info.get("category", "general").strip() or "general"
-            if not tname:
-                continue
-            tid = ensure_tag(conn, tag_cache, tname, tcat)
-            if tid > 0:
-                for iid in req.image_ids:
-                    links.append((iid, tid, 1.0, "manual"))
-
-        if links:
-            conn.executemany(
-                """
-                INSERT INTO image_tags (image_id, tag_id, confidence, source)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(image_id, tag_id) DO UPDATE SET
-                confidence = 1.0, source = 'manual'
-                """,
-                links,
-            )
-
-        for rname in req.remove_tag_names:
-            row_t = conn.execute("SELECT id FROM tags WHERE name = ?", (rname.strip(),)).fetchone()
-            if row_t:
-                tid = row_t["id"]
-                placeholders = ",".join(["?"] * len(req.image_ids))
-                conn.execute(
-                    f"DELETE FROM image_tags WHERE tag_id = ? AND image_id IN ({placeholders})",
-                    [tid] + req.image_ids,
-                )
-
-        refresh_tag_counts(conn)
-
-    conn.close()
+    from gallery_tag_service import edit_tags
+    try:
+        edit_tags(req.image_ids, req.add_tags, req.remove_tag_names)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
 
     moved_count = 0
     if req.move_to_artist_folder and req.move_to_artist_folder.strip():
         move_res = move_images_to_folder(req.image_ids, req.move_to_artist_folder.strip(), auto_rename=True)
         moved_count = move_res.get("moved", 0)
 
+    added_names = [t.get("name", "").strip() for t in req.add_tags if t.get("name", "").strip()]
+    removed_names = [r.strip() for r in req.remove_tag_names if r.strip()]
+    log_operation(
+        category="tag_edit",
+        action="手動/批次變更標籤",
+        summary=(
+            f"對 {len(req.image_ids)} 張圖片變更標籤："
+            + (f"新增 [{', '.join(added_names)}] " if added_names else "")
+            + (f"移除 [{', '.join(removed_names)}] " if removed_names else "")
+            + (f"並移入資料夾「{req.move_to_artist_folder.strip()}」({moved_count} 張)" if moved_count else "")
+        ).strip(),
+        status="success",
+        affected_count=len(req.image_ids),
+        details={
+            "image_count": len(req.image_ids),
+            "add_tags": added_names,
+            "remove_tags": removed_names,
+            "moved_to_folder": req.move_to_artist_folder,
+            "moved_count": moved_count,
+        },
+    )
     return {"updated": len(req.image_ids), "moved": moved_count}
 
 
-def _safe_move_file(src_full: Path, target_dir: Path, fname: str) -> Path:
-    target_dir.mkdir(parents=True, exist_ok=True)
-    dest_full = target_dir / fname
-    if dest_full.exists() and dest_full.resolve() != src_full.resolve():
-        stem = dest_full.stem
-        ext = dest_full.suffix
-        counter = 1
-        while dest_full.exists():
-            dest_full = target_dir / f"{stem}_{counter}{ext}"
-            counter += 1
-    if src_full.resolve() != dest_full.resolve():
-        shutil.move(str(src_full), str(dest_full))
-    return dest_full
 
 
-def move_images_to_folder(image_ids: List[int], target_folder: str, auto_rename: bool = True) -> Dict[str, Any]:
-    clean_folder = re.sub(r'[<>:"/\\|?*]', "_", target_folder.strip())
-    if not clean_folder or clean_folder == "__ROOT__":
-        target_dir = GALLERY_ROOT
-        clean_folder = ""
-    else:
-        target_dir = GALLERY_ROOT / clean_folder
-
-    conn = get_db()
-    tag_cache: Dict[str, int] = {}
-    for r in conn.execute("SELECT id, name FROM tags"):
-        tag_cache[r["name"]] = r["id"]
-
-    placeholders = ",".join(["?"] * len(image_ids))
-    rows = conn.execute(
-        f"SELECT id, rel_path, filename, folder, ext FROM images WHERE id IN ({placeholders})",
-        image_ids,
-    ).fetchall()
-
-    # Preserve Windows natural sort order of the moved batch!
-    sorted_rows = sorted(rows, key=lambda r: win_natural_key(r["rel_path"]))
-
-    moved = 0
-    for r in sorted_rows:
-        src_full = GALLERY_ROOT / r["rel_path"]
-        if not src_full.exists():
-            continue
-        try:
-            if auto_rename and clean_folder and clean_folder not in NON_ARTIST_FOLDERS:
-                target_fname = get_next_sequence_filename_for_folder(clean_folder, r["ext"], pad_digits=4)
-            else:
-                target_fname = r["filename"]
-
-            dest_full = _safe_move_file(src_full, target_dir, target_fname)
-            new_rel = str(dest_full.relative_to(GALLERY_ROOT)).replace("\\", "/")
-            with conn:
-                conn.execute(
-                    "UPDATE images SET rel_path = ?, filename = ?, folder = ?, suggested_folder = NULL WHERE id = ?",
-                    (new_rel, dest_full.name, clean_folder, r["id"]),
-                )
-                if clean_folder and clean_folder not in NON_ARTIST_FOLDERS:
-                    tid = ensure_tag(conn, tag_cache, clean_folder, "artist")
-                    conn.execute(
-                        "INSERT OR IGNORE INTO image_tags (image_id, tag_id, confidence, source) VALUES (?, ?, 1.0, 'folder')",
-                        (r["id"], tid),
-                    )
-            moved += 1
-        except Exception:
-            continue
-
-    with conn:
-        refresh_tag_counts(conn)
-    conn.close()
-    return {"moved": moved, "target_folder": clean_folder}
+def move_images_to_folder(image_ids, target_folder, auto_rename=True, refresh_counts=True):
+    from gallery_service import move_images_to_folder as move
+    return move(image_ids, target_folder, auto_rename, refresh_counts)
 
 
 @app.get("/api/organize/artist_folders_preview")
@@ -800,13 +561,25 @@ def api_organize_artist_folders_preview(
     ).fetchall()
 
     untagged_root_count = conn.execute(
-        "SELECT COUNT(*) FROM images WHERE folder = '' AND ai_tagged = 0"
+        """
+        SELECT COUNT(*) FROM images i
+        WHERE i.folder = ''
+          AND i.media_type IN ('image', 'gif')
+          AND (
+              i.ai_tagged = 0
+              OR NOT EXISTS (
+                  SELECT 1 FROM image_tags it
+                  JOIN tags t ON it.tag_id = t.id
+                  WHERE it.image_id = i.id AND t.category IN ('general', 'character', 'copyright')
+              )
+          )
+        """
     ).fetchone()[0]
     unqueried_pixiv_root_count = conn.execute(
         """
         SELECT COUNT(*) FROM images
         WHERE folder = '' AND pixiv_id IS NOT NULL
-          AND id NOT IN (SELECT image_id FROM image_tags WHERE source = 'pixiv')
+          AND id NOT IN (SELECT image_id FROM image_tags WHERE source IN ('pixiv', 'pixiv_checked'))
         """
     ).fetchone()[0]
     conn.close()
@@ -867,11 +640,21 @@ def api_organize_artist_folders_preview(
 
 
 @app.post("/api/organize/move")
+@exclusive_job("批次歸檔")
 def api_organize_move(req: MoveFilesRequest):
     if req.mode == "selected":
         if not req.image_ids:
             raise HTTPException(status_code=400, detail="未選取任何圖片")
-        return move_images_to_folder(req.image_ids, req.target_folder, auto_rename=req.auto_rename_on_move)
+        res = move_images_to_folder(req.image_ids, req.target_folder, auto_rename=req.auto_rename_on_move, refresh_counts=True)
+        log_operation(
+            category="organize",
+            action="手動選取圖片歸檔搬移",
+            summary=f"將 {res.get('moved', 0)} 張選取圖片搬移至資料夾「{res.get('target_folder') or '根目錄'}」",
+            status="success",
+            affected_count=res.get("moved", 0),
+            details={"mode": req.mode, "target_folder": res.get("target_folder"), "moved": res.get("moved", 0)},
+        )
+        return res
 
     elif req.mode in ("ai_suggested", "auto_artist_folders"):
         preview = api_organize_artist_folders_preview(
@@ -886,7 +669,7 @@ def api_organize_move(req: MoveFilesRequest):
         for f_info in preview["folders"]:
             folder_name = f_info["folder_name"]
             ids = f_info["image_ids"]
-            res = move_images_to_folder(ids, folder_name, auto_rename=req.auto_rename_on_move)
+            res = move_images_to_folder(ids, folder_name, auto_rename=req.auto_rename_on_move, refresh_counts=False)
             moved_cnt = res.get("moved", 0)
             if moved_cnt > 0:
                 total_moved += moved_cnt
@@ -899,41 +682,34 @@ def api_organize_move(req: MoveFilesRequest):
                     "is_new_folder": f_info["is_new_folder"],
                     "moved": moved_cnt,
                 })
-        return {
+        if total_moved > 0:
+            db_conn = get_db()
+            try:
+                run_db_write_with_retry(db_conn, lambda c: refresh_tag_counts(c))
+            finally:
+                db_conn.close()
+        out_res = {
             "moved": total_moved,
             "folders_updated": len(moved_details),
             "new_folders_created": new_created,
             "existing_folders_updated": existing_updated,
             "details": moved_details,
         }
+        log_operation(
+            category="organize",
+            action="智慧繪師資料夾批次歸檔",
+            summary=f"自動歸檔 {total_moved} 張根目錄圖片至 {len(moved_details)} 個繪師資料夾 (新建 {new_created} 個、既有 {existing_updated} 個)",
+            status="success",
+            affected_count=total_moved,
+            details=out_res,
+        )
+        return out_res
 
     elif req.mode == "by_date_ym":
-        conn = get_db()
-        rows = conn.execute("SELECT id, rel_path, filename FROM images WHERE folder = ''").fetchall()
-        moved = 0
-        with conn:
-            for r in rows:
-                base = os.path.splitext(r["filename"])[0]
-                m = RE_DATE_SEQ.match(base)
-                if not m:
-                    continue
-                yr, mo = m.group(1), m.group(2)
-                target_dir = GALLERY_ROOT / "_按日期歸檔" / f"{yr}-{mo}"
-                src_full = GALLERY_ROOT / r["rel_path"]
-                if not src_full.exists():
-                    continue
-                try:
-                    dest_full = _safe_move_file(src_full, target_dir, r["filename"])
-                    new_rel = str(dest_full.relative_to(GALLERY_ROOT)).replace("\\", "/")
-                    conn.execute(
-                        "UPDATE images SET rel_path = ?, filename = ?, folder = ? WHERE id = ?",
-                        (new_rel, dest_full.name, "_按日期歸檔", r["id"]),
-                    )
-                    moved += 1
-                except Exception:
-                    continue
-        conn.close()
-        return {"moved": moved, "target_folder": "_按日期歸檔"}
+        from gallery_service import organize_by_date
+        result = organize_by_date()
+        log_operation(category="organize",action="按年月歸檔",summary=f"完成 {result['moved']} 張圖片按年月歸檔",affected_count=result["moved"])
+        return result
 
     raise HTTPException(status_code=400, detail="Unknown organize mode")
 
@@ -947,62 +723,11 @@ def api_rename_preview(
     custom_date: Optional[str] = Query(None),
     custom_artist: Optional[str] = Query(None),
 ):
-    if folder == "__ALL_ARTIST_FOLDERS__":
-        conn = get_db()
-        f_rows = conn.execute(
-            "SELECT DISTINCT folder FROM images WHERE folder != '' ORDER BY folder ASC"
-        ).fetchall()
-        conn.close()
-        summary_items = []
-        total_files = 0
-        total_changed = 0
-        for fr in f_rows:
-            fname = fr["folder"]
-            if fname in NON_ARTIST_FOLDERS:
-                continue
-            plan = generate_rename_plan_for_folder(fname, pad_digits=pad_digits)
-            total_files += plan["total"]
-            total_changed += plan["changed_count"]
-            if plan["items"]:
-                first_it = plan["items"][0]
-                last_it = plan["items"][-1]
-                summary_items.append({
-                    "folder": fname,
-                    "base_date": plan["base_date"],
-                    "total": plan["total"],
-                    "changed_count": plan["changed_count"],
-                    "sample_first_old": first_it["old_filename"],
-                    "sample_first_new": first_it["new_filename"],
-                    "sample_last_old": last_it["old_filename"],
-                    "sample_last_new": last_it["new_filename"],
-                })
-        return {
-            "mode": "all_folders",
-            "folder_count": len(summary_items),
-            "total": total_files,
-            "changed_count": total_changed,
-            "folders": summary_items,
-        }
-    else:
-        plan = generate_rename_plan_for_folder(
-            folder_name=folder,
-            pad_digits=pad_digits,
-            custom_date=custom_date,
-            custom_artist=custom_artist,
-        )
-        # Return up to 300 preview rows so browser stays snappy
-        return {
-            "mode": "single_folder",
-            "folder": plan["folder"],
-            "artist_name": plan.get("artist_name", ""),
-            "base_date": plan.get("base_date", ""),
-            "total": plan["total"],
-            "changed_count": plan["changed_count"],
-            "items": plan["items"][:300],
-        }
+    return generate_rename_preview(folder, pad_digits, custom_date, custom_artist)
 
 
 @app.post("/api/rename/execute")
+@exclusive_job("批次改名")
 def api_rename_execute(req: RenameExecuteRequest):
     if req.folder == "__ALL_ARTIST_FOLDERS__":
         conn = get_db()
@@ -1089,6 +814,7 @@ def api_ai_start(
 
 
 @app.post("/api/decensor/preview/{image_id}")
+@exclusive_job("圖片修復預覽")
 def api_decensor_preview(image_id: int, req: Optional[DecensorRequest] = None):
     from decensor_engine import decensor_engine
     r = req or DecensorRequest()
@@ -1101,16 +827,26 @@ def api_decensor_preview(image_id: int, req: Optional[DecensorRequest] = None):
 
 
 @app.post("/api/decensor/apply/{image_id}")
+@exclusive_job("圖片修復儲存")
 def api_decensor_apply(image_id: int, req: Optional[DecensorRequest] = None):
     from decensor_engine import decensor_engine
     r = req or DecensorRequest()
-    return decensor_engine.apply_and_save_decensor(
+    res = decensor_engine.apply_and_save_decensor(
         image_id=image_id,
         save_mode=r.save_mode,
         mode=r.mode,
         conf_thresh=r.conf_thresh,
         custom_boxes=r.custom_boxes,
     )
+    log_operation(
+        category="decensor",
+        action="AI 去馬賽克重繪儲存",
+        summary=res.get("message", f"圖片 #{image_id} AI 去馬賽克處理完成 ({r.save_mode})"),
+        status="success" if res.get("success") else "warning",
+        affected_count=1 if res.get("success") else 0,
+        details={"image_id": image_id, "save_mode": r.save_mode, "mode": r.mode, "result": res},
+    )
+    return res
 
 
 @app.post("/api/ai/stop")
@@ -1119,13 +855,33 @@ def api_ai_stop():
 
 
 @app.post("/api/ai/load")
+@exclusive_job("載入 AI 模型")
 def api_ai_load():
-    return tagger_engine.load_model()
+    res = tagger_engine.load_model()
+    log_operation(
+        category="ai",
+        action="載入 AI 視覺模型",
+        summary=f"AI 視覺模型已載入至顯卡記憶體 ({res.get('provider', '')})",
+        status="success",
+        affected_count=1,
+        details=res,
+    )
+    return res
 
 
 @app.post("/api/ai/unload")
+@exclusive_job("卸載 AI 模型")
 def api_ai_unload(delete_disk_files: bool = Query(False)):
-    return tagger_engine.unload_model(delete_disk_files=delete_disk_files)
+    res = tagger_engine.unload_model(delete_disk_files=delete_disk_files)
+    log_operation(
+        category="ai",
+        action="卸載 AI 視覺模型",
+        summary=res.get("message", "已卸載 AI 模型並釋放 VRAM"),
+        status="success",
+        affected_count=1,
+        details=res,
+    )
+    return res
 
 
 @app.get("/api/ai/status")
@@ -1135,53 +891,14 @@ def api_ai_status():
 
 @app.post("/api/ai/single/{image_id}")
 def api_ai_single(image_id: int):
-    conn = get_db()
-    row = conn.execute("SELECT id, rel_path FROM images WHERE id = ?", (image_id,)).fetchone()
-    if not row:
-        conn.close()
-        raise HTTPException(status_code=404, detail="Image not found")
-
-    full_path = str(GALLERY_ROOT / row["rel_path"])
-    tagger_engine.ensure_model_loaded()
-    tensor = preprocess_image_fast(full_path, 512)
-    if tensor is None:
-        conn.close()
-        raise HTTPException(status_code=400, detail="無法讀取該圖片進行 AI 分析")
-
-    preds, sug_folder = tagger_engine.predict_single(tensor)
-    tag_cache: Dict[str, int] = {}
-    for r in conn.execute("SELECT id, name FROM tags"):
-        tag_cache[r["name"]] = r["id"]
-
-    from zh_dict import DANBOORU_ARTIST_TO_FOLDER
-    links = []
-    for tname, cat, conf in preds:
-        tid = ensure_tag(conn, tag_cache, tname, cat)
-        if tid > 0:
-            links.append((image_id, tid, round(conf, 4), "ai"))
-            if cat == "artist" and tname.lower() in DANBOORU_ARTIST_TO_FOLDER:
-                fa = DANBOORU_ARTIST_TO_FOLDER[tname.lower()]
-                tid_fa = ensure_tag(conn, tag_cache, fa, "artist")
-                if tid_fa > 0:
-                    links.append((image_id, tid_fa, round(conf, 4), "ai"))
-
-    with conn:
-        if links:
-            conn.executemany(
-                """
-                INSERT INTO image_tags (image_id, tag_id, confidence, source)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(image_id, tag_id) DO UPDATE SET
-                confidence = MAX(image_tags.confidence, excluded.confidence)
-                """,
-                links,
-            )
-        conn.execute(
-            "UPDATE images SET ai_tagged = 1, suggested_folder = COALESCE(?, suggested_folder) WHERE id = ?",
-            (sug_folder, image_id),
-        )
-        refresh_tag_counts(conn)
-    conn.close()
+    from vision_service import analyze
+    try:
+        result = analyze(image_id)
+    except FileNotFoundError as error:
+        raise HTTPException(404,str(error)) from error
+    except ValueError as error:
+        raise HTTPException(400,str(error)) from error
+    log_operation(category="ai",action="單張圖片 AI 分析",summary=f"完成 {result['filename']} 的視覺標籤",affected_count=1,details=result)
     return api_image_detail(image_id)
 
 
@@ -1210,13 +927,8 @@ from semantic_engine import (
     compute_tag_correlations,
     semantic_search_expand,
     apply_semantic_theme_tags_batch,
-    call_gemini_flash_for_tags,
 )
 
-
-class GeminiFlashRequest(BaseModel):
-    prompt_task: str
-    api_key: Optional[str] = None
 
 
 @app.get("/api/semantic/correlations")
@@ -1239,12 +951,21 @@ def api_semantic_expand(q: str = Query(...)):
 
 @app.post("/api/semantic/apply_themes")
 def api_semantic_apply_themes():
-    return apply_semantic_theme_tags_batch()
+    res = apply_semantic_theme_tags_batch()
+    log_operation(
+        category="semantic",
+        action="語意主題叢集聚合",
+        summary=f"高階語意主題自動聚合完成，新增/更新 {res.get('theme_links_added', 0)} 筆主題標籤關聯",
+        status="success",
+        affected_count=res.get("theme_links_added", 0),
+        details=res,
+    )
+    return res
 
 
 @app.post("/api/semantic/gemini_flash")
-def api_semantic_gemini_flash(req: GeminiFlashRequest):
-    return call_gemini_flash_for_tags(req.prompt_task, req.api_key)
+def api_semantic_gemini_flash():
+    raise HTTPException(410, "已移除 Gemini API 直連；請由 Antigravity 或 Gemini CLI 透過圖庫 MCP 執行")
 
 
 # === Reverse Image Search (SauceNAO + IQDB + Twitter/Pixiv) Endpoints ===
@@ -1265,6 +986,16 @@ def api_reverse_search_single(
     )
     detail = api_image_detail(image_id)
     detail["reverse_search_result"] = search_info
+    found = search_info.get("found", False)
+    artists_str = ", ".join(search_info.get("artists", [])) if found else "未命中"
+    log_operation(
+        category="search_calibrate",
+        action="單張圖片以圖搜圖校正",
+        summary=f"對「{detail.get('filename', f'#{image_id}')}」執行以圖搜圖：{'命中畫師 ' + artists_str if found else '未命中認證畫師'}",
+        status="success" if found else "warning",
+        affected_count=1,
+        details=search_info,
+    )
     return detail
 
 
@@ -1305,10 +1036,19 @@ def api_purge_low_conf_ai(
     revert_unverified_ai_folders: bool = Query(True),
 ):
     from mcp_server import tool_gallery_purge_all_low_conf_ai_artists
-    return tool_gallery_purge_all_low_conf_ai_artists(
+    res = tool_gallery_purge_all_low_conf_ai_artists(
         max_ai_conf_to_purge=max_ai_conf_to_purge,
         revert_unverified_ai_folders=revert_unverified_ai_folders,
     )
+    log_operation(
+        category="search_calibrate",
+        action="清除低信心度 AI 誤猜畫師",
+        summary=f"已清除信心度 < {max_ai_conf_to_purge} 的 AI 誤猜畫師標籤共 {res.get('purged_ai_artist_links', 0)} 筆，還原 {res.get('reverted_images_to_root', 0)} 張未驗證資料夾圖片",
+        status="success",
+        affected_count=res.get("purged_ai_artist_links", 0) + res.get("reverted_images_to_root", 0),
+        details=res,
+    )
+    return res
 
 
 # === Auto-Ingest & AI Organize Scheduler Endpoints ===
@@ -1353,6 +1093,9 @@ def api_schedule_status():
 
 @app.post("/api/schedule/config")
 def api_schedule_save_config(req: ScheduleConfigUpdateRequest):
+    for source in req.source_dirs:
+        if source.strip():
+            validate_source(GALLERY_ROOT,source)
     scheduler_engine.start_daemon()
     updated = save_scheduler_config({
         "enabled": req.enabled,
@@ -1373,6 +1116,14 @@ def api_schedule_save_config(req: ScheduleConfigUpdateRequest):
     win_task_info = None
     if req.sync_windows_task:
         win_task_info = sync_windows_task_scheduler(updated)
+    log_operation(
+        category="schedule",
+        action="更新自動匯入排程設定",
+        summary=f"排程已{'啟用' if req.enabled else '停用'} (時間: {', '.join(updated.get('schedule_times', [])) or '無'}，來源目錄: {len(updated.get('source_dirs', []))} 個)",
+        status="success",
+        affected_count=len(updated.get("source_dirs", [])),
+        details={"enabled": req.enabled, "schedule_times": updated.get("schedule_times"), "source_dirs": updated.get("source_dirs")},
+    )
     return {
         "status": "saved",
         "config": updated,
@@ -1392,7 +1143,10 @@ def api_schedule_browse_fs(path: str = Query("")):
 
 @app.post("/api/schedule/pick_folder")
 def api_schedule_pick_folder(initial_dir: str = Query("")):
-    selected = pick_folder_dialog(initial_dir=initial_dir)
+    try:
+        selected = pick_folder_dialog(initial_dir=initial_dir)
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     return {"selected_path": selected}
 
 
@@ -1402,4 +1156,26 @@ def api_schedule_run_now():
     return scheduler_engine.trigger_pipeline_async(trigger_reason="手動立即執行")
 
 
+# === Operation Activity Logs Endpoints ===
+@app.get("/api/logs")
+def api_get_logs(
+    category: str = Query("all"),
+    q: str = Query(""),
+    limit: int = Query(120, ge=1, le=500),
+):
+    return get_operation_logs(category=category, q=q, limit=limit)
 
+
+@app.post("/api/logs/clear")
+def api_clear_logs():
+    return clear_operation_logs()
+
+
+@app.post("/api/logs/open_file")
+def api_open_log_file():
+    ACTIVITY_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if not ACTIVITY_LOG_FILE.exists():
+        ACTIVITY_LOG_FILE.write_text("", encoding="utf-8")
+    full_path = str(ACTIVITY_LOG_FILE.resolve()).replace("/", "\\")
+    subprocess.Popen(["explorer.exe", f"/select,{full_path}"])
+    return {"status": "opened", "path": full_path}

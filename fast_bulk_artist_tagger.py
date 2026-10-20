@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from database import GALLERY_ROOT, DB_PATH, ensure_tag, refresh_tag_counts
 from zh_dict import resolve_artist_folder_name
+from background_work import exclusive_job, background_checkpoint
 from reverse_search import (
     search_danbooru_by_md5,
     fetch_danbooru_artist_metadata,
@@ -103,6 +104,7 @@ def resolve_single_artist(raw_artist: str, artist_cache: Dict[str, Dict[str, Any
     return resolved_data
 
 
+@exclusive_job("批次畫師標籤整理")
 def main():
     print("=" * 60)
     print("🚀 開始執行 Twitter 圖庫超高速畫師反查與標籤補全")
@@ -153,7 +155,7 @@ def main():
     if unresolved_artists:
         print(f"[*] 正在並行查詢 Danbooru 官方 Artist API 與對齊繪師字典...")
         t_pre = time.time()
-        with ThreadPoolExecutor(max_workers=8) as executor:
+        with ThreadPoolExecutor(max_workers=2) as executor:
             future_to_art = {
                 executor.submit(resolve_single_artist, art, artist_cache): art
                 for art in unresolved_artists
@@ -186,80 +188,78 @@ def main():
     purged_ai_total = 0
 
     for i in range(0, total_images, batch_size):
+        background_checkpoint()
         chunk = rows[i : i + batch_size]
         chunk_img_ids = [r["id"] for r in chunk]
-
-        # 批次清除這批圖片上的低信心度 AI 畫師猜測
         placeholders = ",".join(["?"] * len(chunk_img_ids))
-        cur_purge = conn.execute(
-            f"""
-            DELETE FROM image_tags
-            WHERE image_id IN ({placeholders})
-              AND source = 'ai'
-              AND tag_id IN (SELECT id FROM tags WHERE category = 'artist')
-            """,
-            chunk_img_ids,
-        )
-        purged_ai_total += cur_purge.rowcount
-
-        image_tag_links = []
-        image_updates = []
-        zh_updates = {}
-
-        for r in chunk:
-            iid = r["id"]
-            fname = r["filename"]
-            base = fname.rsplit(".", 1)[0]
-            m_target = RE_TARGET_FILENAME.match(base)
-            m_tw_id = RE_TWITTER_ID.match(base)
-
-            target_artists = []
-            target_tw_handles = []
-            sug_folder = None
-            has_artist = False
-
-            if m_target:
-                raw_art = m_target.group(3).strip()
-                clean_k = raw_art.lower().replace(" ", "_")
-                info = artist_cache.get(clean_k) or resolve_single_artist(raw_art, artist_cache)
-
-                sug_folder = info.get("suggested_folder")
-                db_name = info.get("db_name")
-                cjk_name = info.get("cjk_name")
-                tw_handles = info.get("twitter_handles") or []
-
-                if db_name:
-                    tid_a = ensure_tag(conn, tag_cache, db_name, "artist")
-                    if tid_a > 0:
-                        image_tag_links.append((iid, tid_a, 1.0, "danbooru"))
-                        has_artist = True
-                        if cjk_name:
-                            zh_updates[tid_a] = cjk_name
-                else:
-                    norm_art = raw_art.replace(" ", "_").lower() if raw_art.isascii() else raw_art
-                    tid_a = ensure_tag(conn, tag_cache, norm_art, "artist")
-                    if tid_a > 0:
-                        image_tag_links.append((iid, tid_a, 1.0, "filename"))
-                        has_artist = True
-
-                for th in tw_handles:
-                    tw_tag = f"@{th}"
-                    tid_tw = ensure_tag(conn, tag_cache, tw_tag, "artist")
-                    if tid_tw > 0:
-                        image_tag_links.append((iid, tid_tw, 1.0, "twitter"))
-                        has_artist = True
-
-            elif m_tw_id:
-                tid_tw = ensure_tag(conn, tag_cache, "Twitter來源(推文ID)", "source")
-                image_tag_links.append((iid, tid_tw, 1.0, "filename"))
-
-            if has_artist:
-                tagged_count += 1
-
-            image_updates.append((sug_folder, iid))
-            processed += 1
 
         with conn:
+            cur_purge = conn.execute(
+                f"""
+                DELETE FROM image_tags
+                WHERE image_id IN ({placeholders})
+                  AND source = 'ai'
+                  AND tag_id IN (SELECT id FROM tags WHERE category = 'artist')
+                """,
+                chunk_img_ids,
+            )
+            purged_ai_total += cur_purge.rowcount
+
+            image_tag_links = []
+            image_updates = []
+            zh_updates = {}
+
+            for r in chunk:
+                iid = r["id"]
+                fname = r["filename"]
+                base = fname.rsplit(".", 1)[0]
+                m_target = RE_TARGET_FILENAME.match(base)
+                m_tw_id = RE_TWITTER_ID.match(base)
+
+                sug_folder = None
+                has_artist = False
+
+                if m_target:
+                    raw_art = m_target.group(3).strip()
+                    clean_k = raw_art.lower().replace(" ", "_")
+                    info = artist_cache.get(clean_k) or resolve_single_artist(raw_art, artist_cache)
+
+                    sug_folder = info.get("suggested_folder")
+                    db_name = info.get("db_name")
+                    cjk_name = info.get("cjk_name")
+                    tw_handles = info.get("twitter_handles") or []
+
+                    if db_name:
+                        tid_a = ensure_tag(conn, tag_cache, db_name, "artist")
+                        if tid_a > 0:
+                            image_tag_links.append((iid, tid_a, 1.0, "danbooru"))
+                            has_artist = True
+                            if cjk_name:
+                                zh_updates[tid_a] = cjk_name
+                    else:
+                        norm_art = raw_art.replace(" ", "_").lower() if raw_art.isascii() else raw_art
+                        tid_a = ensure_tag(conn, tag_cache, norm_art, "artist")
+                        if tid_a > 0:
+                            image_tag_links.append((iid, tid_a, 1.0, "filename"))
+                            has_artist = True
+
+                    for th in tw_handles:
+                        tw_tag = f"@{th}"
+                        tid_tw = ensure_tag(conn, tag_cache, tw_tag, "artist")
+                        if tid_tw > 0:
+                            image_tag_links.append((iid, tid_tw, 1.0, "twitter"))
+                            has_artist = True
+
+                elif m_tw_id:
+                    tid_tw = ensure_tag(conn, tag_cache, "Twitter來源(推文ID)", "source")
+                    image_tag_links.append((iid, tid_tw, 1.0, "filename"))
+
+                if has_artist:
+                    tagged_count += 1
+
+                image_updates.append((sug_folder, iid))
+                processed += 1
+
             # 寫入繁中/漢字別名
             for tid, zh_val in zh_updates.items():
                 conn.execute(
@@ -283,9 +283,9 @@ def main():
                     image_tag_links,
                 )
 
-            # 更新圖片狀態與 suggested_folder
+            # 更新圖片 suggested_folder（不偽造 ai_tagged = 1，保留給真正的視覺內容打標）
             conn.executemany(
-                "UPDATE images SET ai_tagged = 1, suggested_folder = COALESCE(?, suggested_folder) WHERE id = ?",
+                "UPDATE images SET suggested_folder = COALESCE(?, suggested_folder) WHERE id = ?",
                 image_updates,
             )
 

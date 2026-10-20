@@ -13,8 +13,9 @@ beautifulsoup4>=4.12.0
 
 # AI Vision & Onnx Models
 onnxruntime>=1.16.0
+huggingface-hub>=0.23,<3
 # For AMD GPU DirectML acceleration on Windows:
 # onnxruntime-directml>=1.16.0
 
 # Model Context Protocol (MCP) Server
-mcp>=1.0.0
+mcp>=1.0.0,<3

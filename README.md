@@ -1,5 +1,19 @@
 # Twitter & Pixiv AI 智慧標籤圖庫系統 (Twitter Tag Gallery)
 
+目前新增的可靠性與設定功能請見 [012 驗收紀錄](docs/doing/012-reliability-and-mcp.md)。
+
+- 設定 → **MCP 管理**：圖庫 MCP 開關、唯讀模式、工具權限、本機握手診斷、Gemini CLI 設定匯出；「工具操作與執行紀錄」可查看 24 個工具的參數格式、填入 JSON、實際執行並查看結果。
+- MCP 連線設定可選 **Antigravity** 或 **Gemini CLI**；登入與模型選擇在該客戶端管理，圖庫不使用 Gemini API 金鑰或直接呼叫模型 API。
+- 設定 → **背景任務與復原**：跨程序進度、未完成項目重試、檔案操作復原與資料庫備份。
+- 圖庫根目錄可由 `TWITTER_GALLERY_ROOT` 環境變數設定；預設仍為 `D:\圖檔\twitter`。
+- 前端分成 `gallery-core.js`（請求／擴充介面）、`gallery-app.js`（圖庫）、`gallery-shell.js`（畫面控制）及 `integration-settings.js`（整合設定），CSS 另存於 `gallery-base.css`、`gallery-shell.css`。
+
+工具定義與參數集中於 `tool_registry.py`，共用執行、作業鎖及紀錄在 `tool_runtime.py`，業務實作在 `gallery_tools.py`、`gallery_workflow_tools.py`；`mcp_server.py` 只處理協定。Web 與 MCP 共用 `gallery_query.py` 搜尋及 `gallery_tag_service.py` 標籤寫入。設定頁與 MCP 都會驗證已儲存的權限；寫入工具共用背景作業鎖，停止要求可在忙碌時送出，唯讀工具每個程序最多同時執行兩個。執行紀錄保留最近 200 次，每次最多 128 KiB 結果，不保存輸入參數。這個操作區管理本專案內建工具。
+
+新增掃描、圖片搜尋／詳情、人工標籤、本機 AI 打標、搬移預覽／執行、檔案復原、改名還原與任務查詢／停止工具。掃描、AI、搬移及復原會先回傳 `run_id`、`job_id`，使用 `gallery_get_tool_run` 查詢結果、`gallery_cancel_job` 送出停止要求；客戶端需保持 MCP 連線至任務結束。使用順序與完整工具參數見 [圖庫 MCP 流程](docs/doing/012-reliability-and-mcp.md#圖庫-mcp-流程工具2026-10-21)。
+
+開發驗證：先執行 `python -m pip install -r requirements-dev.txt` 與 `npm install`，再執行 `python -B -m unittest discover -s tests -p "test_*.py"`、`npm test`、`npm run test:browser`。瀏覽器測試使用本機 Microsoft Edge 與模擬 API。首次啟動新版會先備份既有資料庫再套用相容性遷移，舊 MCP 客戶端也需要重新連線。
+
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688.svg)](https://fastapi.tiangolo.com)
 [![DirectML / CUDA](https://img.shields.io/badge/Hardware%20Accel-DirectML%20%7C%20CUDA-purple.svg)](https://onnxruntime.ai/)
@@ -34,7 +48,7 @@
 
 ### 🖼️ 1. 極速現代化 Web 圖庫介面
 - **高效能瀑布流**：針對 30,000+ 張插圖進行虛擬滾動與縮圖快取優化，秒開秒刷。
-- **複合標籤檢索**：支援包含（`+tag`）、排除（`-tag`）、多標籤交叉檢索。
+- **複合標籤檢索**：點擊加入／移除標籤，支援多標籤交叉檢索。
 - **分類導航**：將標籤分為「畫師 (Artist)」、「角色 (Character)」、「原作作品 (Copyright)」、「外貌/服裝/屬性 (General)」、「主題 (Theme)」等分類。
 - **鍵盤快捷瀏覽**：支援左右箭頭換頁、空格鍵縮放、Esc 退出與快捷標籤操作。
 - **一鍵畫師歸檔**：點擊畫師標籤即可建立專屬資料夾並將圖片自動移入歸檔。
@@ -82,7 +96,7 @@
 flowchart TD
     %% Clients Layer
     subgraph Layer1 ["01 / 介面與外部整合層 (Presentation & Clients)"]
-        WebUI["SPA 響應式前端<br/>(static/index.html)<br/>• 虛擬化瀑布流<br/>• 複合標籤篩選 (+/-)<br/>• 快捷鍵與縮放檢視"]
+        WebUI["SPA 響應式前端<br/>(static/index.html)<br/>• 虛擬化瀑布流<br/>• 複合標籤篩選（加入／移除）<br/>• 快捷鍵與縮放檢視"]
         MCPClient["LLM Agent 介面<br/>(mcp_server.py Stdio)<br/>• Claude Desktop<br/>• Gemini Flash 3.8<br/>• Antigravity Subagents"]
     end
 
@@ -303,7 +317,13 @@ Twitter Tag Gallery 實作了 **Model Context Protocol (MCP)**，可供 Claude D
 - `gallery_semantic_search`：自然語言展開之語意搜尋。
 - `gallery_list_untranslated_tags`：列出待翻譯標籤供 LLM 批次處理。
 - `gallery_apply_gemini_enrichments`：批次寫入繁中翻譯與高階主題分類群組。
+- `gallery_batch_tag_or_move`：依標籤篩選、批次加標籤及搬移。
+- `gallery_list_candidates_for_artist_calibration`：列出待驗證的畫師圖片。
+- `gallery_reverse_image_search`：單張圖片來源反查與標籤校正。
 - `gallery_deep_reverse_search_batch`：深度以圖搜圖與標籤校正。
+- `gallery_calibrate_image_artist_and_tags`：寫入已驗證畫師、角色與作品標籤。
+- `gallery_purge_all_low_conf_ai_artists`：清除低信心度 AI 畫師及修正誤建資料夾。
+- `gallery_auto_organize_artist_folders`：預覽或執行畫師歸檔。
 
 ---
 
