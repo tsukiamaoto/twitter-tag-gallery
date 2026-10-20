@@ -1,0 +1,3538 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>D:\圖檔\twitter - AI 智慧標籤與畫師圖庫系統</title>
+  <style>
+    :root {
+      --bg-main: #0f1117;
+      --bg-panel: #161922;
+      --bg-card: #1e2230;
+      --bg-hover: #262b3d;
+      --border: #2a3042;
+      --text-main: #f1f5f9;
+      --text-muted: #94a3b8;
+      --accent: #6366f1;
+      --accent-hover: #4f46e5;
+      --artist-color: #f59e0b;
+      --char-color: #10b981;
+      --copy-color: #a855f7;
+      --rating-r18: #ef4444;
+      --rating-safe: #3b82f6;
+      --general-color: #64748b;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Segoe UI", "Microsoft JhengHei", -apple-system, sans-serif;
+      background: var(--bg-main);
+      color: var(--text-main);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* Top Header */
+    header {
+      background: var(--bg-panel);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      flex-wrap: wrap;
+      z-index: 20;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 17px;
+      color: #fff;
+    }
+    .brand span.path-badge {
+      background: #252b3d;
+      color: #cbd5e1;
+      font-size: 12px;
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-family: Consolas, monospace;
+      font-weight: 500;
+    }
+
+    .stats-bar {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      font-size: 12px;
+    }
+    .stat-pill {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      padding: 4px 10px;
+      border-radius: 999px;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: 0.15s;
+    }
+    .stat-pill:hover { border-color: var(--accent); color: #fff; }
+    .stat-pill b { color: #fff; margin-left: 3px; }
+    .stat-pill.highlight-warn b { color: #fbbf24; }
+    .stat-pill.highlight-ai b { color: #34d399; }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    button, select, input {
+      font-family: inherit;
+      font-size: 13px;
+    }
+    .btn {
+      background: var(--bg-card);
+      color: var(--text-main);
+      border: 1px solid var(--border);
+      padding: 6px 12px;
+      border-radius: 7px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: 0.15s;
+      white-space: nowrap;
+    }
+    .btn:hover { background: var(--bg-hover); border-color: #475569; }
+    .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+    .btn-primary:hover { background: var(--accent-hover); }
+    .btn-warn { background: #d97706; border-color: #d97706; color: #fff; font-weight: 600; }
+    .btn-warn:hover { background: #b45309; }
+    .btn-danger { background: #dc2626; border-color: #dc2626; color: #fff; }
+
+    /* AI Progress Banner */
+    #ai-banner {
+      background: linear-gradient(90deg, #1e1b4b, #172554);
+      border-bottom: 1px solid #3730a3;
+      padding: 8px 18px;
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      font-size: 13px;
+    }
+    #ai-banner.active { display: flex; }
+    .progress-wrap {
+      flex: 1;
+      max-width: 460px;
+      background: rgba(255,255,255,0.12);
+      height: 8px;
+      border-radius: 99px;
+      overflow: hidden;
+    }
+    .progress-bar {
+      height: 100%;
+      background: linear-gradient(90deg, #34d399, #6366f1);
+      width: 0%;
+      transition: width 0.3s;
+    }
+
+    /* Main Layout */
+    .layout {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+    }
+
+    /* Sidebar */
+    aside {
+      width: 320px;
+      min-width: 320px;
+      background: var(--bg-panel);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .sidebar-tabs {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+    }
+    .sidebar-tab {
+      flex: 1;
+      text-align: center;
+      padding: 10px 6px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      color: var(--text-muted);
+      border-bottom: 2px solid transparent;
+    }
+    .sidebar-tab.active {
+      color: #fff;
+      border-bottom-color: var(--accent);
+      background: rgba(99, 102, 241, 0.08);
+    }
+
+    .sidebar-section {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      padding: 10px;
+      gap: 8px;
+    }
+    .cat-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+    }
+    .cat-pill {
+      font-size: 12px;
+      padding: 4px 8px;
+      border-radius: 6px;
+      background: var(--bg-card);
+      color: var(--text-muted);
+      cursor: pointer;
+      border: 1px solid transparent;
+    }
+    .cat-pill.active {
+      background: var(--accent);
+      color: #fff;
+      font-weight: 600;
+    }
+    .search-input {
+      width: 100%;
+      background: var(--bg-main);
+      border: 1px solid var(--border);
+      color: var(--text-main);
+      padding: 7px 10px;
+      border-radius: 6px;
+      outline: none;
+    }
+    .search-input:focus { border-color: var(--accent); }
+
+    .tag-list, .folder-list {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      padding-right: 4px;
+    }
+    .tag-item, .folder-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      transition: 0.1s;
+      user-select: none;
+    }
+    .tag-item:hover, .folder-item:hover { background: var(--bg-hover); }
+    .folder-item.active { background: var(--accent); color: #fff; font-weight: 600; }
+    .tag-item-left {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      overflow: hidden;
+    }
+    .cat-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .cat-artist { background: var(--artist-color); }
+    .cat-character { background: var(--char-color); }
+    .cat-copyright { background: var(--copy-color); }
+    .cat-rating { background: var(--rating-r18); }
+    .cat-general { background: var(--general-color); }
+    .cat-source, .cat-year { background: #38bdf8; }
+    .cat-recent { background: #38bdf8; box-shadow: 0 0 6px #38bdf8; }
+
+    .tag-label-zh {
+      color: #f8fafc;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .tag-label-en {
+      color: var(--text-muted);
+      font-size: 11px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .tag-right {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      flex-shrink: 0;
+    }
+    .tag-count {
+      font-size: 11px;
+      color: var(--text-muted);
+      background: rgba(255,255,255,0.06);
+      padding: 1px 6px;
+      border-radius: 99px;
+    }
+    .btn-exclude-mini {
+      opacity: 0;
+      background: rgba(239,68,68,0.2);
+      color: #fca5a5;
+      border: none;
+      border-radius: 4px;
+      padding: 1px 5px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .tag-item:hover .btn-exclude-mini { opacity: 1; }
+
+    /* Content Area */
+    main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .filter-toolbar {
+      padding: 10px 16px;
+      background: var(--bg-panel);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .toolbar-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .search-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1;
+      max-width: 680px;
+    }
+    .select-box {
+      background: var(--bg-main);
+      color: var(--text-main);
+      border: 1px solid var(--border);
+      padding: 6px 10px;
+      border-radius: 6px;
+    }
+
+    .active-filters {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .filter-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 9px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .filter-chip.inc { background: rgba(99, 102, 241, 0.22); border: 1px solid #6366f1; color: #e0e7ff; }
+    .filter-chip.exc { background: rgba(239, 68, 68, 0.22); border: 1px solid #ef4444; color: #fecaca; }
+
+    /* Batch Selection Bar */
+    #batch-bar {
+      background: #1e1b4b;
+      border-bottom: 1px solid #4f46e5;
+      padding: 8px 16px;
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    #batch-bar.active { display: flex; }
+
+    /* Gallery Grid */
+    #gallery-scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(215px, 1fr));
+      gap: 14px;
+    }
+    .card {
+      background: var(--bg-card);
+      border: 2px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      transition: transform 0.12s, border-color 0.12s;
+    }
+    .card:hover {
+      transform: translateY(-2px);
+      border-color: #475569;
+    }
+    .card.selected {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.4);
+    }
+    .thumb-box {
+      width: 100%;
+      aspect-ratio: 1 / 1.15;
+      background: #0b0d13;
+      position: relative;
+      cursor: pointer;
+      overflow: hidden;
+    }
+    .thumb-box img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .card-check {
+      position: absolute;
+      top: 8px;
+      left: 8px;
+      width: 22px;
+      height: 22px;
+      border-radius: 5px;
+      background: rgba(15, 17, 23, 0.78);
+      border: 1px solid rgba(255,255,255,0.35);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      z-index: 4;
+      color: #fff;
+      font-size: 13px;
+    }
+    .card.selected .card-check {
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+    .badge-top-right {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      display: flex;
+      gap: 4px;
+      z-index: 3;
+    }
+    .mini-badge {
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      background: rgba(15,17,23,0.82);
+      color: #fff;
+    }
+    .mini-badge.r18 { background: rgba(220, 38, 38, 0.88); }
+    .mini-badge.sensitive { background: rgba(217, 119, 6, 0.85); }
+    .mini-badge.media { background: rgba(99, 102, 241, 0.9); }
+
+    .card-body {
+      padding: 8px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      font-size: 12px;
+    }
+    .card-title {
+      color: var(--text-muted);
+      font-size: 11px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .card-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+    .pill {
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 11px;
+      white-space: nowrap;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      cursor: pointer;
+    }
+    .pill.artist { background: rgba(245, 158, 11, 0.18); color: #fcd34d; border: 1px solid rgba(245, 158, 11, 0.35); }
+    .pill.character { background: rgba(16, 185, 129, 0.18); color: #6ee7b7; border: 1px solid rgba(16, 185, 129, 0.35); }
+    .pill.copyright { background: rgba(168, 85, 247, 0.18); color: #d8b4fe; border: 1px solid rgba(168, 85, 247, 0.35); }
+    .pill.general { background: rgba(100, 116, 139, 0.2); color: #cbd5e1; }
+    .pill.suggest { background: rgba(52, 211, 153, 0.22); color: #6ee7b7; border: 1px dashed #10b981; }
+
+    /* Pagination Footer */
+    .pagination-bar {
+      padding: 8px 16px;
+      background: var(--bg-panel);
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 13px;
+    }
+
+    /* Modals */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.82);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      padding: 20px;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal-card {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      width: 100%;
+      max-width: 1240px;
+      height: 90vh;
+      display: flex;
+      overflow: hidden;
+      box-shadow: 0 25px 50px -12px rgba(0,0,0,0.7);
+    }
+    .modal-media {
+      flex: 1;
+      background: #090a0f;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      overflow: hidden;
+    }
+    .modal-media img, .modal-media video {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+    }
+    .nav-arrow {
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+      background: rgba(15, 17, 23, 0.75);
+      color: #fff;
+      border: 1px solid rgba(255,255,255,0.2);
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
+      cursor: pointer;
+      font-size: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .nav-arrow:hover { background: var(--accent); }
+    .nav-arrow.prev { left: 14px; }
+    .nav-arrow.next { right: 14px; }
+
+    .modal-info {
+      width: 400px;
+      min-width: 400px;
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+      padding: 16px;
+      gap: 14px;
+    }
+    .dialog-box {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      width: 100%;
+      max-width: 580px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .tag-group-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .detail-tag-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      margin: 2px;
+      padding: 4px 8px;
+      border-radius: 6px;
+      font-size: 12px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+    }
+    .detail-tag-chip .del-x {
+      cursor: pointer;
+      color: #f87171;
+      font-weight: bold;
+      margin-left: 3px;
+    }
+
+    /* Interactive PickerTime Component */
+    .time-picker-wrap {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .time-picker-trigger {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: #0f172a;
+      border: 1px solid #38bdf8;
+      color: #f8fafc;
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.15s;
+      min-width: 165px;
+      justify-content: space-between;
+      box-shadow: 0 2px 8px rgba(14, 165, 233, 0.15);
+    }
+    .time-picker-trigger:hover {
+      background: #1e293b;
+      border-color: #7dd3fc;
+    }
+    .time-picker-trigger.empty-slot {
+      border-color: var(--border);
+      color: var(--text-muted);
+      font-weight: 500;
+      box-shadow: none;
+    }
+    .time-picker-popover {
+      position: fixed;
+      z-index: 2500;
+      background: #1e293b;
+      border: 1px solid #38bdf8;
+      border-radius: 12px;
+      box-shadow: 0 14px 36px rgba(0, 0, 0, 0.75);
+      width: 340px;
+      padding: 12px;
+      display: none;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .time-picker-popover.open {
+      display: flex;
+    }
+    .tp-presets {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    .tp-preset-btn {
+      background: #0f172a;
+      border: 1px solid var(--border);
+      color: #cbd5e1;
+      border-radius: 6px;
+      padding: 3px 8px;
+      font-size: 11px;
+      cursor: pointer;
+      transition: all 0.12s;
+    }
+    .tp-preset-btn:hover {
+      border-color: #38bdf8;
+      color: #38bdf8;
+      background: rgba(56, 189, 248, 0.1);
+    }
+    .tp-columns {
+      display: grid;
+      grid-template-columns: 1.25fr 1fr;
+      gap: 8px;
+      height: 210px;
+    }
+    .tp-col {
+      display: flex;
+      flex-direction: column;
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .tp-col-header {
+      font-size: 11px;
+      font-weight: 700;
+      color: #94a3b8;
+      text-align: center;
+      padding: 5px;
+      background: rgba(255, 255, 255, 0.03);
+      border-bottom: 1px solid var(--border);
+    }
+    .tp-col-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 4px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      scroll-behavior: smooth;
+    }
+    .tp-option {
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      color: #cbd5e1;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      transition: background 0.1s;
+    }
+    .tp-option:hover {
+      background: rgba(56, 189, 248, 0.15);
+      color: #fff;
+    }
+    .tp-option.active {
+      background: #0284c7;
+      color: #fff;
+      font-weight: 700;
+    }
+
+    /* Interactive Folder Browser Modal */
+    .fb-breadcrumb-item {
+      background: #1e293b;
+      border: 1px solid var(--border);
+      color: #e2e8f0;
+      padding: 3px 8px;
+      border-radius: 5px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .fb-breadcrumb-item:hover {
+      border-color: #38bdf8;
+      color: #38bdf8;
+    }
+    .fb-dir-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 10px;
+      border-radius: 7px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: all 0.12s;
+    }
+    .fb-dir-row:hover {
+      background: rgba(56, 189, 248, 0.12);
+      border-color: rgba(56, 189, 248, 0.35);
+    }
+    .folder-chip-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(14, 165, 233, 0.14);
+      border: 1px solid #0ea5e9;
+      color: #e0f2fe;
+      padding: 5px 10px;
+      border-radius: 7px;
+      font-size: 12px;
+      font-family: Consolas, monospace;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top Header -->
+  <header>
+    <div class="brand">
+      <span>🎨 Twitter / Pixiv 智慧標籤圖庫</span>
+      <span class="path-badge">D:\圖檔\twitter</span>
+    </div>
+
+    <div class="stats-bar">
+      <div class="stat-pill" onclick="setFolderFilter('__ALL__')" title="點擊查看全部圖片">
+        總圖數 <b id="st-total">0</b>
+      </div>
+      <div class="stat-pill highlight-warn" onclick="setFolderFilter('__ROOT__')" title="點擊查看散落在根目錄的未歸檔圖片">
+        🚨 根目錄未歸檔 <b id="st-root">0</b>
+      </div>
+      <div class="stat-pill" onclick="setFolderFilter('__FOLDERS__')" title="點擊查看已放入子資料夾的圖片">
+        📁 資料夾已歸檔 <b id="st-folder">0</b>
+      </div>
+      <div class="stat-pill highlight-ai" onclick="setAiFilter('tagged')" title="點擊查看已透過 AI 打標的圖片">
+        🤖 AI 已打標 <b id="st-ai">0</b>
+      </div>
+      <div class="stat-pill highlight-ai" onclick="setFolderFilter('__SUGGESTED__')" title="AI 辨識出屬於你現有繪師資料夾的根目錄圖片">
+        ✨ AI 認出繪師可歸檔 <b id="st-suggest">0</b>
+      </div>
+    </div>
+
+    <div class="header-actions">
+      <button class="btn btn-primary" style="background:#0ea5e9;border-color:#0ea5e9;" onclick="openScheduleModal()">⏰ 定時排程匯入與歸檔</button>
+      <button class="btn btn-primary" style="background:linear-gradient(135deg, #4f46e5, #059669); border-color:#34d399; font-weight:700; box-shadow:0 2px 10px rgba(16,185,129,0.25);" onclick="openAiModal()">🤖 智慧標籤</button>
+      <button class="btn btn-danger" id="btn-top-unload-model" style="display:none; background:#dc2626; border-color:#dc2626;" onclick="unloadAiModel(false)" title="目前 AI 模型已載入於顯卡記憶體中，點擊立即卸載並釋放 VRAM">⏏️ 卸載模型 (釋放 VRAM)</button>
+      <button class="btn btn-warn" onclick="openRenameModal()">✏️ 批次改名 (鎖定順序)</button>
+      <button class="btn" onclick="openOrganizeModal()">📂 資料夾歸檔精靈</button>
+      <button class="btn" onclick="rescanLibrary()" title="重新掃描 D:\圖檔\twitter 檔案變動">🔄 重新掃描</button>
+    </div>
+  </header>
+
+  <!-- Live AI Progress Banner -->
+  <div id="ai-banner" style="font-variant-numeric: tabular-nums;">
+    <div style="display:flex; align-items:center; gap:10px;">
+      <span>⚡ <b id="ai-banner-msg">正在執行背景任務...</b></span>
+      <span id="ai-banner-file" style="display:none;"></span>
+    </div>
+    <div style="display:flex; align-items:center; gap:12px;">
+      <div class="progress-wrap"><div class="progress-bar" id="ai-progress-bar" style="transition: width 0.35s ease;"></div></div>
+      <span id="ai-banner-pct" style="font-weight:700; min-width:42px; text-align:right;">0%</span>
+      <button class="btn btn-danger" style="padding:3px 10px; font-size:12px;" onclick="stopAiBatch()">⏹ 暫停</button>
+    </div>
+  </div>
+
+  <!-- Main Content Layout -->
+  <div class="layout">
+    <!-- Left Sidebar -->
+    <aside>
+      <div class="sidebar-tabs">
+        <div class="sidebar-tab active" id="tab-btn-tags" onclick="switchSidebarTab('tags')">🏷️ 標籤與畫師篩選</div>
+        <div class="sidebar-tab" id="tab-btn-folders" onclick="switchSidebarTab('folders')">📁 實體資料夾 (57)</div>
+      </div>
+
+      <!-- Tags Panel -->
+      <div class="sidebar-section" id="panel-tags">
+        <div class="cat-pills">
+          <div class="cat-pill active" data-cat="all" onclick="setTagCategory('all', this)">全部</div>
+          <div class="cat-pill" data-cat="recent" onclick="setTagCategory('recent', this)" title="依編輯時間由最新排到最舊檢視所有圖片">🕒 最近</div>
+          <div class="cat-pill" data-cat="artist" onclick="setTagCategory('artist', this)">🎨 畫師</div>
+          <div class="cat-pill" data-cat="character" onclick="setTagCategory('character', this)">👤 角色</div>
+          <div class="cat-pill" data-cat="copyright" onclick="setTagCategory('copyright', this)">📚 作品</div>
+          <div class="cat-pill" data-cat="general" onclick="setTagCategory('general', this)">🏷️ 屬性</div>
+          <div class="cat-pill" data-cat="rating" onclick="setTagCategory('rating', this)">🔞 分級</div>
+          <div class="cat-pill" data-cat="source" onclick="setTagCategory('source', this)">📌 來源</div>
+        </div>
+        <input type="text" id="tag-search-input" class="search-input" placeholder="搜尋畫師、中文或英文標籤 (例: 兔女郎, Horosuke)..." oninput="debounceLoadTags()" />
+        <div style="font-size:11px; color:var(--text-muted); display:flex; justify-content:space-between;">
+          <span>左鍵：加入篩選 (+)</span>
+          <span>右鍵或點 [-]：排除 (-)</span>
+        </div>
+        <div class="tag-list" id="sidebar-tag-list"></div>
+      </div>
+
+      <!-- Folders Panel -->
+      <div class="sidebar-section" id="panel-folders" style="display:none;">
+        <input type="text" id="folder-search-input" class="search-input" placeholder="篩選資料夾名稱..." oninput="renderFolderList()" />
+        <div class="folder-list" id="sidebar-folder-list"></div>
+      </div>
+    </aside>
+
+    <!-- Right Main Area -->
+    <main>
+      <div class="filter-toolbar">
+        <div class="toolbar-row">
+          <div class="search-group">
+            <input type="text" id="main-search" class="search-input" placeholder="🔍 全域搜尋檔名、畫師、角色、中文標籤 (按 Enter 或自動篩選)..." oninput="debounceLoadImages()" />
+            <select id="sel-media" class="select-box" onchange="resetPageAndLoad()">
+              <option value="all">全部媒體</option>
+              <option value="image">靜態圖片 (JPG/PNG)</option>
+              <option value="gif_video">動圖與影片 (GIF/MP4)</option>
+            </select>
+            <select id="sel-ai" class="select-box" onchange="resetPageAndLoad()">
+              <option value="all">全部 AI 狀態</option>
+              <option value="tagged">🤖 AI 已分析標籤</option>
+              <option value="untagged">⏳ 尚未 AI 分析</option>
+            </select>
+            <select id="sel-sort" class="select-box" onchange="resetPageAndLoad()">
+              <option value="natural_asc">🔢 Windows 自然順序 (_2 在 _10 前)</option>
+              <option value="mtime_desc">🕒 最新修改日期優先</option>
+              <option value="mtime_asc">🕒 最舊修改日期優先</option>
+              <option value="size_desc">💾 檔案大小 (大 → 小)</option>
+            </select>
+          </div>
+
+          <div style="display:flex; align-items:center; gap:8px;">
+            <button class="btn" onclick="selectAllCurrentPage()">☑️ 全選本頁</button>
+            <button class="btn" onclick="clearAllFilters()">🧹 重設篩選</button>
+          </div>
+        </div>
+
+        <div class="active-filters" id="active-filters-bar"></div>
+      </div>
+
+      <!-- Batch Action Bar -->
+      <div id="batch-bar">
+        <div>
+          已選取 <b id="batch-count" style="color:#a5b4fc; font-size:15px;">0</b> 張圖片
+        </div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="btn btn-primary" onclick="openBatchTagModal('artist')">🎨 批次設定畫師標籤</button>
+          <button class="btn btn-primary" onclick="openBatchTagModal('general')">🏷️ 批次新增內容/角色標籤</button>
+          <button class="btn btn-warn" onclick="openBatchMoveModal()">📂 批次搬移至繪師資料夾</button>
+          <button class="btn" onclick="clearSelection()">✖ 取消選取</button>
+        </div>
+      </div>
+
+      <!-- Image Grid -->
+      <div id="gallery-scroll">
+        <div class="grid" id="image-grid"></div>
+      </div>
+
+      <!-- Pagination -->
+      <div class="pagination-bar">
+        <div id="page-info">顯示 0 筆結果</div>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <button class="btn" id="btn-prev" onclick="changePage(-1)">⬅ 上一頁</button>
+          <span id="page-num-label">第 1 頁</span>
+          <button class="btn" id="btn-next" onclick="changePage(1)">下一頁 ➡</button>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Lightbox Detail Modal -->
+  <div class="modal-backdrop" id="detail-modal" onclick="if(event.target===this) closeDetailModal()">
+    <div class="modal-card">
+      <div class="modal-media">
+        <button class="nav-arrow prev" onclick="navigateDetail(-1)" title="上一張 (←)">❮</button>
+        <div id="detail-media-container" style="width:100%; height:100%; display:flex; align-items:center; justify-content:center;"></div>
+        <button class="nav-arrow next" onclick="navigateDetail(1)" title="下一張 (→)">❯</button>
+      </div>
+      <div class="modal-info">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
+          <div style="word-break:break-all; font-weight:700; font-size:14px;" id="dt-filename"></div>
+          <button class="btn" style="padding:3px 8px;" onclick="closeDetailModal()">✖</button>
+        </div>
+
+        <div style="font-size:12px; color:var(--text-muted); display:flex; flex-direction:column; gap:4px;">
+          <div>📂 目前位置：<b id="dt-folder" style="color:#fff;"></b></div>
+          <div>💾 檔案大小：<span id="dt-size"></span> KB</div>
+          <div id="dt-suggest-box" style="display:none; margin-top:4px; padding:6px 8px; background:rgba(16,185,129,0.15); border:1px solid #10b981; border-radius:6px; color:#6ee7b7;">
+            ✨ AI 認出此圖屬於現有繪師：<b id="dt-suggest-name"></b>
+            <button class="btn btn-primary" style="margin-top:5px; width:100%; justify-content:center; padding:4px;" onclick="moveSingleToSuggested()">📂 立即歸檔至該繪師資料夾</button>
+          </div>
+        </div>
+
+        <div id="dt-rev-links" style="display:none; font-size:12px; background:rgba(5,150,105,0.15); border:1px solid #059669; padding:6px 8px; border-radius:6px;"></div>
+
+        <div style="display:flex; gap:6px; flex-wrap:wrap;">
+          <button class="btn btn-primary" style="flex:1; background:linear-gradient(135deg, #4f46e5, #059669); border-color:#34d399; justify-content:center; font-weight:700;" id="btn-single-unified" onclick="runSingleUnifiedTagAndCalibrate()">🤖 智慧標籤 (AI 打標 ➔ 搜圖校正)</button>
+          <button class="btn btn-primary" style="background:linear-gradient(135deg, #db2777, #9333ea); border-color:#f472b6; font-weight:700;" id="btn-single-decensor" onclick="openOrRunSingleDecensor()" title="使用本機 AMD RX 9070 XT GPU (YOLO + DeepCreamPy v2) 偵測並去除二次元馬賽克/黑條">✨ AI 去馬賽克</button>
+          <button class="btn" onclick="openInExplorer()" title="在 Windows 檔案總管中顯示此檔案">📂 檔案總管</button>
+        </div>
+
+        <!-- 本機 GPU 二次元去馬賽克預覽與儲存控制面板 -->
+        <div id="dt-decensor-box" style="display:none; background:rgba(219,39,119,0.12); border:1px solid #ec4899; border-radius:8px; padding:10px; flex-direction:column; gap:8px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:6px;">
+            <b style="font-size:12px; color:#f9a8d4;">✨ 本機 GPU 二次元去馬賽克 (YOLO 遮罩偵測 + DeepCreamPy v2)</b>
+            <button class="btn" style="padding:2px 6px; font-size:11px;" onclick="document.getElementById('dt-decensor-box').style.display='none'">✖</button>
+          </div>
+          <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap; font-size:12px;">
+            <label style="display:flex; align-items:center; gap:4px;">
+              <span>遮罩模式：</span>
+              <select id="dt-decensor-mode" class="select-box" style="padding:3px 6px; font-size:12px;">
+                <option value="auto" selected>自動判斷 (方格馬賽克 / 黑條)</option>
+                <option value="mosaic">方格馬賽克重繪 (Mosaic)</option>
+                <option value="bar">黑條/白條遮罩重繪 (Bar)</option>
+              </select>
+            </label>
+            <button class="btn btn-primary" id="btn-decensor-preview" style="padding:4px 10px; font-size:12px; background:#db2777; border-color:#f472b6;" onclick="previewSingleDecensor()">🔍 重新偵測並預覽</button>
+            <button class="btn" id="btn-decensor-compare" style="padding:4px 10px; font-size:12px; display:none;" onclick="toggleDecensorCompare()">👁️ 切換對比：目前顯示【去碼後】</button>
+          </div>
+          <div id="dt-decensor-status" style="font-size:12px; color:#fbcfe8; line-height:1.4;">準備就緒，點擊預覽即可在左方大圖即時檢視去碼效果（未點擊儲存前不會修改硬碟原檔）。</div>
+          <div id="dt-decensor-save-row" style="display:none; gap:6px; flex-wrap:wrap;">
+            <button class="btn btn-primary" style="flex:1; justify-content:center; background:#059669; border-color:#34d399; font-weight:700;" onclick="applySingleDecensor('new_copy')">📄 另存無碼新檔 (_decensored.png 保留原圖)</button>
+            <button class="btn btn-warn" style="flex:1; justify-content:center; font-weight:700;" onclick="applySingleDecensor('overwrite')">💾 直接覆蓋原圖</button>
+          </div>
+        </div>
+
+        <!-- Quick Add Tag / Artist -->
+        <div style="background:var(--bg-main); padding:10px; border-radius:8px; border:1px solid var(--border); display:flex; flex-direction:column; gap:6px;">
+          <div class="tag-group-title" style="margin:0;">➕ 手動新增標籤 / 指定畫師</div>
+          <div style="display:flex; gap:6px;">
+            <select id="dt-add-cat" class="select-box" style="padding:5px;">
+              <option value="artist">🎨 畫師</option>
+              <option value="character">👤 角色</option>
+              <option value="copyright">📚 作品</option>
+              <option value="general">🏷️ 屬性</option>
+            </select>
+            <input type="text" id="dt-add-input" class="search-input" list="artist-datalist" placeholder="輸入畫師或標籤名稱..." onkeydown="if(event.key==='Enter') addSingleTag()" />
+            <button class="btn btn-primary" onclick="addSingleTag()">新增</button>
+          </div>
+          <div style="display:flex; gap:6px; margin-top:4px;">
+            <input type="text" id="dt-move-folder-input" class="search-input" list="folder-datalist" placeholder="輸入或選擇要移入的繪師資料夾..." />
+            <button class="btn btn-warn" onclick="moveSingleToFolderInput()">搬移檔案</button>
+          </div>
+        </div>
+
+        <!-- Tags Display -->
+        <div id="dt-tags-container" style="display:flex; flex-direction:column; gap:12px; flex:1;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Smart Tagging Modal (Only closes via X button or Close button) -->
+  <div class="modal-backdrop" id="ai-modal">
+    <div class="dialog-box" style="max-width:780px; max-height:92vh; overflow:hidden; display:flex; flex-direction:column;">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h3>🤖 智慧標籤</h3>
+        <button class="btn" onclick="closeAiModal()">✖</button>
+      </div>
+
+      <!-- Smart Tagging Pipeline -->
+      <div id="ai-tab-pipeline" style="overflow-y:auto; flex:1; display:flex; flex-direction:column; gap:10px; padding-right:4px;">
+        <!-- 模型載入狀態與載入/卸載管理區塊 -->
+        <div style="background:var(--bg-main); border:1px solid var(--border); border-radius:8px; padding:10px 12px; display:flex; flex-direction:column; gap:6px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+            <div style="font-size:13px;">
+              <b>🧠 本機 AI 模型記憶體狀態：</b>
+              <span id="ai-modal-model-state" style="color:#a5b4fc; font-weight:700;">檢查中...</span>
+            </div>
+            <div style="display:flex; gap:6px; flex-wrap:wrap;">
+              <button class="btn btn-primary" id="btn-modal-load-vram" style="padding:4px 10px; font-size:12px; background:#059669; border-color:#10b981;" onclick="loadAiModelNow()" title="立即將 Camie Tagger v2 模型載入至 GPU 顯卡記憶體 (VRAM)">⚡ 載入模型至 GPU</button>
+              <button class="btn btn-warn" id="btn-modal-unload-vram" style="padding:4px 10px; font-size:12px;" onclick="unloadAiModel(false)" title="將模型從 GPU 顯卡記憶體 (VRAM) 與系統 RAM 中卸載">⏏️ 卸載模型 (釋放 VRAM)</button>
+              <button class="btn btn-danger" id="btn-modal-unload-disk" style="padding:4px 10px; font-size:12px;" onclick="unloadAiModel(true)" title="卸載模型並同時刪除硬碟上的 .onnx 模型快取檔 (~750MB)">🗑️ 卸載並刪除硬碟模型檔</button>
+            </div>
+          </div>
+          <label style="font-size:12px; display:flex; align-items:center; gap:8px; color:#cbd5e1;">
+            <input type="checkbox" id="ai-auto-unload" checked />
+            <span>⚡ <b>第一階段本機 AI 打標結束後，立即自動卸載模型釋放 GPU 顯卡記憶體 (VRAM)</b>（進入以圖搜圖階段時 0 VRAM 佔用）</span>
+          </label>
+        </div>
+
+        <!-- 視窗內即時執行進度條面板 -->
+        <div id="ai-modal-live-box" style="display:none; background:rgba(79,70,229,0.16); border:1px solid #6366f1; border-radius:8px; padding:10px 12px; flex-direction:column; gap:8px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+            <div style="font-size:13px; font-weight:700; color:#e2e8f0;" id="ai-modal-live-msg">⏳ 正在準備智慧標籤任務...</div>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span id="ai-modal-live-pct" style="font-size:13px; font-weight:800; color:#34d399;">0%</span>
+              <button class="btn btn-danger" id="btn-modal-stop-task" style="padding:3px 10px; font-size:12px;" onclick="stopAiBatch()">⏹ 停止</button>
+            </div>
+          </div>
+          <div style="width:100%; height:10px; background:#0f172a; border-radius:999px; overflow:hidden; border:1px solid rgba(99,102,241,0.4);">
+            <div id="ai-modal-live-bar" style="width:0%; height:100%; background:linear-gradient(90deg, #6366f1, #10b981); transition:width 0.25s;"></div>
+          </div>
+          <div style="display:flex; justify-content:space-between; font-size:11px; color:#94a3b8;">
+            <span id="ai-modal-live-file">目前處理檔案：待機中</span>
+            <span id="ai-modal-live-speed">處理速度：0.0 張/秒</span>
+          </div>
+        </div>
+
+        <!-- 目標範圍選擇 -->
+        <div style="background:var(--bg-main); border:1px solid var(--border); border-radius:8px; padding:10px 12px;">
+          <label style="font-size:13px; display:block;">
+            <b>🎯 選擇處理與校正目標範圍：</b>
+            <select id="ai-scope" class="select-box" style="width:100%; margin-top:6px;">
+              <option value="root_untagged">🚨 根目錄尚未打標 / 尚未獲得「認證畫師」的圖片 (推薦)</option>
+              <option value="ai_low_conf">🎯 僅針對「已有本機 AI 猜測畫師、尚未經搜圖認證」的圖片進行校正</option>
+              <option value="all_untagged">🌐 圖庫中所有尚未完成打標與畫師認證的圖片 (含子資料夾)</option>
+              <option value="root_all">🔄 重新分析與校正根目錄全部圖片</option>
+            </select>
+          </label>
+        </div>
+
+        <!-- 階段 ①：本機 GPU AI 視覺打標 -->
+        <div style="background:var(--bg-main); border:1px solid #6366f1; border-radius:8px; padding:10px 12px; display:flex; flex-direction:column; gap:8px;">
+          <label style="font-size:13px; font-weight:700; color:#a5b4fc; display:flex; align-items:center; gap:8px; cursor:pointer;">
+            <input type="checkbox" id="ai-step-local" checked style="width:16px; height:16px;" />
+            <span>① 第一階段：先透過本機 AMD GPU AI (Camie v2) 視覺打標（辨識服裝、場景、角色與屬性，含 Pixiv ID 反查）</span>
+          </label>
+          <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; font-size:12px;">
+            <label>
+              <b>AI 處理張數上限 (0=全跑)：</b>
+              <input type="number" id="ai-limit" class="search-input" value="200" min="0" step="50" style="margin-top:4px;" />
+            </label>
+            <label>
+              <b>一般屬性門檻 (預設 0.38)：</b>
+              <input type="number" id="ai-gen-thresh" class="search-input" value="0.38" min="0.15" max="0.85" step="0.02" style="margin-top:4px;" />
+            </label>
+            <label>
+              <b>AI 畫師門檻 (預設 0.65 防誤猜)：</b>
+              <input type="number" id="ai-art-thresh" class="search-input" value="0.65" min="0.50" max="0.95" step="0.05" style="margin-top:4px;" />
+            </label>
+          </div>
+        </div>
+
+        <!-- 階段 ②：深度以圖搜圖 & Gemini MCP 畫師與標籤校正 -->
+        <div style="background:var(--bg-main); border:1px solid #10b981; border-radius:8px; padding:10px 12px; display:flex; flex-direction:column; gap:8px;">
+          <label style="font-size:13px; font-weight:700; color:#6ee7b7; display:flex; align-items:center; gap:8px; cursor:pointer;">
+            <input type="checkbox" id="ai-step-rev" checked style="width:16px; height:16px;" />
+            <span>② 第二階段：接著執行深度以圖搜圖 &amp; Gemini 畫師校正（Danbooru / IQDB / SauceNAO / Google Lens 比對並清除 AI 誤猜）</span>
+          </label>
+          <div style="display:grid; grid-template-columns:1fr 1fr 1.6fr; gap:10px; font-size:12px;">
+            <label>
+              <b>單次以圖搜圖校正張數：</b>
+              <input type="number" id="rev-limit" class="search-input" value="30" min="1" max="500" style="margin-top:4px;" />
+            </label>
+            <label>
+              <b>最低搜圖相似度 (%)：</b>
+              <input type="number" id="rev-sim" class="search-input" value="72" min="55" max="95" style="margin-top:4px;" />
+            </label>
+            <label>
+              <b>SauceNAO API Key (選填，免填亦可透過 IQDB+Danbooru 認證)：</b>
+              <input type="text" id="rev-apikey" class="search-input" placeholder="選填 api_key" style="margin-top:4px;" />
+            </label>
+          </div>
+        </div>
+
+        <!-- 階段 ③：語意相關性主題聚合 & 自動建立繪師資料夾歸檔 -->
+        <div style="background:rgba(16,185,129,0.1); border:1px solid #059669; border-radius:8px; padding:10px 12px; display:flex; flex-direction:column; gap:6px;">
+          <label style="font-size:13px; font-weight:700; color:#fcd34d; display:flex; align-items:center; gap:8px; cursor:pointer;">
+            <input type="checkbox" id="ai-step-sem" checked style="width:16px; height:16px;" />
+            <span>③ 第三階段：自動聚合 9 大高階語意相關性主題標籤 (兔女郎/女僕/泳裝/黑絲等)</span>
+          </label>
+          <label style="font-size:13px; font-weight:700; color:#6ee7b7; display:flex; align-items:center; gap:8px; cursor:pointer;">
+            <input type="checkbox" id="ai-auto-move" checked style="width:16px; height:16px;" />
+            <span>📂 <b>確認真實畫師後，自動建立 <code>D:\圖檔\twitter\&lt;繪師名稱&gt;</code> 資料夾並將圖片移入歸檔</b></span>
+          </label>
+        </div>
+
+        <!-- 階段 ④ (選用)：本機 GPU 二次元自動去馬賽克 -->
+        <div style="background:rgba(219,39,119,0.1); border:1px solid #ec4899; border-radius:8px; padding:10px 12px; display:flex; flex-direction:column; gap:6px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+            <label style="font-size:13px; font-weight:700; color:#f9a8d4; display:flex; align-items:center; gap:8px; cursor:pointer;">
+              <input type="checkbox" id="ai-step-decensor" style="width:16px; height:16px;" />
+              <span>✨ 第四階段 (選用)：對偵測到含馬賽克/黑條遮罩的圖片自動執行 GPU 去馬賽克 (YOLO + DeepCreamPy v2)</span>
+            </label>
+            <select id="ai-decensor-save-mode" class="select-box" style="padding:4px 8px; font-size:12px;">
+              <option value="new_copy" selected>📄 另存無碼新檔 (_decensored.png 保留原圖)</option>
+              <option value="overwrite">💾 直接覆蓋原圖</option>
+            </select>
+          </div>
+        </div>
+
+        <div style="border-top:1px solid var(--border); padding-top:8px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+          <div style="display:flex; gap:6px; flex-wrap:wrap;">
+            <button class="btn" style="font-size:12px; padding:5px 10px;" onclick="runPixivLookup()">⚡ 檔名 Pixiv ID 反查</button>
+            <button class="btn btn-warn" style="font-size:12px; padding:5px 10px;" onclick="purgeLowConfAiArtists()" title="清除所有低於 75% 信心度的本機 AI 畫師猜測並還原誤建資料夾">🧹 清除低信心度 AI 誤猜畫師</button>
+          </div>
+          <div style="display:flex; gap:8px;">
+            <button class="btn" onclick="closeAiModal()">關閉</button>
+            <button class="btn btn-primary" id="btn-start-smart-tag" style="background:linear-gradient(135deg, #4f46e5, #059669); border-color:#34d399; font-weight:700;" onclick="startAiBatch()">🚀 啟動智慧標籤 (AI 打標 ➔ 搜圖校正 ➔ 建夾歸檔)</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Physical Folder Organize Modal -->
+  <div class="modal-backdrop" id="organize-modal" onclick="if(event.target===this) closeOrganizeModal()">
+    <div class="dialog-box" style="max-width:880px; max-height:90vh; overflow:hidden; display:flex; flex-direction:column;">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h3>📂 繪師資料夾自動建立與整理精靈 (D:\圖檔\twitter)</h3>
+        <button class="btn" onclick="closeOrganizeModal()">✖</button>
+      </div>
+      <p style="font-size:13px; color:var(--text-muted); line-height:1.5;">
+        自動為根目錄 (<code>D:\圖檔\twitter</code>) 沒分類的圖片<b>建立專屬「繪師名稱」資料夾</b>並移入歸檔（若該繪師已有資料夾則自動併入，若無則自動新建資料夾，並依自然排序編號）：
+      </p>
+
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; background:var(--bg-main); padding:10px 12px; border-radius:8px; border:1px solid var(--border);">
+        <label style="flex:1; min-width:170px; font-size:12px;">
+          <b>畫師辨識最低信心度：</b>
+          <select id="org-min-conf" class="select-box" style="width:100%; margin-top:4px;" onchange="loadArtistFoldersPreview()">
+            <option value="0.20" selected>0.20 (包含所有 AI 與搜圖辨識畫師)</option>
+            <option value="0.35">0.35 (中高信心度畫師)</option>
+            <option value="0.50">0.50 (高信心度畫師)</option>
+            <option value="0.90">0.90 (僅限 Pixiv / Twitter 以圖搜圖 100% 確立畫師)</option>
+          </select>
+        </label>
+        <label style="flex:1; min-width:170px; font-size:12px;">
+          <b>新繪師建資料夾門檻：</b>
+          <select id="org-min-imgs" class="select-box" style="width:100%; margin-top:4px;" onchange="loadArtistFoldersPreview()">
+            <option value="1" selected>滿 1 張即自動建立繪師資料夾</option>
+            <option value="2">至少 2 張同繪師才建新資料夾</option>
+            <option value="3">至少 3 張同繪師才建新資料夾</option>
+            <option value="5">至少 5 張同繪師才建新資料夾</option>
+          </select>
+        </label>
+        <label style="font-size:12px; display:flex; align-items:center; gap:6px; padding-bottom:6px;">
+          <input type="checkbox" id="org-only-existing" onchange="loadArtistFoldersPreview()" />
+          <span>僅歸入既有資料夾 (不新建)</span>
+        </label>
+        <label style="font-size:12px; display:flex; align-items:center; gap:6px; padding-bottom:6px;">
+          <input type="checkbox" id="org-auto-rename" checked />
+          <span>移入時統一改名為 <code>日期_流水號_繪師名</code></span>
+        </label>
+      </div>
+
+      <div id="org-summary-bar" style="font-size:13px; font-weight:700; color:#6ee7b7; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+        <span>載入繪師資料夾預覽中...</span>
+      </div>
+
+      <div id="org-preview-box" style="flex:1; overflow-y:auto; background:var(--bg-main); border:1px solid var(--border); border-radius:8px; padding:10px; min-height:240px; font-size:12px;">
+        ⏳ 正在掃描根目錄已辨識繪師與對應資料夾...
+      </div>
+
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; padding-top:6px; border-top:1px solid var(--border);">
+        <div style="display:flex; gap:6px; flex-wrap:wrap;">
+          <button class="btn btn-primary" style="background:linear-gradient(135deg, #4f46e5, #059669); border-color:#34d399;" onclick="closeOrganizeModal(); openAiModal();" title="對還沒標籤的圖片啟動智慧標籤：本機 AI 打標 ➔ 以圖搜圖校正畫師 ➔ 自動建夾">🤖 對未標籤圖啟動「智慧標籤」</button>
+          <button class="btn btn-warn" onclick="organizeByDate()" title="將剩餘無法辨識畫師的日期圖片按年-月歸檔">📅 剩餘圖片按「年-月」歸檔</button>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button class="btn" onclick="closeOrganizeModal()">關閉</button>
+          <button class="btn btn-primary" id="btn-org-exec" onclick="organizeAiSuggested()">🚀 一鍵建立繪師資料夾並歸檔全部圖片</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Batch Tag / Move Dialog -->
+  <div class="modal-backdrop" id="batch-modal" onclick="if(event.target===this) closeBatchModal()">
+    <div class="dialog-box">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h3 id="batch-modal-title">批次編輯標籤</h3>
+        <button class="btn" onclick="closeBatchModal()">✖</button>
+      </div>
+      <div id="batch-modal-body" style="display:flex; flex-direction:column; gap:10px;">
+        <label style="font-size:13px;">
+          <b>標籤類別：</b>
+          <select id="bm-category" class="select-box" style="width:100%; margin-top:4px;">
+            <option value="artist">🎨 畫師 (Artist)</option>
+            <option value="character">👤 角色 (Character)</option>
+            <option value="copyright">📚 作品 (Copyright)</option>
+            <option value="general">🏷️ 一般屬性 / 主題 (General)</option>
+          </select>
+        </label>
+        <label style="font-size:13px;">
+          <b>輸入名稱（多個標籤可用逗號分隔）：</b>
+          <input type="text" id="bm-input" class="search-input" list="artist-datalist" placeholder="例如: Horosuke, 加瀬大輝, 兔女郎..." style="margin-top:4px;" />
+        </label>
+        <label style="font-size:13px; display:flex; align-items:center; gap:8px; margin-top:4px;">
+          <input type="checkbox" id="bm-also-move" />
+          <span>同時將選取的圖片實體搬移至 <code>D:\圖檔\twitter\<此名稱>\</code> 資料夾</span>
+        </label>
+      </div>
+      <div style="display:flex; justify-content:flex-end; gap:8px;">
+        <button class="btn" onclick="closeBatchModal()">取消</button>
+        <button class="btn btn-primary" onclick="submitBatchTag()">✅ 套用至選取圖片</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Batch Rename & Order Lock Modal -->
+  <div class="modal-backdrop" id="rename-modal" onclick="if(event.target===this) closeRenameModal()">
+    <div class="dialog-box" style="max-width:920px; max-height:90vh; overflow:hidden; display:flex; flex-direction:column;">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h3>✏️ 批次改名與順序鎖定工具 (格式：日期_流水號_畫師名)</h3>
+        <button class="btn" onclick="closeRenameModal()">✖</button>
+      </div>
+
+      <p style="font-size:13px; color:var(--text-muted); line-height:1.5;">
+        採用 <b>Windows 原生自然排序 (StrCmpLogicalW)</b> 鎖定順序（確保 <code>_2</code> 永遠在 <code>_10</code> 前面，且既有已編號檔案不會被新檔案插隊），並統一改為 <code>YYYYMMDD_0001_畫師名.jpg</code> 格式。每次改名皆自動備份紀錄，支援隨時<b>一鍵還原舊檔名</b>。
+      </p>
+
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; background:var(--bg-main); padding:12px; border-radius:8px; border:1px solid var(--border);">
+        <label style="flex:2; min-width:220px; font-size:12px;">
+          <b>選擇目標資料夾：</b>
+          <select id="rn-folder" class="select-box" style="width:100%; margin-top:4px;" onchange="loadRenamePreview()"></select>
+        </label>
+        <label style="width:120px; font-size:12px;">
+          <b>流水號補零位數：</b>
+          <select id="rn-pad" class="select-box" style="width:100%; margin-top:4px;" onchange="loadRenamePreview()">
+            <option value="4" selected>4 位數 (0001)</option>
+            <option value="3">3 位數 (001)</option>
+            <option value="5">5 位數 (00001)</option>
+          </select>
+        </label>
+        <label style="width:150px; font-size:12px;">
+          <b>自訂日期 (選填 YYYYMMDD)：</b>
+          <input type="text" id="rn-date" class="search-input" placeholder="留空則自動推算" style="margin-top:4px;" oninput="debounceRenamePreview()" />
+        </label>
+        <label style="width:160px; font-size:12px;">
+          <b>自訂畫師名 (選填)：</b>
+          <input type="text" id="rn-artist" class="search-input" placeholder="留空則用資料夾名" style="margin-top:4px;" oninput="debounceRenamePreview()" />
+        </label>
+        <button class="btn" onclick="loadRenameLogsView()">⏪ 查看還原紀錄</button>
+      </div>
+
+      <div id="rn-summary-bar" style="font-size:13px; font-weight:600; color:#a5b4fc;"></div>
+
+      <div id="rn-preview-box" style="flex:1; overflow-y:auto; background:var(--bg-main); border:1px solid var(--border); border-radius:8px; padding:10px; font-family:Consolas, monospace; font-size:12px; min-height:260px;">
+        載入預覽中...
+      </div>
+
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
+        <span style="font-size:12px; color:var(--text-muted);">💡 兩階段無衝突安全改名，同步更新圖庫標籤索引，絕不遺失任何標籤</span>
+        <div style="display:flex; gap:8px;">
+          <button class="btn" onclick="closeRenameModal()">關閉</button>
+          <button class="btn btn-primary" id="btn-rn-exec" onclick="executeRename()">✅ 確認執行安全改名</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Auto-Ingest & AI Organize Schedule Modal -->
+  <div class="modal-backdrop" id="schedule-modal" onclick="if(event.target===this) closeScheduleModal()">
+    <div class="dialog-box" style="max-width:860px; max-height:92vh; overflow:hidden; display:flex; flex-direction:column;">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h3>⏰ 定時自動匯入、清空空子資料夾 & AI 建夾歸檔排程</h3>
+        <button class="btn" onclick="closeScheduleModal()">✖</button>
+      </div>
+
+      <div style="background:rgba(14,165,233,0.12); border:1px solid #0ea5e9; padding:10px 12px; border-radius:8px; font-size:12px; line-height:1.6;">
+        💡 設定好<b>幾點幾分</b>與<b>來源資料夾路徑</b>後，系統到了指定時間會自動：<br>
+        <b>① 遞迴掃描來源資料夾 (含所有子資料夾) 圖片並依自然排序搬入 <code>D:\圖檔\twitter</code></b> ➔
+        <b>② 自動將來源路徑下搬空的子資料夾清空刪除</b> ➔
+        <b>③ 執行 Pixiv / 以圖搜圖 / 本地 GPU AI 自動打標與畫師辨識</b> ➔
+        <b>④ 自動建立 <code>D:\圖檔\twitter\&lt;繪師名稱&gt;</code> 資料夾並歸檔！</b>（同時支援註冊至 Windows 系統排程器，就算關掉網頁也會準時執行）
+      </div>
+
+      <div style="overflow-y:auto; flex:1; display:flex; flex-direction:column; gap:12px; padding-right:4px;">
+        <!-- Enable & Time Settings (Interactive PickerTime) -->
+        <div style="display:flex; gap:14px; flex-wrap:wrap; align-items:center; background:var(--bg-main); padding:12px; border-radius:8px; border:1px solid var(--border);">
+          <label style="display:flex; align-items:center; gap:8px; font-size:14px; font-weight:700; color:#38bdf8; cursor:pointer;">
+            <input type="checkbox" id="sch-enabled" style="width:18px; height:18px;" />
+            <span>✅ 啟用每日定時自動排程</span>
+          </label>
+
+          <div style="display:flex; align-items:center; gap:10px; flex:1; flex-wrap:wrap;">
+            <span style="font-size:13px; font-weight:600;">🕒 執行時間 (幾點幾分)：</span>
+
+            <!-- Time Slot 1 PickerTime -->
+            <div class="time-picker-wrap">
+              <input type="hidden" id="sch-time-1" value="03:00" />
+              <button type="button" class="time-picker-trigger" id="picker-btn-1" onclick="openTimePicker(1, event)">
+                <span id="picker-label-1">🕒 03:00 (凌晨 03:00)</span>
+                <span style="color:#38bdf8; font-size:11px;">▾ 選擇</span>
+              </button>
+            </div>
+
+            <span style="font-size:12px; color:var(--text-muted);">第二時段 (選填)：</span>
+
+            <!-- Time Slot 2 PickerTime -->
+            <div class="time-picker-wrap">
+              <input type="hidden" id="sch-time-2" value="" />
+              <button type="button" class="time-picker-trigger empty-slot" id="picker-btn-2" onclick="openTimePicker(2, event)">
+                <span id="picker-label-2">➕ 點擊選擇第二時段</span>
+                <span style="color:#94a3b8; font-size:11px;">▾</span>
+              </button>
+              <button type="button" id="picker-clear-2" class="btn" style="display:none; padding:4px 7px; font-size:11px; color:#f87171;" onclick="setSlotTime(2, '')" title="清除第二時段">✖</button>
+            </div>
+          </div>
+
+          <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#a5b4fc;">
+            <input type="checkbox" id="sch-win-task" checked />
+            <span>同步寫入 Windows 系統工作排程器 (背景常駐)</span>
+          </label>
+        </div>
+
+        <!-- Source Folders Input & Folder Browser -->
+        <div style="background:var(--bg-main); padding:12px; border-radius:8px; border:1px solid var(--border); display:flex; flex-direction:column; gap:8px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+            <b style="font-size:13px;">📂 指定要搬移圖片的來源資料夾路徑（支援選擇多個資料夾，會自動掃描其下所有子資料夾）：</b>
+            <div style="display:flex; gap:6px; flex-wrap:wrap;">
+              <button class="btn btn-primary" style="padding:5px 12px; font-size:12px; background:#0284c7; border-color:#38bdf8;" onclick="openFolderBrowserModal()">📁 瀏覽選擇資料夾...</button>
+              <button class="btn" style="padding:5px 10px; font-size:12px;" onclick="pickSourceFolderNative()" title="呼叫 Windows 系統資料夾對話框">🪟 Windows 視窗選取</button>
+              <button class="btn" style="padding:5px 10px; font-size:12px; border-color:#0ea5e9; color:#38bdf8;" onclick="previewSourceDirs()">🔍 測試掃描來源檔案數</button>
+            </div>
+          </div>
+
+          <!-- Visual Selected Folder Chips -->
+          <div id="sch-folder-chips" style="display:flex; flex-wrap:wrap; gap:6px;"></div>
+
+          <textarea id="sch-source-dirs" class="search-input" rows="2" oninput="renderSourceFolderChips()" placeholder="點擊上方「📁 瀏覽選擇資料夾...」直接點選，或在此貼上路徑（每行一個）：&#10;C:\Users\Gary\Downloads\pic" style="font-family:Consolas, monospace; font-size:12px; resize:vertical;"></textarea>
+
+          <div id="sch-source-preview" style="font-size:12px; color:#6ee7b7; display:none; padding:6px 10px; background:rgba(16,185,129,0.1); border-radius:6px;"></div>
+
+          <label style="font-size:13px; display:flex; align-items:center; gap:8px; color:#fcd34d; font-weight:600;">
+            <input type="checkbox" id="sch-rm-empty" checked />
+            <span>🧹 搬移完成後，自動把來源資料夾底下的「空子資料夾」全部刪除清空（保留最上層來源資料夾本身）</span>
+          </label>
+        </div>
+
+        <!-- AI Tagging & Folder Archive Options -->
+        <div style="background:var(--bg-main); padding:12px; border-radius:8px; border:1px solid var(--border); display:flex; flex-direction:column; gap:8px;">
+          <b style="font-size:13px;">🤖 搬入 <code>D:\圖檔\twitter</code> 後的自動打標與繪師資料夾歸檔設定：</b>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; font-size:12px;">
+            <label style="display:flex; align-items:center; gap:8px;">
+              <input type="checkbox" id="sch-run-pixiv" checked />
+              <span>🎨 自動執行 Pixiv ID 真實畫師反查</span>
+            </label>
+            <label style="display:flex; align-items:center; gap:8px;">
+              <input type="checkbox" id="sch-run-ai" checked />
+              <span>🤖 執行本地 GPU AI (Camie v2) 自動打標與畫師辨識</span>
+            </label>
+            <label style="display:flex; align-items:center; gap:8px;">
+              <input type="checkbox" id="sch-run-rev" />
+              <span>🔍 對新搬入圖片先執行 SauceNAO/IQDB 以圖搜圖抓最新畫師</span>
+            </label>
+            <label style="display:flex; align-items:center; gap:8px;">
+              <input type="checkbox" id="sch-auto-folder" checked />
+              <span style="color:#6ee7b7; font-weight:700;">📂 自動建立 <code>D:\圖檔\twitter\&lt;繪師名稱&gt;</code> 資料夾並歸檔</span>
+            </label>
+            <label style="display:flex; align-items:center; gap:8px;">
+              <input type="checkbox" id="sch-auto-rename" checked />
+              <span>✏️ 歸入繪師資料夾時，自動依自然排序改名為 <code>日期_流水號_繪師名</code></span>
+            </label>
+            <label style="display:flex; align-items:center; gap:8px;">
+              <input type="checkbox" id="sch-also-root" />
+              <span>🌐 同時將 twitter 根目錄其他已認出畫師的圖片一併建夾歸檔</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Live Status & Execution History -->
+        <div style="background:var(--bg-main); padding:10px 12px; border-radius:8px; border:1px solid var(--border);">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+            <b style="font-size:12px; color:#94a3b8;">📜 排程即時狀態與最近執行紀錄：</b>
+            <span id="sch-live-status" style="font-size:12px; color:#38bdf8; font-weight:600;">待機中</span>
+          </div>
+          <div id="sch-history-box" style="max-height:130px; overflow-y:auto; font-size:12px; font-family:Consolas, monospace; color:#cbd5e1;">
+            尚無執行紀錄
+          </div>
+        </div>
+      </div>
+
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; padding-top:8px; border-top:1px solid var(--border);">
+        <button class="btn btn-warn" id="btn-sch-run-now" onclick="runScheduleNow()">▶️ 立即執行一次 (搬移 ➔ 清空空夾 ➔ AI打標 ➔ 建夾歸檔)</button>
+        <div style="display:flex; gap:8px;">
+          <button class="btn" onclick="closeScheduleModal()">關閉</button>
+          <button class="btn btn-primary" onclick="saveScheduleConfig()">💾 儲存排程設定</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Floating Interactive PickerTime Popover -->
+  <div id="time-picker-popover" class="time-picker-popover" onclick="event.stopPropagation()">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+      <b style="font-size:13px; color:#38bdf8;" id="tp-title">🕒 選擇執行時間</b>
+      <span id="tp-preview-badge" style="font-size:13px; font-weight:700; color:#fcd34d; background:rgba(245,158,11,0.15); padding:2px 8px; border-radius:6px;">03:00</span>
+    </div>
+
+    <div class="tp-presets">
+      <button type="button" class="tp-preset-btn" onclick="applyPresetTime('00:00')">🌙 00:00 午夜</button>
+      <button type="button" class="tp-preset-btn" onclick="applyPresetTime('03:00')">🌌 03:00 凌晨</button>
+      <button type="button" class="tp-preset-btn" onclick="applyPresetTime('08:00')">☀️ 08:00 早上</button>
+      <button type="button" class="tp-preset-btn" onclick="applyPresetTime('12:00')">🕛 12:00 中午</button>
+      <button type="button" class="tp-preset-btn" onclick="applyPresetTime('18:00')">🌆 18:00 傍晚</button>
+      <button type="button" class="tp-preset-btn" onclick="applyPresetTime('22:00')">🌃 22:00 晚上</button>
+      <button type="button" class="tp-preset-btn" onclick="applyPresetTime('23:30')">🕚 23:30 睡前</button>
+    </div>
+
+    <div class="tp-columns">
+      <div class="tp-col">
+        <div class="tp-col-header">小時 (00 ~ 23 時)</div>
+        <div class="tp-col-list" id="tp-hour-list"></div>
+      </div>
+      <div class="tp-col">
+        <div class="tp-col-header">分鐘 (00 ~ 59 分)</div>
+        <div class="tp-col-list" id="tp-min-list"></div>
+      </div>
+    </div>
+
+    <div style="display:flex; justify-content:space-between; align-items:center; padding-top:4px;">
+      <button type="button" class="btn" id="tp-clear-btn" style="padding:4px 10px; font-size:12px; color:#f87171;" onclick="clearCurrentPickerSlot()">🗑️ 不設定</button>
+      <div style="display:flex; gap:6px;">
+        <button type="button" class="btn" style="padding:4px 10px; font-size:12px;" onclick="closeTimePicker()">關閉</button>
+        <button type="button" class="btn btn-primary" style="padding:4px 14px; font-size:12px;" onclick="closeTimePicker()">✅ 確定時間</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Interactive Folder Browser Modal -->
+  <div class="modal-backdrop" id="folder-browser-modal" style="z-index:2200;" onclick="if(event.target===this) closeFolderBrowserModal()">
+    <div class="dialog-box" style="max-width:820px; max-height:88vh; overflow:hidden; display:flex; flex-direction:column;">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h3>📂 瀏覽並選擇來源資料夾</h3>
+        <div style="display:flex; gap:6px;">
+          <button class="btn" style="padding:4px 10px; font-size:12px;" onclick="pickSourceFolderNative(currentBrowsePath)">🪟 切換為 Windows 系統視窗選取</button>
+          <button class="btn" onclick="closeFolderBrowserModal()">✖</button>
+        </div>
+      </div>
+
+      <!-- Address & Breadcrumb Bar -->
+      <div style="display:flex; flex-direction:column; gap:6px; background:var(--bg-main); padding:10px; border-radius:8px; border:1px solid var(--border);">
+        <div style="display:flex; gap:6px; align-items:center;">
+          <button class="btn" id="fb-up-btn" style="padding:5px 10px; font-size:12px;" onclick="browseUpDirectory()">⬆️ 上一層</button>
+          <input type="text" id="fb-path-input" class="search-input" style="flex:1; font-family:Consolas, monospace; font-size:12px;" placeholder="輸入或點擊下方資料夾瀏覽路徑..." onkeydown="if(event.key==='Enter') browseToDirectory(this.value)" />
+          <button class="btn btn-primary" style="padding:5px 12px; font-size:12px;" onclick="browseToDirectory(document.getElementById('fb-path-input').value)">前往</button>
+        </div>
+        <div id="fb-breadcrumbs" style="display:flex; flex-wrap:wrap; gap:4px; align-items:center;"></div>
+      </div>
+
+      <!-- Two-pane layout: Left Quick Access & Drives / Right Subfolders -->
+      <div style="display:grid; grid-template-columns:220px 1fr; gap:10px; flex:1; min-height:320px; overflow:hidden;">
+        <!-- Left Sidebar: Quick Access + Drives -->
+        <div style="background:var(--bg-main); border:1px solid var(--border); border-radius:8px; padding:10px; overflow-y:auto; display:flex; flex-direction:column; gap:10px;">
+          <div>
+            <div style="font-size:11px; font-weight:700; color:#38bdf8; margin-bottom:6px;">⚡ 常用位置捷徑</div>
+            <div id="fb-quick-list" style="display:flex; flex-direction:column; gap:4px;"></div>
+          </div>
+          <div style="border-top:1px solid var(--border); padding-top:8px;">
+            <div style="font-size:11px; font-weight:700; color:#a5b4fc; margin-bottom:6px;">💽 本機磁碟機</div>
+            <div id="fb-drive-list" style="display:flex; flex-direction:column; gap:4px;"></div>
+          </div>
+        </div>
+
+        <!-- Right Pane: Subfolders in Current Directory -->
+        <div style="background:var(--bg-main); border:1px solid var(--border); border-radius:8px; padding:10px; display:flex; flex-direction:column; overflow:hidden;">
+          <div id="fb-current-summary" style="font-size:12px; color:#6ee7b7; padding-bottom:8px; border-bottom:1px solid var(--border); margin-bottom:6px; display:flex; justify-content:space-between; align-items:center;">
+            <span>載入中...</span>
+          </div>
+          <div id="fb-subdir-list" style="flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:3px;"></div>
+        </div>
+      </div>
+
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; padding-top:8px; border-top:1px solid var(--border);">
+        <div style="font-size:12px; color:#cbd5e1;">
+          目前位置：<code id="fb-selected-display" style="color:#38bdf8; font-weight:700;">-</code>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button class="btn" onclick="closeFolderBrowserModal()">取消</button>
+          <button class="btn btn-primary" style="background:#059669; border-color:#10b981;" onclick="selectCurrentBrowsedFolder()">✅ 選擇目前所在的資料夾加入排程</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <datalist id="artist-datalist"></datalist>
+  <datalist id="folder-datalist"></datalist>
+
+  <script>
+    let state = {
+      includeTags: [],
+      excludeTags: [],
+      folder: '__ALL__',
+      tagCategory: 'all',
+      page: 1,
+      pageSize: 60,
+      items: [],
+      total: 0,
+      selectedIds: new Set(),
+      detailIndex: -1,
+      folders: [],
+      stats: {}
+    };
+
+    let tagTimer = null;
+    let imgTimer = null;
+    let aiPollTimer = null;
+
+    window.addEventListener('DOMContentLoaded', async () => {
+      await loadStats();
+      await loadFolders();
+      await loadTags();
+      await loadImages();
+      startAiPolling();
+
+      window.addEventListener('keydown', (e) => {
+        const modal = document.getElementById('detail-modal');
+        if (modal.classList.contains('open')) {
+          if (e.key === 'ArrowLeft') navigateDetail(-1);
+          else if (e.key === 'ArrowRight') navigateDetail(1);
+          else if (e.key === 'Escape') closeDetailModal();
+        }
+      });
+    });
+
+    async function loadStats() {
+      const r = await fetch('/api/stats');
+      const d = await r.json();
+      state.stats = d;
+      document.getElementById('st-total').textContent = d.total_images.toLocaleString();
+      document.getElementById('st-root').textContent = d.root_unorganized.toLocaleString();
+      document.getElementById('st-folder').textContent = d.folder_organized.toLocaleString();
+      document.getElementById('st-ai').textContent = d.ai_tagged.toLocaleString();
+      document.getElementById('st-suggest').textContent = d.suggested_folder_count.toLocaleString();
+      updateAiBanner(d.ai_status);
+    }
+
+    async function loadFolders() {
+      const r = await fetch('/api/folders');
+      state.folders = await r.json();
+      document.getElementById('tab-btn-folders').textContent = `📁 實體資料夾 (${state.folders.length})`;
+
+      const dl = document.getElementById('folder-datalist');
+      const adl = document.getElementById('artist-datalist');
+      dl.innerHTML = state.folders.map(f => `<option value="${escapeHtml(f.name)}">`).join('');
+      adl.innerHTML = state.folders.map(f => `<option value="${escapeHtml(f.name)}">`).join('');
+      renderFolderList();
+    }
+
+    function renderFolderList() {
+      const q = document.getElementById('folder-search-input').value.trim().toLowerCase();
+      const box = document.getElementById('sidebar-folder-list');
+      const special = [
+        { key: '__ALL__', label: '🌐 全部圖片', count: state.stats.total_images || 0 },
+        { key: '__ROOT__', label: '🚨 根目錄未整理檔案', count: state.stats.root_unorganized || 0 },
+        { key: '__SUGGESTED__', label: '✨ AI 認出繪師可歸檔', count: state.stats.suggested_folder_count || 0 },
+        { key: '__FOLDERS__', label: '✅ 所有已歸檔子資料夾', count: state.stats.folder_organized || 0 }
+      ];
+
+      let html = '';
+      for (const sp of special) {
+        const active = state.folder === sp.key ? 'active' : '';
+        html += `
+          <div class="folder-item ${active}" onclick="setFolderFilter('${sp.key}')">
+            <span>${sp.label}</span>
+            <span class="tag-count">${sp.count}</span>
+          </div>
+        `;
+      }
+      html += `<div style="margin:6px 0; border-top:1px solid var(--border);"></div>`;
+
+      for (const f of state.folders) {
+        if (q && !f.name.toLowerCase().includes(q)) continue;
+        const active = state.folder === f.name ? 'active' : '';
+        html += `
+          <div class="folder-item ${active}" onclick="setFolderFilter('${escapeJs(f.name)}')">
+            <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">📁 ${escapeHtml(f.name)}</span>
+            <span class="tag-count">${f.count}</span>
+          </div>
+        `;
+      }
+      box.innerHTML = html;
+    }
+
+    function switchSidebarTab(tab) {
+      document.getElementById('tab-btn-tags').classList.toggle('active', tab === 'tags');
+      document.getElementById('tab-btn-folders').classList.toggle('active', tab === 'folders');
+      document.getElementById('panel-tags').style.display = tab === 'tags' ? 'flex' : 'none';
+      document.getElementById('panel-folders').style.display = tab === 'folders' ? 'flex' : 'none';
+    }
+
+    function setTagCategory(cat, el) {
+      state.tagCategory = cat;
+      document.querySelectorAll('.cat-pill').forEach(p => p.classList.remove('active'));
+      if (el) el.classList.add('active');
+      loadTags();
+      if (cat === 'recent') {
+        document.getElementById('sel-sort').value = 'mtime_desc';
+        state.folder = '__ALL__';
+        if (!state.includeTags.includes('最近')) {
+          state.includeTags.unshift('最近');
+        }
+        state.page = 1;
+        renderFolderList();
+        renderActiveFilters();
+        loadImages();
+      }
+    }
+
+    function debounceLoadTags() {
+      clearTimeout(tagTimer);
+      tagTimer = setTimeout(loadTags, 200);
+    }
+
+    async function loadTags() {
+      const q = document.getElementById('tag-search-input').value.trim();
+      const url = `/api/tags?category=${encodeURIComponent(state.tagCategory)}&q=${encodeURIComponent(q)}&limit=250`;
+      const r = await fetch(url);
+      const tags = await r.json();
+      const box = document.getElementById('sidebar-tag-list');
+
+      if (!tags.length) {
+        box.innerHTML = `<div style="color:var(--text-muted); padding:12px; font-size:12px;">找不到符合的標籤（可先執行 AI 自動打標）</div>`;
+        return;
+      }
+
+      box.innerHTML = tags.map(t => {
+        const mainLabel = t.zh_name ? `${t.zh_name}` : t.name;
+        const subLabel = (t.zh_name && t.category !== 'recent') ? t.name : '';
+        const isRecentTag = t.category === 'recent';
+        const activeStyle = state.includeTags.includes(t.name)
+          ? 'background:rgba(56,189,248,0.18); border:1px solid #38bdf8;'
+          : (isRecentTag ? 'background:rgba(56,189,248,0.07); border:1px solid rgba(56,189,248,0.25); margin-bottom:2px;' : '');
+        return `
+          <div class="tag-item" style="${activeStyle}"
+               onclick="toggleIncludeTag('${escapeJs(t.name)}')"
+               oncontextmenu="event.preventDefault(); toggleExcludeTag('${escapeJs(t.name)}');"
+               title="左鍵：加入篩選 | 右鍵：排除此標籤">
+            <div class="tag-item-left">
+              <span class="cat-dot cat-${t.category}"></span>
+              <span class="tag-label-zh">${escapeHtml(mainLabel)}</span>
+              ${subLabel ? `<span class="tag-label-en">${escapeHtml(subLabel)}</span>` : ''}
+            </div>
+            <div class="tag-right">
+              ${isRecentTag ? '' : `<button class="btn-exclude-mini" onclick="event.stopPropagation(); toggleExcludeTag('${escapeJs(t.name)}')" title="排除此標籤">-</button>`}
+              <span class="tag-count">${t.count}</span>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function toggleIncludeTag(tname) {
+      state.excludeTags = state.excludeTags.filter(x => x !== tname);
+      if (state.includeTags.includes(tname)) {
+        state.includeTags = state.includeTags.filter(x => x !== tname);
+      } else {
+        state.includeTags.push(tname);
+        if (tname === '最近' || tname.startsWith('最近:')) {
+          document.getElementById('sel-sort').value = 'mtime_desc';
+          state.folder = '__ALL__';
+          renderFolderList();
+        }
+      }
+      state.page = 1;
+      renderActiveFilters();
+      loadTags();
+      loadImages();
+    }
+
+    function toggleExcludeTag(tname) {
+      if (tname === '最近' || tname.startsWith('最近:')) return;
+      state.includeTags = state.includeTags.filter(x => x !== tname);
+      if (state.excludeTags.includes(tname)) {
+        state.excludeTags = state.excludeTags.filter(x => x !== tname);
+      } else {
+        state.excludeTags.push(tname);
+      }
+      state.page = 1;
+      renderActiveFilters();
+      loadImages();
+    }
+
+    function setFolderFilter(f) {
+      state.folder = f;
+      state.page = 1;
+      renderFolderList();
+      renderActiveFilters();
+      loadImages();
+    }
+
+    function setAiFilter(val) {
+      document.getElementById('sel-ai').value = val;
+      resetPageAndLoad();
+    }
+
+    function clearAllFilters() {
+      state.includeTags = [];
+      state.excludeTags = [];
+      state.folder = '__ALL__';
+      document.getElementById('main-search').value = '';
+      document.getElementById('sel-media').value = 'all';
+      document.getElementById('sel-ai').value = 'all';
+      state.page = 1;
+      renderFolderList();
+      renderActiveFilters();
+      loadTags();
+      loadImages();
+    }
+
+    function renderActiveFilters() {
+      const bar = document.getElementById('active-filters-bar');
+      let chips = [];
+
+      if (state.folder !== '__ALL__') {
+        const fmap = {
+          '__ROOT__': '🚨 根目錄未整理檔案',
+          '__FOLDERS__': '📁 所有已歸檔資料夾',
+          '__SUGGESTED__': '✨ AI 認出繪師待歸檔'
+        };
+        const flabel = fmap[state.folder] || `📁 資料夾: ${state.folder}`;
+        chips.push(`<div class="filter-chip inc" onclick="setFolderFilter('__ALL__')">${escapeHtml(flabel)} <span>✖</span></div>`);
+      }
+
+      for (const t of state.includeTags) {
+        const disp = t === '最近' ? '🕒 最近 (全部圖片：編輯時間 最新➔最舊)' : t;
+        chips.push(`<div class="filter-chip inc" onclick="toggleIncludeTag('${escapeJs(t)}')">➕ ${escapeHtml(disp)} <span>✖</span></div>`);
+      }
+      for (const t of state.excludeTags) {
+        chips.push(`<div class="filter-chip exc" onclick="toggleExcludeTag('${escapeJs(t)}')">⛔ 排除: ${escapeHtml(t)} <span>✖</span></div>`);
+      }
+      bar.innerHTML = chips.join('');
+    }
+
+    function debounceLoadImages() {
+      clearTimeout(imgTimer);
+      imgTimer = setTimeout(() => {
+        state.page = 1;
+        loadImages();
+      }, 250);
+    }
+
+    function resetPageAndLoad() {
+      state.page = 1;
+      loadImages();
+    }
+
+    async function loadImages() {
+      const q = document.getElementById('main-search').value.trim();
+      const media = document.getElementById('sel-media').value;
+      const ai = document.getElementById('sel-ai').value;
+      const sort = document.getElementById('sel-sort').value;
+
+      const params = new URLSearchParams({
+        include_tags: state.includeTags.join(','),
+        exclude_tags: state.excludeTags.join(','),
+        folder: state.folder,
+        media_type: media,
+        ai_status: ai,
+        q: q,
+        sort: sort,
+        page: state.page,
+        page_size: state.pageSize
+      });
+
+      const r = await fetch(`/api/images?${params.toString()}`);
+      const data = await r.json();
+      state.items = data.items;
+      state.total = data.total;
+
+      renderGrid();
+      renderPagination();
+    }
+
+    function formatMtime(ts) {
+      if (!ts) return '';
+      const d = new Date(ts * 1000);
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mi = String(d.getMinutes()).padStart(2, '0');
+      return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
+    }
+
+    function renderGrid() {
+      const grid = document.getElementById('image-grid');
+      if (!state.items.length) {
+        grid.innerHTML = `<div style="grid-column:1/-1; text-align:center; padding:60px; color:var(--text-muted);">目前篩選條件下沒有符合的圖片</div>`;
+        return;
+      }
+
+      grid.innerHTML = state.items.map((item, idx) => {
+        const isSel = state.selectedIds.has(item.id);
+        let badges = '';
+        if (item.media_type !== 'image') {
+          badges += `<span class="mini-badge media">${item.media_type.toUpperCase()}</span>`;
+        }
+        if (item.rating === 'explicit') {
+          badges += `<span class="mini-badge r18">R-18</span>`;
+        } else if (item.rating === 'questionable' || item.rating === 'sensitive') {
+          badges += `<span class="mini-badge sensitive">R-15</span>`;
+        }
+
+        let pills = [];
+        const mtimeStr = formatMtime(item.mtime);
+        if (mtimeStr) {
+          pills.push(`<span class="pill" style="background:rgba(56,189,248,0.14); color:#7dd3fc; border:1px solid rgba(56,189,248,0.3);" title="檔案最後修改/編輯時間">🕒 ${mtimeStr}</span>`);
+        }
+        const seenArtistLabels = new Set();
+        for (const a of item.artists) {
+          const label = (a.zh_name || a.name).replace(/^現有繪師：/, '');
+          const key = label.toLowerCase();
+          if (seenArtistLabels.has(key)) continue;
+          seenArtistLabels.add(key);
+          pills.push(`<span class="pill artist" onclick="event.stopPropagation(); toggleIncludeTag('${escapeJs(a.name)}')" title="點擊篩選此畫師">🎨 ${escapeHtml(label)}</span>`);
+          if (seenArtistLabels.size >= 2) break;
+        }
+        if (item.suggested_folder && !item.folder) {
+          pills.push(`<span class="pill suggest" onclick="event.stopPropagation(); openDetailModal(${idx})" title="已辨識出目標繪師資料夾">✨ 建議歸檔: ${escapeHtml(item.suggested_folder)}</span>`);
+        }
+        for (const c of item.characters.slice(0, 2)) {
+          pills.push(`<span class="pill character" onclick="event.stopPropagation(); toggleIncludeTag('${escapeJs(c.name)}')">👤 ${escapeHtml(c.zh_name || c.name)}</span>`);
+        }
+        for (const cp of item.copyrights.slice(0, 1)) {
+          pills.push(`<span class="pill copyright" onclick="event.stopPropagation(); toggleIncludeTag('${escapeJs(cp.name)}')">📚 ${escapeHtml(cp.zh_name || cp.name)}</span>`);
+        }
+        for (const g of item.preview_tags.slice(0, 4)) {
+          pills.push(`<span class="pill general" onclick="event.stopPropagation(); toggleIncludeTag('${escapeJs(g.name)}')">${escapeHtml(g.zh_name || g.name)}</span>`);
+        }
+
+        return `
+          <div class="card ${isSel ? 'selected' : ''}" id="card-${item.id}">
+            <div class="thumb-box" onclick="openDetailModal(${idx})">
+              <div class="card-check" onclick="event.stopPropagation(); toggleSelect(${item.id})">
+                ${isSel ? '✓' : ''}
+              </div>
+              <div class="badge-top-right">${badges}</div>
+              <img src="/api/thumb/${item.id}" loading="lazy" alt="${escapeHtml(item.filename)}" />
+            </div>
+            <div class="card-body">
+              <div class="card-title" title="${escapeHtml(item.rel_path)}">
+                ${item.folder ? `📁 [${escapeHtml(item.folder)}] ` : ''}${escapeHtml(item.filename)}
+              </div>
+              <div class="card-tags">${pills.join('')}</div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderPagination() {
+      const totalPages = Math.max(1, Math.ceil(state.total / state.pageSize));
+      document.getElementById('page-info').textContent = `共 ${state.total.toLocaleString()} 張符合條件 (本頁顯示 ${state.items.length} 張)`;
+      document.getElementById('page-num-label').textContent = `第 ${state.page} / ${totalPages} 頁`;
+      document.getElementById('btn-prev').disabled = state.page <= 1;
+      document.getElementById('btn-next').disabled = state.page >= totalPages;
+    }
+
+    function changePage(delta) {
+      const totalPages = Math.max(1, Math.ceil(state.total / state.pageSize));
+      const next = state.page + delta;
+      if (next >= 1 && next <= totalPages) {
+        state.page = next;
+        document.getElementById('gallery-scroll').scrollTop = 0;
+        loadImages();
+      }
+    }
+
+    /* Selection & Batch Operations */
+    function toggleSelect(id) {
+      if (state.selectedIds.has(id)) state.selectedIds.delete(id);
+      else state.selectedIds.add(id);
+      updateSelectionUI();
+    }
+
+    function selectAllCurrentPage() {
+      for (const item of state.items) state.selectedIds.add(item.id);
+      updateSelectionUI();
+    }
+
+    function clearSelection() {
+      state.selectedIds.clear();
+      updateSelectionUI();
+    }
+
+    function updateSelectionUI() {
+      const bar = document.getElementById('batch-bar');
+      bar.classList.toggle('active', state.selectedIds.size > 0);
+      document.getElementById('batch-count').textContent = state.selectedIds.size;
+      renderGrid();
+    }
+
+    function openBatchTagModal(defaultCat) {
+      document.getElementById('bm-category').value = defaultCat || 'artist';
+      document.getElementById('bm-input').value = '';
+      document.getElementById('bm-also-move').checked = (defaultCat === 'artist');
+      document.getElementById('batch-modal-title').textContent =
+        defaultCat === 'artist' ? `🎨 批次設定畫師標籤 (${state.selectedIds.size} 張)` : `🏷️ 批次新增標籤 (${state.selectedIds.size} 張)`;
+      document.getElementById('batch-modal').classList.add('open');
+      setTimeout(() => document.getElementById('bm-input').focus(), 50);
+    }
+
+    function openBatchMoveModal() {
+      document.getElementById('bm-category').value = 'artist';
+      document.getElementById('bm-input').value = '';
+      document.getElementById('bm-also-move').checked = true;
+      document.getElementById('batch-modal-title').textContent = `📂 批次搬移至繪師資料夾並標記畫師 (${state.selectedIds.size} 張)`;
+      document.getElementById('batch-modal').classList.add('open');
+      setTimeout(() => document.getElementById('bm-input').focus(), 50);
+    }
+
+    function closeBatchModal() {
+      document.getElementById('batch-modal').classList.remove('open');
+    }
+
+    async function submitBatchTag() {
+      const cat = document.getElementById('bm-category').value;
+      const raw = document.getElementById('bm-input').value.trim();
+      const alsoMove = document.getElementById('bm-also-move').checked;
+      if (!raw) return alert('請輸入畫師或標籤名稱');
+
+      const names = raw.split(',').map(s => s.trim()).filter(Boolean);
+      const addTags = names.map(n => ({ name: n, category: cat }));
+
+      const r = await fetch('/api/tags/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          image_ids: Array.from(state.selectedIds),
+          add_tags: addTags,
+          move_to_artist_folder: alsoMove ? names[0] : null
+        })
+      });
+      const res = await r.json();
+      closeBatchModal();
+      clearSelection();
+      await loadStats();
+      await loadFolders();
+      await loadTags();
+      await loadImages();
+    }
+
+    /* Lightbox Detail View */
+    let currentDetailData = null;
+    let currentDecensorPreviewUrl = null;
+    let showingDecensoredPreview = false;
+
+    async function openDetailModal(idx) {
+      state.detailIndex = idx;
+      const item = state.items[idx];
+      if (!item) return;
+
+      document.getElementById('detail-modal').classList.add('open');
+      await refreshDetailView(item.id);
+    }
+
+    async function refreshDetailView(imageId) {
+      const r = await fetch(`/api/image/${imageId}`);
+      const d = await r.json();
+      currentDetailData = d;
+      currentDecensorPreviewUrl = null;
+      showingDecensoredPreview = false;
+
+      const decBox = document.getElementById('dt-decensor-box');
+      if (decBox) decBox.style.display = 'none';
+      const cmpBtn = document.getElementById('btn-decensor-compare');
+      if (cmpBtn) cmpBtn.style.display = 'none';
+      const saveRow = document.getElementById('dt-decensor-save-row');
+      if (saveRow) saveRow.style.display = 'none';
+
+      const mediaBox = document.getElementById('detail-media-container');
+      if (d.media_type === 'video') {
+        mediaBox.innerHTML = `<video src="/api/raw/${d.id}?t=${Date.now()}" controls autoplay loop></video>`;
+      } else {
+        mediaBox.innerHTML = `<img id="dt-main-img" src="/api/raw/${d.id}?t=${Date.now()}" alt="${escapeHtml(d.filename)}" />`;
+      }
+
+      document.getElementById('dt-filename').textContent = d.filename;
+      document.getElementById('dt-folder').textContent = d.folder || '根目錄 (D:\\圖檔\\twitter)';
+      document.getElementById('dt-size').textContent = d.size_kb.toLocaleString();
+      document.getElementById('dt-move-folder-input').value = d.suggested_folder || d.folder || '';
+
+      const sugBox = document.getElementById('dt-suggest-box');
+      if (d.suggested_folder && !d.folder) {
+        sugBox.style.display = 'block';
+        document.getElementById('dt-suggest-name').textContent = d.suggested_folder;
+      } else {
+        sugBox.style.display = 'none';
+      }
+
+      renderDetailTags(d.tags);
+    }
+
+    async function openOrRunSingleDecensor() {
+      if (!currentDetailData) return;
+      if (currentDetailData.media_type === 'video') {
+        return alert('目前去馬賽克模型僅支援靜態圖片 (JPG / PNG / WEBP)！');
+      }
+      const decBox = document.getElementById('dt-decensor-box');
+      if (decBox) decBox.style.display = 'flex';
+      await previewSingleDecensor();
+    }
+
+    async function previewSingleDecensor() {
+      if (!currentDetailData) return;
+      const btn = document.getElementById('btn-decensor-preview');
+      const mainBtn = document.getElementById('btn-single-decensor');
+      const statusEl = document.getElementById('dt-decensor-status');
+      const cmpBtn = document.getElementById('btn-decensor-compare');
+      const saveRow = document.getElementById('dt-decensor-save-row');
+      const mode = document.getElementById('dt-decensor-mode') ? document.getElementById('dt-decensor-mode').value : 'auto';
+
+      if (btn) { btn.disabled = true; btn.textContent = '⏳ GPU 重繪中...'; }
+      if (mainBtn) { mainBtn.disabled = true; mainBtn.textContent = '⏳ 去馬賽克中...'; }
+      if (statusEl) statusEl.innerHTML = '⏳ 正在透過 AMD RX 9070 XT (DirectML) 載入 YOLO 遮罩偵測與 DeepCreamPy v2 進行局部重繪...';
+
+      try {
+        const r = await fetch(`/api/decensor/preview/${currentDetailData.id}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode, conf_threshold: 0.25, expand_ratio: 0.18 })
+        });
+        const res = await r.json();
+        if (!r.ok || !res.ok) {
+          if (statusEl) statusEl.innerHTML = `<span style="color:#fca5a5;">⚠️ ${escapeHtml(res.detail || res.message || '未偵測到馬賽克區域')}</span>`;
+          if (cmpBtn) cmpBtn.style.display = 'none';
+          if (saveRow) saveRow.style.display = 'none';
+          return;
+        }
+        currentDecensorPreviewUrl = res.preview_data_url;
+        showingDecensoredPreview = true;
+        const imgEl = document.getElementById('dt-main-img');
+        if (imgEl && currentDecensorPreviewUrl) {
+          imgEl.src = currentDecensorPreviewUrl;
+        }
+        if (statusEl) {
+          statusEl.innerHTML = `<span style="color:#6ee7b7; font-weight:700;">${escapeHtml(res.message)}</span><br><span style="color:#cbd5e1; font-size:11px;">💡 左側大圖已切換為去碼預覽，可點擊「👁️ 切換對比」比較前後差異，滿意後再選擇「另存新檔」或「覆蓋原圖」。</span>`;
+        }
+        if (cmpBtn) {
+          cmpBtn.style.display = 'inline-flex';
+          cmpBtn.textContent = '👁️ 切換對比：目前顯示【去碼後】';
+        }
+        if (saveRow) {
+          saveRow.style.display = 'flex';
+        }
+      } catch (e) {
+        if (statusEl) statusEl.innerHTML = `<span style="color:#fca5a5;">❌ 預覽失敗：${escapeHtml(e.message)}</span>`;
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '🔍 重新偵測並預覽'; }
+        if (mainBtn) { mainBtn.disabled = false; mainBtn.textContent = '✨ AI 去馬賽克'; }
+      }
+    }
+
+    function toggleDecensorCompare() {
+      if (!currentDetailData || !currentDecensorPreviewUrl) return;
+      const imgEl = document.getElementById('dt-main-img');
+      const cmpBtn = document.getElementById('btn-decensor-compare');
+      if (!imgEl) return;
+      showingDecensoredPreview = !showingDecensoredPreview;
+      if (showingDecensoredPreview) {
+        imgEl.src = currentDecensorPreviewUrl;
+        if (cmpBtn) cmpBtn.textContent = '👁️ 切換對比：目前顯示【去碼後】';
+      } else {
+        imgEl.src = `/api/raw/${currentDetailData.id}?t=${Date.now()}`;
+        if (cmpBtn) cmpBtn.textContent = '👁️ 切換對比：目前顯示【原始有碼圖】';
+      }
+    }
+
+    async function applySingleDecensor(saveMode = 'new_copy') {
+      if (!currentDetailData) return;
+      if (saveMode === 'overwrite') {
+        if (!confirm('確定要直接覆蓋原始圖片檔案嗎？（建議可先選擇「另存無碼新檔」保留原圖）')) return;
+      }
+      const statusEl = document.getElementById('dt-decensor-status');
+      const mode = document.getElementById('dt-decensor-mode') ? document.getElementById('dt-decensor-mode').value : 'auto';
+      if (statusEl) statusEl.innerHTML = '⏳ 正在輸出高畫質無碼圖片並更新圖庫索引...';
+
+      try {
+        const r = await fetch(`/api/decensor/apply/${currentDetailData.id}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode, save_mode: saveMode, conf_threshold: 0.25, expand_ratio: 0.18 })
+        });
+        const res = await r.json();
+        if (!r.ok || !res.ok) {
+          alert(res.detail || res.message || '儲存失敗');
+          return;
+        }
+        const targetId = res.image_id || currentDetailData.id;
+        await refreshDetailView(targetId);
+        await loadStats();
+        await loadTags();
+        await loadImages();
+        const decBox = document.getElementById('dt-decensor-box');
+        if (decBox) decBox.style.display = 'flex';
+        const newStatusEl = document.getElementById('dt-decensor-status');
+        if (newStatusEl) {
+          newStatusEl.innerHTML = `<span style="color:#34d399; font-weight:700;">${escapeHtml(res.message)}</span>`;
+        }
+      } catch (e) {
+        alert('儲存去碼圖片失敗：' + e.message);
+      }
+    }
+
+    function renderDetailTags(tags) {
+      const groups = [
+        { key: 'artist', title: '🎨 畫師 (Artist)' },
+        { key: 'copyright', title: '📚 作品 / IP (Copyright)' },
+        { key: 'character', title: '👤 角色 (Character)' },
+        { key: 'rating', title: '🔞 分級 (Rating)' },
+        { key: 'general', title: '🏷️ 內容與服裝屬性 (General)' },
+        { key: 'source', title: '📌 來源與年份' }
+      ];
+
+      const box = document.getElementById('dt-tags-container');
+      let html = '';
+
+      for (const g of groups) {
+        const list = tags.filter(t => g.key === 'source' ? (t.category === 'source' || t.category === 'year') : t.category === g.key);
+        if (!list.length) continue;
+
+        html += `<div><div class="tag-group-title">${g.title}</div><div>`;
+        for (const t of list) {
+          const pct = t.source === 'ai' ? ` <span style="color:#94a3b8;font-size:10px;">${Math.round(t.confidence * 100)}%</span>` : '';
+          const srcBadge = t.source === 'folder' ? '📁' : (t.source === 'manual' ? '✍️' : (t.source === 'pixiv' ? '🅿️' : ''));
+          const display = t.zh_name ? `${t.zh_name} (${t.name})` : t.name;
+          html += `
+            <span class="detail-tag-chip">
+              <span style="cursor:pointer;" onclick="closeDetailModal(); toggleIncludeTag('${escapeJs(t.name)}')">
+                ${srcBadge} ${escapeHtml(display)}${pct}
+              </span>
+              <span class="del-x" onclick="removeSingleTag('${escapeJs(t.name)}')" title="刪除此標籤">×</span>
+            </span>
+          `;
+        }
+        html += `</div></div>`;
+      }
+
+      if (!html) {
+        html = `<div style="color:var(--text-muted); font-size:13px;">此圖片尚無標籤，請點擊上方「🤖 AI 立即辨識此圖標籤與畫師」或手動新增！</div>`;
+      }
+      box.innerHTML = html;
+    }
+
+    function closeDetailModal() {
+      document.getElementById('detail-modal').classList.remove('open');
+      document.getElementById('detail-media-container').innerHTML = '';
+    }
+
+    function navigateDetail(delta) {
+      const nextIdx = state.detailIndex + delta;
+      if (nextIdx >= 0 && nextIdx < state.items.length) {
+        openDetailModal(nextIdx);
+      }
+    }
+
+    async function runSingleAiTag() {
+      if (!currentDetailData) return;
+      const btn = document.getElementById('btn-single-ai');
+      const oldText = btn.textContent;
+      btn.textContent = '⏳ AI 載入並辨識中...';
+      btn.disabled = true;
+      try {
+        const r = await fetch(`/api/ai/single/${currentDetailData.id}`, { method: 'POST' });
+        if (!r.ok) {
+          const err = await r.json();
+          alert(err.detail || '辨識失敗');
+        } else {
+          await refreshDetailView(currentDetailData.id);
+          await loadStats();
+          await loadTags();
+          await loadImages();
+        }
+      } finally {
+        btn.textContent = oldText;
+        btn.disabled = false;
+      }
+    }
+
+    async function addSingleTag() {
+      if (!currentDetailData) return;
+      const cat = document.getElementById('dt-add-cat').value;
+      const val = document.getElementById('dt-add-input').value.trim();
+      if (!val) return;
+
+      await fetch('/api/tags/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          image_ids: [currentDetailData.id],
+          add_tags: val.split(',').map(s => ({ name: s.trim(), category: cat }))
+        })
+      });
+      document.getElementById('dt-add-input').value = '';
+      await refreshDetailView(currentDetailData.id);
+      await loadTags();
+      await loadImages();
+    }
+
+    async function removeSingleTag(tname) {
+      if (!currentDetailData) return;
+      await fetch('/api/tags/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          image_ids: [currentDetailData.id],
+          remove_tag_names: [tname]
+        })
+      });
+      await refreshDetailView(currentDetailData.id);
+      await loadTags();
+      await loadImages();
+    }
+
+    async function moveSingleToSuggested() {
+      if (!currentDetailData || !currentDetailData.suggested_folder) return;
+      await moveSingleToFolder(currentDetailData.suggested_folder);
+    }
+
+    async function moveSingleToFolderInput() {
+      const target = document.getElementById('dt-move-folder-input').value.trim();
+      if (!target) return alert('請輸入或選擇目標繪師資料夾名稱');
+      await moveSingleToFolder(target);
+    }
+
+    async function moveSingleToFolder(folderName) {
+      if (!currentDetailData) return;
+      await fetch('/api/organize/move', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          image_ids: [currentDetailData.id],
+          target_folder: folderName,
+          mode: 'selected'
+        })
+      });
+      await refreshDetailView(currentDetailData.id);
+      await loadStats();
+      await loadFolders();
+      await loadImages();
+    }
+
+    async function openInExplorer() {
+      if (!currentDetailData) return;
+      await fetch(`/api/open_explorer/${currentDetailData.id}`, { method: 'POST' });
+    }
+
+    /* Smart Tagging Modal, Model Load/Unload & Polling */
+    function openAiModal() {
+      document.getElementById('ai-modal').classList.add('open');
+      checkAiStatus();
+    }
+    function closeAiModal() { document.getElementById('ai-modal').classList.remove('open'); }
+    function openReverseSearchModal() { openAiModal(); }
+    function closeReverseSearchModal() { closeAiModal(); }
+
+    function syncModelUiState(stAi) {
+      if (!stAi) return;
+      const topBtn = document.getElementById('btn-top-unload-model');
+      if (topBtn) {
+        topBtn.style.display = stAi.model_loaded ? 'inline-flex' : 'none';
+      }
+      const stateEl = document.getElementById('ai-modal-model-state');
+      const loadBtn = document.getElementById('btn-modal-load-vram');
+      const vramBtn = document.getElementById('btn-modal-unload-vram');
+      const diskBtn = document.getElementById('btn-modal-unload-disk');
+      const startBtn = document.getElementById('btn-start-smart-tag');
+      if (stateEl) {
+        if (stAi.model_loaded) {
+          stateEl.innerHTML = `<span style="color:#34d399;">🟢 已載入於顯卡記憶體 (${escapeHtml(stAi.provider || 'GPU')})</span>`;
+        } else if (stAi.running && (stAi.status_message || '').includes('載入')) {
+          stateEl.innerHTML = `<span style="color:#fcd34d;">⏳ 正在載入模型至 GPU 顯卡記憶體...</span>`;
+        } else if (stAi.disk_cached) {
+          stateEl.innerHTML = `<span style="color:#94a3b8;">⚪ 未載入記憶體 (VRAM 0 MB 佔用，硬碟快取 ${stAi.disk_size_mb || 750} MB)</span>`;
+        } else {
+          stateEl.innerHTML = `<span style="color:#94a3b8;">⚪ 未載入且硬碟無快取檔 (0 MB 佔用)</span>`;
+        }
+      }
+      if (loadBtn) loadBtn.disabled = !!stAi.model_loaded || !!stAi.running;
+      if (vramBtn) vramBtn.disabled = !stAi.model_loaded;
+      if (diskBtn) diskBtn.disabled = !stAi.model_loaded && !stAi.disk_cached;
+      if (startBtn) {
+        startBtn.disabled = !!stAi.running;
+        startBtn.textContent = stAi.running
+          ? '⏳ 智慧標籤執行中...'
+          : '🚀 啟動智慧標籤 (AI 打標 ➔ 搜圖校正 ➔ 建夾歸檔)';
+      }
+    }
+
+    async function loadAiModelNow() {
+      const loadBtn = document.getElementById('btn-modal-load-vram');
+      const stateEl = document.getElementById('ai-modal-model-state');
+      if (loadBtn) {
+        loadBtn.disabled = true;
+        loadBtn.textContent = '⏳ 載入中...';
+      }
+      if (stateEl) {
+        stateEl.innerHTML = `<span style="color:#fcd34d;">⏳ 正在將 Camie Tagger v2 載入至 GPU 顯卡記憶體...</span>`;
+      }
+      try {
+        const r = await fetch('/api/ai/load', { method: 'POST' });
+        const d = await r.json();
+        await checkAiStatus();
+      } catch (e) {
+        alert('載入模型失敗：' + e.message);
+      } finally {
+        if (loadBtn) {
+          loadBtn.textContent = '⚡ 載入模型至 GPU';
+        }
+      }
+    }
+
+    async function unloadAiModel(deleteDiskFiles = false) {
+      if (deleteDiskFiles) {
+        if (!confirm('確定要卸載 AI 模型，並同時刪除硬碟上的 .onnx 模型快取檔（約 750MB）嗎？下次執行 AI 打標時會重新下載。')) return;
+      }
+      const r = await fetch(`/api/ai/unload?delete_disk_files=${deleteDiskFiles}`, { method: 'POST' });
+      const d = await r.json();
+      alert(`✅ ${d.message || '已成功卸載 AI 模型並釋放記憶體！'}`);
+      await checkAiStatus();
+    }
+
+    async function startAiBatch() {
+      const scope = document.getElementById('ai-scope').value;
+      const limit = document.getElementById('ai-limit').value;
+      const genT = document.getElementById('ai-gen-thresh').value;
+      const artT = document.getElementById('ai-art-thresh').value;
+      const runLocalAi = document.getElementById('ai-step-local') ? document.getElementById('ai-step-local').checked : true;
+      const runRevCalibrate = document.getElementById('ai-step-rev') ? document.getElementById('ai-step-rev').checked : true;
+      const revLimit = document.getElementById('rev-limit') ? document.getElementById('rev-limit').value : '30';
+      const revSim = document.getElementById('rev-sim') ? document.getElementById('rev-sim').value : '72';
+      const revApiKey = document.getElementById('rev-apikey') ? document.getElementById('rev-apikey').value.trim() : '';
+      const runSemThemes = document.getElementById('ai-step-sem') ? document.getElementById('ai-step-sem').checked : true;
+      const autoMove = document.getElementById('ai-auto-move') ? document.getElementById('ai-auto-move').checked : false;
+      const runDecensor = document.getElementById('ai-step-decensor') ? document.getElementById('ai-step-decensor').checked : false;
+      const decensorSaveMode = document.getElementById('ai-decensor-save-mode') ? document.getElementById('ai-decensor-save-mode').value : 'new_copy';
+      const autoUnload = document.getElementById('ai-auto-unload') ? document.getElementById('ai-auto-unload').checked : true;
+
+      if (!runLocalAi && !runRevCalibrate && !runSemThemes && !runDecensor) {
+        return alert('請至少勾選一個執行階段！');
+      }
+
+      // 立即在視窗內顯示進度面板與載入狀態，讓使用者清楚看到模型載入與即時進度
+      const liveBox = document.getElementById('ai-modal-live-box');
+      if (liveBox) {
+        liveBox.style.display = 'flex';
+        document.getElementById('ai-modal-live-msg').textContent = runLocalAi
+          ? '⏳ 正在載入本機 AI 視覺模型至 GPU 顯卡記憶體並啟動任務...'
+          : '⏳ 正在啟動智慧標籤任務...';
+        document.getElementById('ai-modal-live-pct').textContent = '0%';
+        document.getElementById('ai-modal-live-bar').style.width = '2%';
+      }
+
+      const params = new URLSearchParams({
+        scope,
+        limit,
+        general_thresh: genT,
+        artist_thresh: artT,
+        run_local_ai: runLocalAi,
+        run_reverse_search_calibrate: runRevCalibrate,
+        reverse_search_limit: revLimit,
+        min_similarity: revSim,
+        run_semantic_themes: runSemThemes,
+        auto_move_to_artist_folder: autoMove,
+        run_decensor: runDecensor,
+        decensor_save_mode: decensorSaveMode,
+        auto_unload: autoUnload
+      });
+      if (revApiKey) {
+        params.set('saucenao_api_key', revApiKey);
+      }
+
+      await fetch(`/api/ai/start?${params.toString()}`, { method: 'POST' });
+      await checkAiStatus();
+    }
+
+    async function stopAiBatch() {
+      await fetch('/api/ai/stop', { method: 'POST' });
+      await fetch('/api/reverse_search/stop', { method: 'POST' });
+      checkAiStatus();
+    }
+
+    function startAiPolling() {
+      aiPollTimer = setInterval(checkAiStatus, 1000);
+    }
+
+    let wasAiRunning = false;
+    let bannerHideTimeout = null;
+
+    async function checkAiStatus() {
+      try {
+        const [rAi, rRev, rSch] = await Promise.all([
+          fetch('/api/ai/status'),
+          fetch('/api/reverse_search/status'),
+          fetch('/api/schedule/status')
+        ]);
+        const stAi = await rAi.json();
+        const stRev = await rRev.json();
+        const stSch = await rSch.json();
+
+        syncModelUiState(stAi);
+
+        const schLiveEl = document.getElementById('sch-live-status');
+        if (schLiveEl && stSch) {
+          schLiveEl.textContent = stSch.status_message || '待機中';
+        }
+
+        const schAsBanner = stSch.running_job ? {
+          running: true,
+          status_message: `正在執行排程自動處理 — 整體進度：${stSch.processed_count || 0}%`,
+          total_target: stSch.total_target || 100,
+          processed_count: stSch.processed_count || 0
+        } : null;
+
+        const isAnyRunning = !!(stAi.running || stRev.running || stSch.running_job);
+
+        if (isAnyRunning) {
+          if (bannerHideTimeout) {
+            clearTimeout(bannerHideTimeout);
+            bannerHideTimeout = null;
+          }
+          wasAiRunning = true;
+          const activeSt = schAsBanner || (stRev.running ? stRev : stAi);
+          updateAiBanner(activeSt, true);
+          // Only update top header numbers quietly without rebuilding sidebar DOM
+          loadStats();
+        } else if (wasAiRunning) {
+          wasAiRunning = false;
+          const finishedSt = stRev.status_message && stRev.status_message.includes('完成') ? stRev : stAi;
+          updateAiBanner({
+            running: false,
+            status_message: finishedSt.status_message || '✅ 整體處理任務已完成！',
+            total_target: 100,
+            processed_count: 100,
+            speed_img_per_sec: stAi.speed_img_per_sec || 0,
+            current_file: '已完成'
+          }, false);
+          await loadStats();
+          await loadFolders();
+          await loadTags();
+          await loadImages();
+          if (document.getElementById('schedule-modal').classList.contains('open')) {
+            await loadScheduleConfig();
+          }
+          bannerHideTimeout = setTimeout(() => {
+            document.getElementById('ai-banner').classList.remove('active');
+          }, 5000);
+        }
+      } catch (e) {}
+    }
+
+    function updateAiBanner(st, isRunning = true) {
+      if (!st) return;
+      const banner = document.getElementById('ai-banner');
+      const liveBox = document.getElementById('ai-modal-live-box');
+      const stopBtn = document.getElementById('btn-modal-stop-task');
+      if (isRunning || st.running) {
+        banner.classList.add('active');
+        const total = st.total_target > 0 ? st.total_target : 100;
+        const done = st.processed_count || 0;
+        const pct = Math.min(100, Math.max(0, Math.round((done / total) * 100)));
+        const msg = st.status_message || `正在執行處理任務 — 整體進度：${done.toLocaleString()} / ${total.toLocaleString()}`;
+        document.getElementById('ai-banner-msg').textContent = msg;
+        document.getElementById('ai-progress-bar').style.width = `${pct}%`;
+        document.getElementById('ai-banner-pct').textContent = `${pct}%`;
+
+        if (liveBox) {
+          liveBox.style.display = 'flex';
+          document.getElementById('ai-modal-live-msg').textContent = msg;
+          document.getElementById('ai-modal-live-bar').style.width = `${Math.max(2, pct)}%`;
+          document.getElementById('ai-modal-live-pct').textContent = `${pct}% (${done.toLocaleString()} / ${total.toLocaleString()})`;
+          document.getElementById('ai-modal-live-file').textContent = `目前處理檔案：${st.current_file || '準備中...'}`;
+          document.getElementById('ai-modal-live-speed').textContent = `處理速度：${st.speed_img_per_sec || 0} 張/秒`;
+          if (stopBtn) stopBtn.style.display = 'inline-flex';
+        }
+      } else if (st.processed_count === 100) {
+        banner.classList.add('active');
+        document.getElementById('ai-banner-msg').textContent = st.status_message;
+        document.getElementById('ai-progress-bar').style.width = '100%';
+        document.getElementById('ai-banner-pct').textContent = '100%';
+
+        if (liveBox) {
+          liveBox.style.display = 'flex';
+          document.getElementById('ai-modal-live-msg').textContent = st.status_message;
+          document.getElementById('ai-modal-live-bar').style.width = '100%';
+          document.getElementById('ai-modal-live-pct').textContent = '100%';
+          document.getElementById('ai-modal-live-file').textContent = '目前處理檔案：已完成';
+          if (stopBtn) stopBtn.style.display = 'none';
+        }
+      } else {
+        banner.classList.remove('active');
+      }
+    }
+
+    /* Organize & Artist Folder Auto-Creation Utilities */
+    let currentOrgPreviewFolders = [];
+
+    function openOrganizeModal() {
+      document.getElementById('organize-modal').classList.add('open');
+      loadArtistFoldersPreview();
+    }
+
+    function closeOrganizeModal() {
+      document.getElementById('organize-modal').classList.remove('open');
+    }
+
+    async function loadArtistFoldersPreview() {
+      const minConf = document.getElementById('org-min-conf') ? document.getElementById('org-min-conf').value : '0.20';
+      const minImgs = document.getElementById('org-min-imgs') ? document.getElementById('org-min-imgs').value : '1';
+      const onlyEx = document.getElementById('org-only-existing') ? document.getElementById('org-only-existing').checked : false;
+
+      const box = document.getElementById('org-preview-box');
+      const sumBar = document.getElementById('org-summary-bar');
+      if (box) box.innerHTML = '⏳ 正在分析根目錄已辨識繪師與目標資料夾...';
+
+      const params = new URLSearchParams({
+        min_confidence: minConf,
+        min_images_per_artist: minImgs,
+        only_existing_folders: onlyEx
+      });
+      const r = await fetch(`/api/organize/artist_folders_preview?${params.toString()}`);
+      const d = await r.json();
+      currentOrgPreviewFolders = d.folders || [];
+
+      if (sumBar) {
+        sumBar.innerHTML = `
+          <span>🎯 可立即歸檔：<b>${d.total_ready_images}</b> 張圖片 ➔ 共 <b>${d.total_artist_folders}</b> 個繪師資料夾（➕ 新建 <b style="color:#fcd34d;">${d.new_folders_to_create}</b> 個 / 📁 併入既有 <b>${d.existing_folders_to_update}</b> 個）</span>
+          <span style="color:var(--text-muted); font-size:12px;">根目錄尚有 ${d.untagged_root_remaining.toLocaleString()} 張未打標圖片</span>
+        `;
+      }
+
+      if (!currentOrgPreviewFolders.length) {
+        box.innerHTML = `<div style="padding:20px; color:var(--text-muted);">目前沒有符合條件的待歸檔繪師圖片。你可以調低門檻，或點擊下方「🔍 對未標籤圖啟動以圖搜圖＋建夾」/「🤖 AI 打標＋建夾」！</div>`;
+        return;
+      }
+
+      let html = `<table style="width:100%; border-collapse:collapse; text-align:left;">
+        <thead>
+          <tr style="border-bottom:1px solid var(--border); color:var(--text-muted);">
+            <th style="padding:6px;">目標繪師資料夾 (D:\\圖檔\\twitter\\...)</th>
+            <th style="padding:6px;">狀態</th>
+            <th style="padding:6px;">張數</th>
+            <th style="padding:6px;">來源 / 信心度</th>
+            <th style="padding:6px;">範例檔案</th>
+            <th style="padding:6px; text-align:right;">單獨操作</th>
+          </tr>
+        </thead><tbody>`;
+
+      for (let idx = 0; idx < currentOrgPreviewFolders.length; idx++) {
+        const f = currentOrgPreviewFolders[idx];
+        const statusBadge = f.is_new_folder
+          ? `<span style="background:rgba(245,158,11,0.18); color:#fcd34d; border:1px solid #f59e0b; padding:1px 6px; border-radius:4px; font-size:11px;">➕ 新建繪師資料夾</span>`
+          : `<span style="background:rgba(16,185,129,0.18); color:#6ee7b7; border:1px solid #10b981; padding:1px 6px; border-radius:4px; font-size:11px;">📁 併入既有資料夾</span>`;
+        const srcText = (f.sources || []).join(', ');
+        const samples = (f.sample_filenames || []).slice(0, 2).join(', ');
+        html += `<tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+          <td style="padding:6px; font-weight:700; color:#f8fafc;">📁 ${escapeHtml(f.folder_name)}</td>
+          <td style="padding:6px;">${statusBadge}</td>
+          <td style="padding:6px; font-weight:700; color:#34d399;">${f.image_count} 張</td>
+          <td style="padding:6px; color:#a5b4fc;">${escapeHtml(srcText)} (${Math.round(f.avg_confidence * 100)}%)</td>
+          <td style="padding:6px; color:var(--text-muted); max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml((f.sample_filenames || []).join('\n'))}">${escapeHtml(samples)}</td>
+          <td style="padding:6px; text-align:right;">
+            <button class="btn btn-primary" style="padding:2px 8px; font-size:11px;" onclick="moveSingleArtistGroup(${idx})">建夾並移入</button>
+          </td>
+        </tr>`;
+      }
+      html += `</tbody></table>`;
+      box.innerHTML = html;
+    }
+
+    async function moveSingleArtistGroup(idx) {
+      const f = currentOrgPreviewFolders[idx];
+      if (!f) return;
+      const autoRename = document.getElementById('org-auto-rename') ? document.getElementById('org-auto-rename').checked : true;
+      const r = await fetch('/api/organize/move', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mode: 'selected',
+          image_ids: f.image_ids,
+          target_folder: f.folder_name,
+          auto_rename_on_move: autoRename
+        })
+      });
+      const d = await r.json();
+      await loadArtistFoldersPreview();
+      await loadStats();
+      await loadFolders();
+      await loadImages();
+    }
+
+    async function organizeAiSuggested() {
+      const minConf = parseFloat(document.getElementById('org-min-conf') ? document.getElementById('org-min-conf').value : '0.20');
+      const minImgs = parseInt(document.getElementById('org-min-imgs') ? document.getElementById('org-min-imgs').value : '1', 10);
+      const onlyEx = document.getElementById('org-only-existing') ? document.getElementById('org-only-existing').checked : false;
+      const autoRename = document.getElementById('org-auto-rename') ? document.getElementById('org-auto-rename').checked : true;
+
+      const btn = document.getElementById('btn-org-exec');
+      const oldText = btn ? btn.textContent : '';
+      if (btn) {
+        btn.textContent = '⏳ 正在建立繪師資料夾並搬移圖片...';
+        btn.disabled = true;
+      }
+      try {
+        const r = await fetch('/api/organize/move', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            mode: 'auto_artist_folders',
+            min_confidence: minConf,
+            min_images_per_artist: minImgs,
+            only_existing_folders: onlyEx,
+            auto_rename_on_move: autoRename
+          })
+        });
+        const d = await r.json();
+        alert(`✅ 歸檔完成！\n• 共搬移歸檔：${d.moved} 張圖片\n• 新建繪師資料夾：${d.new_folders_created || 0} 個\n• 併入既有繪師資料夾：${d.existing_folders_updated || 0} 個`);
+        await loadArtistFoldersPreview();
+        await loadStats();
+        await loadFolders();
+        await loadImages();
+      } finally {
+        if (btn) {
+          btn.textContent = oldText;
+          btn.disabled = false;
+        }
+      }
+    }
+
+    async function organizeByDate() {
+      if (!confirm('確定要將根目錄中所有 YYYYMMDD_NNNNN 格式的圖片，自動依「年-月 (YYYY-MM)」整理至 D:\\圖檔\\twitter\\_按日期歸檔\\ 嗎？')) return;
+      const r = await fetch('/api/organize/move', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'by_date_ym' })
+      });
+      const d = await r.json();
+      alert(`已成功將 ${d.moved} 張圖片按「年-月」歸檔至 _按日期歸檔 資料夾！`);
+      closeOrganizeModal();
+      await loadStats();
+      await loadFolders();
+      await loadImages();
+    }
+
+    async function runPixivLookup() {
+      const r = await fetch('/api/pixiv/lookup?limit=80', { method: 'POST' });
+      const d = await r.json();
+      alert(`Pixiv ID 反查完成！共檢查 ${d.checked_illusts || 0} 件作品，成功取回 ${d.found_illusts || 0} 位真實畫師與原圖標籤。`);
+      await loadStats();
+      await loadTags();
+      await loadImages();
+    }
+
+    async function rescanLibrary() {
+      const r = await fetch('/api/scan', { method: 'POST' });
+      const d = await r.json();
+      alert(`掃描完成！總圖數：${d.total_images} (新增 ${d.new_added} 張，耗時 ${d.elapsed_sec} 秒)`);
+      await loadStats();
+      await loadFolders();
+      await loadTags();
+      await loadImages();
+    }
+
+    /* Batch Rename & Order Lock Functions */
+    let rnTimer = null;
+
+    function openRenameModal() {
+      const sel = document.getElementById('rn-folder');
+      let opts = `<option value="__ALL_ARTIST_FOLDERS__">🌟 全部繪師子資料夾一鍵統一格式 (53 個資料夾)</option>`;
+      opts += `<option value="__ROOT__">🚨 根目錄未整理檔案 (YYYYMMDD_00001.jpg)</option>`;
+      for (const f of state.folders) {
+        const selectedAttr = (state.folder === f.name) ? 'selected' : '';
+        opts += `<option value="${escapeHtml(f.name)}" ${selectedAttr}>📁 ${escapeHtml(f.name)} (${f.count} 張)</option>`;
+      }
+      sel.innerHTML = opts;
+      if (state.folder && state.folder !== '__ALL__' && state.folder !== '__FOLDERS__' && state.folder !== '__SUGGESTED__') {
+        sel.value = state.folder;
+      }
+      document.getElementById('rn-date').value = '';
+      document.getElementById('rn-artist').value = '';
+      document.getElementById('rename-modal').classList.add('open');
+      loadRenamePreview();
+    }
+
+    function closeRenameModal() {
+      document.getElementById('rename-modal').classList.remove('open');
+    }
+
+    function debounceRenamePreview() {
+      clearTimeout(rnTimer);
+      rnTimer = setTimeout(loadRenamePreview, 250);
+    }
+
+    async function loadRenamePreview() {
+      const folder = document.getElementById('rn-folder').value;
+      const pad = document.getElementById('rn-pad').value;
+      const cdate = document.getElementById('rn-date').value.trim();
+      const cartist = document.getElementById('rn-artist').value.trim();
+
+      const box = document.getElementById('rn-preview-box');
+      const sumBar = document.getElementById('rn-summary-bar');
+      document.getElementById('btn-rn-exec').style.display = 'inline-flex';
+      box.innerHTML = '⏳ 正在依 Windows 自然排序計算新舊檔名對照表...';
+
+      const params = new URLSearchParams({ folder, pad_digits: pad });
+      if (cdate) params.set('custom_date', cdate);
+      if (cartist) params.set('custom_artist', cartist);
+
+      const r = await fetch(`/api/rename/preview?${params.toString()}`);
+      const d = await r.json();
+
+      if (d.mode === 'all_folders') {
+        sumBar.textContent = `📊 全部 ${d.folder_count} 個繪師資料夾：共 ${d.total.toLocaleString()} 張圖片，預計將標準化改名 ${d.changed_count.toLocaleString()} 張`;
+        let html = `<table style="width:100%; border-collapse:collapse; text-align:left;">
+          <thead>
+            <tr style="border-bottom:1px solid var(--border); color:var(--text-muted);">
+              <th style="padding:6px;">資料夾名稱</th>
+              <th style="padding:6px;">總數 (需調整)</th>
+              <th style="padding:6px;">第 1 張 (舊 ➔ 新)</th>
+              <th style="padding:6px;">最後 1 張 (舊 ➔ 新)</th>
+            </tr>
+          </thead><tbody>`;
+        for (const f of d.folders) {
+          html += `<tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+            <td style="padding:6px; font-weight:700; color:#fcd34d;">📁 ${escapeHtml(f.folder)}</td>
+            <td style="padding:6px;">${f.total} (<span style="color:#34d399;">${f.changed_count}</span>)</td>
+            <td style="padding:6px;"><span style="color:#94a3b8;">${escapeHtml(f.sample_first_old)}</span><br>➔ <span style="color:#6ee7b7;">${escapeHtml(f.sample_first_new)}</span></td>
+            <td style="padding:6px;"><span style="color:#94a3b8;">${escapeHtml(f.sample_last_old)}</span><br>➔ <span style="color:#6ee7b7;">${escapeHtml(f.sample_last_new)}</span></td>
+          </tr>`;
+        }
+        html += `</tbody></table>`;
+        box.innerHTML = html;
+      } else {
+        sumBar.textContent = `📊 資料夾 [${d.folder}] (基準日期: ${d.base_date})：共 ${d.total.toLocaleString()} 張圖片，預計需要改名 ${d.changed_count.toLocaleString()} 張 (前 300 筆預覽)`;
+        let html = `<table style="width:100%; border-collapse:collapse; text-align:left;">
+          <thead>
+            <tr style="border-bottom:1px solid var(--border); color:var(--text-muted);">
+              <th style="padding:5px; width:60px;">順序</th>
+              <th style="padding:5px;">目前檔名 (Windows 自然排序)</th>
+              <th style="padding:5px; width:30px;"></th>
+              <th style="padding:5px;">改名後新檔名 (鎖定順序)</th>
+            </tr>
+          </thead><tbody>`;
+        for (const it of d.items) {
+          const colorNew = it.changed ? '#6ee7b7' : '#94a3b8';
+          const statusBadge = it.changed ? '' : ' <span style="font-size:10px;color:#64748b;">(已符合)</span>';
+          html += `<tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
+            <td style="padding:4px 6px; color:#64748b;">#${it.seq}</td>
+            <td style="padding:4px 6px; color:#cbd5e1;">${escapeHtml(it.old_filename)}</td>
+            <td style="padding:4px 6px;">➔</td>
+            <td style="padding:4px 6px; color:${colorNew}; font-weight:${it.changed ? '600' : '400'};">${escapeHtml(it.new_filename)}${statusBadge}</td>
+          </tr>`;
+        }
+        html += `</tbody></table>`;
+        box.innerHTML = html;
+      }
+    }
+
+    async function executeRename() {
+      const folder = document.getElementById('rn-folder').value;
+      const pad = parseInt(document.getElementById('rn-pad').value, 10);
+      const cdate = document.getElementById('rn-date').value.trim() || null;
+      const cartist = document.getElementById('rn-artist').value.trim() || null;
+
+      const btn = document.getElementById('btn-rn-exec');
+      const oldText = btn.textContent;
+      btn.textContent = '⏳ 正在執行兩階段安全改名...';
+      btn.disabled = true;
+
+      try {
+        const r = await fetch('/api/rename/execute', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            folder,
+            pad_digits: pad,
+            custom_date: cdate,
+            custom_artist: cartist
+          })
+        });
+        const d = await r.json();
+        if (!r.ok) {
+          alert('改名失敗: ' + (d.detail || JSON.stringify(d)));
+        } else {
+          alert(`✅ 改名完成！共成功更新 ${d.renamed || 0} 個檔案（已自動建立還原備份紀錄）。`);
+          await loadRenamePreview();
+          await loadImages();
+        }
+      } finally {
+        btn.textContent = oldText;
+        btn.disabled = false;
+      }
+    }
+
+    async function loadRenameLogsView() {
+      const r = await fetch('/api/rename/logs');
+      const logs = await r.json();
+      const box = document.getElementById('rn-preview-box');
+      const sumBar = document.getElementById('rn-summary-bar');
+      document.getElementById('btn-rn-exec').style.display = 'none';
+      sumBar.textContent = `⏪ 歷史改名紀錄（點擊「一鍵還原」即可恢復該批次的原始檔名）`;
+
+      if (!logs.length) {
+        box.innerHTML = `<div style="padding:20px; color:var(--text-muted);">目前尚無改名紀錄。</div>`;
+        return;
+      }
+
+      let html = `<table style="width:100%; border-collapse:collapse; text-align:left;">
+        <thead>
+          <tr style="border-bottom:1px solid var(--border); color:var(--text-muted);">
+            <th style="padding:6px;">執行時間</th>
+            <th style="padding:6px;">目標資料夾</th>
+            <th style="padding:6px;">改名數量</th>
+            <th style="padding:6px;">操作</th>
+          </tr>
+        </thead><tbody>`;
+      for (const lg of logs) {
+        html += `<tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+          <td style="padding:6px;">${escapeHtml(lg.timestamp)}</td>
+          <td style="padding:6px; font-weight:700; color:#fcd34d;">${escapeHtml(lg.folder)}</td>
+          <td style="padding:6px;">${lg.count} 個檔案</td>
+          <td style="padding:6px;">
+            <button class="btn btn-warn" style="padding:3px 10px; font-size:12px;" onclick="undoRenameBatch('${escapeJs(lg.batch_id)}')">⏪ 一鍵還原舊檔名</button>
+          </td>
+        </tr>`;
+      }
+      html += `</tbody></table>`;
+      box.innerHTML = html;
+    }
+
+    async function undoRenameBatch(batchId) {
+      if (!confirm('確定要將此批次的檔案全部還原為改名前的原始檔名嗎？')) return;
+      const r = await fetch(`/api/rename/undo/${encodeURIComponent(batchId)}`, { method: 'POST' });
+      const d = await r.json();
+      alert(`✅ 已成功還原 ${d.restored || 0} 個檔案的原始檔名！`);
+      await loadRenameLogsView();
+      await loadImages();
+    }
+
+    /* Semantic Correlation & Gemini MCP Functions */
+    function openSemanticModal() {
+      document.getElementById('semantic-modal').classList.add('open');
+      if (state.includeTags.length > 0) {
+        document.getElementById('sem-query-input').value = state.includeTags[0];
+        runCorrelationSearch();
+      }
+    }
+
+    function closeSemanticModal() {
+      document.getElementById('semantic-modal').classList.remove('open');
+    }
+
+    async function runCorrelationSearch() {
+      const q = document.getElementById('sem-query-input').value.trim();
+      const box = document.getElementById('sem-result-box');
+      if (!q) return alert('請輸入畫師或標籤名稱');
+      box.innerHTML = '⏳ 正在計算標籤共現矩陣與 Jaccard 相似度...';
+
+      const r = await fetch(`/api/semantic/correlations?target_tag=${encodeURIComponent(q)}&top_k=40`);
+      const d = await r.json();
+
+      if (!d.found) {
+        // Fallback to semantic expand search
+        const r2 = await fetch(`/api/semantic/expand?q=${encodeURIComponent(q)}`);
+        const d2 = await r2.json();
+        if (!d2.matched_tags || !d2.matched_tags.length) {
+          box.innerHTML = `<div style="color:#f87171;">找不到與「${escapeHtml(q)}」對應的標籤（若尚未執行 AI 打標，請先執行 AI 自動打標）。</div>`;
+          return;
+        }
+        let html = `<div style="margin-bottom:10px; font-weight:700; color:#a5b4fc;">🔍 語意展開匹配到 ${d2.matched_tags.length} 個相關標籤（共 ${d2.total_images_found} 張圖片）：</div><div style="display:flex; flex-wrap:wrap; gap:6px;">`;
+        for (const mt of d2.matched_tags) {
+          const lb = mt.zh_name ? `${mt.zh_name} (${mt.name})` : mt.name;
+          html += `<span class="detail-tag-chip" style="cursor:pointer;" onclick="closeSemanticModal(); toggleIncludeTag('${escapeJs(mt.name)}')">➕ ${escapeHtml(lb)} <b>(${mt.count})</b></span>`;
+        }
+        html += `</div>`;
+        box.innerHTML = html;
+        return;
+      }
+
+      const t = d.target_tag;
+      let html = `
+        <div style="margin-bottom:12px; padding-bottom:8px; border-bottom:1px solid var(--border);">
+          🎯 目標標籤：<b style="color:#fcd34d; font-size:15px;">${escapeHtml(t.zh_name || t.name)} (${escapeHtml(t.name)})</b>
+          — 圖庫中共有 <b>${t.count}</b> 張圖片
+          <button class="btn btn-primary" style="padding:2px 8px; font-size:11px; margin-left:8px;" onclick="closeSemanticModal(); toggleIncludeTag('${escapeJs(t.name)}')">篩選此標籤</button>
+        </div>
+      `;
+
+      if (!d.correlated_all.length) {
+        html += `<div style="color:var(--text-muted);">此標籤目前沒有其他共現標籤（請先對該資料夾或圖片執行 AI 自動打標以建立豐富關聯）。</div>`;
+        box.innerHTML = html;
+        return;
+      }
+
+      html += `<table style="width:100%; border-collapse:collapse; text-align:left; font-size:12px;">
+        <thead>
+          <tr style="border-bottom:1px solid var(--border); color:var(--text-muted);">
+            <th style="padding:6px;">關聯標籤 (點擊可直接加入組合篩選)</th>
+            <th style="padding:6px;">類別</th>
+            <th style="padding:6px;">同時出現張數</th>
+            <th style="padding:6px;">條件機率 P(B|A)</th>
+            <th style="padding:6px;">相關性分數</th>
+          </tr>
+        </thead><tbody>`;
+
+      for (const c of d.correlated_all) {
+        const lb = c.zh_name ? `${c.zh_name} (${c.name})` : c.name;
+        html += `<tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
+          <td style="padding:6px;">
+            <span class="detail-tag-chip" style="cursor:pointer;" onclick="closeSemanticModal(); if(!state.includeTags.includes('${escapeJs(t.name)}')) state.includeTags.push('${escapeJs(t.name)}'); toggleIncludeTag('${escapeJs(c.name)}');" title="點擊同時篩選 [${escapeHtml(t.name)} + ${escapeHtml(c.name)}]">
+              🔗 ${escapeHtml(lb)}
+            </span>
+          </td>
+          <td style="padding:6px; color:var(--text-muted);">${escapeHtml(c.category)}</td>
+          <td style="padding:6px;"><b>${c.co_count}</b> / ${c.total_count} 張</td>
+          <td style="padding:6px; color:#34d399; font-weight:600;">${c.cond_prob_pct}%</td>
+          <td style="padding:6px; color:#a5b4fc;">${c.relevance_score}</td>
+        </tr>`;
+      }
+      html += `</tbody></table>`;
+      box.innerHTML = html;
+    }
+
+    async function runAutoSemanticThemes() {
+      const box = document.getElementById('sem-result-box');
+      box.innerHTML = '⏳ 正在掃描全圖庫標籤並聚合高階語意主題叢集...';
+      const r = await fetch('/api/semantic/apply_themes', { method: 'POST' });
+      const d = await r.json();
+
+      let html = `<div style="color:#34d399; font-weight:700; margin-bottom:10px;">
+        ✅ 已成功更新 ${d.zh_translations_updated} 個繁體中文標籤翻譯，並建立 ${d.theme_links_added} 筆高階主題關聯！
+      </div>`;
+      const sum = d.themes_summary || {};
+      const keys = Object.keys(sum);
+      if (keys.length) {
+        html += `<div style="display:flex; flex-wrap:wrap; gap:8px;">`;
+        for (const k of keys) {
+          html += `<span class="detail-tag-chip" style="cursor:pointer; border-color:#8b5cf6;" onclick="closeSemanticModal(); toggleIncludeTag('${escapeJs(k)}')">✨ ${escapeHtml(k)} <b>(${sum[k]} 張)</b></span>`;
+        }
+        html += `</div>`;
+      } else {
+        html += `<div style="color:var(--text-muted);">目前尚未發現符合主題叢集的細部屬性標籤，請先點右上角「🤖 AI 自動打標與畫師辨識」跑幾百張圖後再按一次！</div>`;
+      }
+      box.innerHTML = html;
+      await loadStats();
+      await loadTags();
+    }
+
+    /* Reverse Image Search & Unified Single-Image Tag+Calibrate Functions */
+    async function purgeLowConfAiArtists() {
+      if (!confirm('確定要清除所有低於 75% 信心度的本機 AI 畫師猜測，並將未經認證而誤搬入資料夾的圖片還原至根目錄嗎？（原有的資料夾與已認證 Pixiv/Danbooru 畫師不會受影響）')) return;
+      const r = await fetch('/api/reverse_search/purge_low_conf_ai?max_ai_conf_to_purge=0.75&revert_unverified_ai_folders=true', { method: 'POST' });
+      const d = await r.json();
+      alert(`✅ 清理完成！\n• 清除低信心度 AI 畫師猜測：${(d.purged_low_conf_ai_artist_links || 0) + (d.purged_redundant_ai_artist_links || 0)} 筆\n• 還原誤歸檔圖片：${d.reverted_misplaced_ai_images || 0} 張\n• 移除空的誤建資料夾：${d.removed_empty_ai_folders || 0} 個`);
+      await loadStats();
+      await loadFolders();
+      await loadTags();
+      await loadImages();
+    }
+
+    async function runSingleUnifiedTagAndCalibrate() {
+      if (!currentDetailData) return;
+      const btn = document.getElementById('btn-single-unified');
+      const revBox = document.getElementById('dt-rev-links');
+      const oldText = btn ? btn.textContent : '';
+      if (btn) {
+        btn.textContent = '⏳ [1/2] 本機 AI 正在辨識內容屬性標籤...';
+        btn.disabled = true;
+      }
+      if (revBox) revBox.style.display = 'none';
+
+      try {
+        // 階段 1：先執行本機 GPU AI 視覺打標
+        await fetch(`/api/ai/single/${currentDetailData.id}`, { method: 'POST' });
+        await refreshDetailView(currentDetailData.id);
+
+        // 階段 2：接著執行 Danbooru / IQDB / SauceNAO / Google Lens 以圖搜圖校正畫師
+        if (btn) {
+          btn.textContent = '⏳ [2/2] 正在以圖搜圖比對真實畫師並校正標籤...';
+        }
+        const r = await fetch(`/api/reverse_search/single/${currentDetailData.id}`, { method: 'POST' });
+        const d = await r.json();
+        if (r.ok) {
+          const rev = d.reverse_search_result || {};
+          if (rev.found) {
+            let msg = `✅ <b>智慧標籤完成！已透過 ${rev.danbooru_hit ? 'Danbooru 100% 結構化認證' : `SauceNAO/IQDB (${rev.similarity}%)`} 校正畫師</b>`;
+            if (rev.artists && rev.artists.length) {
+              msg += `<br>🎨 認證畫師：<b style="color:#fcd34d;">${escapeHtml(rev.artists.join(', '))}</b>`;
+            }
+            if (rev.twitter_handles && rev.twitter_handles.length) {
+              msg += `<br>🐦 Twitter 帳號：<b>@${rev.twitter_handles.join(', @')}</b>`;
+            }
+            if (rev.purged_wrong_ai_tags > 0) {
+              msg += `<br>🧹 已自動校正並清除 <b>${rev.purged_wrong_ai_tags}</b> 個錯誤的 AI 畫師/角色猜測標籤`;
+            }
+            let linksArr = [];
+            if (rev.google_lens_url) {
+              linksArr.push(`<a href="${escapeHtml(rev.google_lens_url)}" target="_blank" style="color:#38bdf8;font-weight:700;text-decoration:underline;margin-right:10px;">🔎 開啟 Google Lens 以圖搜圖比對</a>`);
+            }
+            if (rev.source_urls && rev.source_urls.length) {
+              for (const u of rev.source_urls) {
+                linksArr.push(`<a href="${escapeHtml(u)}" target="_blank" style="color:#6ee7b7;text-decoration:underline;margin-right:8px;">🔗 原始來源</a>`);
+              }
+            }
+            if (linksArr.length) {
+              msg += `<br>${linksArr.join('')}`;
+            }
+            revBox.innerHTML = msg;
+            revBox.style.display = 'block';
+          } else {
+            let lensLink = rev.google_lens_url ? `<br><a href="${escapeHtml(rev.google_lens_url)}" target="_blank" style="color:#38bdf8;font-weight:700;text-decoration:underline;">🔎 點此開啟 Google Lens 以圖搜圖網頁比對</a>` : '';
+            revBox.innerHTML = `✅ <b>已完成本機 AI 屬性打標！</b><br>⚠️ Danbooru / IQDB / SauceNAO 暫未直接命中來源 ${rev.rate_limited ? '(SauceNAO 達免 Key 頻率限制)' : ''}，可使用 Google Lens 或 Antigravity Gemini MCP 視覺搜圖校正${lensLink}`;
+            revBox.style.display = 'block';
+          }
+          await refreshDetailView(currentDetailData.id);
+          await loadStats();
+          await loadTags();
+          await loadImages();
+        }
+      } finally {
+        if (btn) {
+          btn.textContent = oldText;
+          btn.disabled = false;
+        }
+      }
+    }
+
+    /* Auto-Ingest & AI Organize Schedule + Interactive PickerTime + Folder Browser */
+    let activePickerSlot = 1;
+    let currentPickerHour = '03';
+    let currentPickerMin = '00';
+    let currentBrowsePath = '';
+    let currentBrowseParent = '';
+
+    function formatTimeLabel(hm) {
+      if (!hm || !hm.includes(':')) return '';
+      const [hStr, mStr] = hm.split(':');
+      const h = parseInt(hStr, 10);
+      const m = parseInt(mStr, 10);
+      if (isNaN(h) || isNaN(m)) return hm;
+      const hh = String(h).padStart(2, '0');
+      const mm = String(m).padStart(2, '0');
+      let period = '凌晨';
+      if (h === 0) period = '午夜';
+      else if (h < 6) period = '凌晨';
+      else if (h < 12) period = '上午';
+      else if (h === 12) period = '中午';
+      else if (h < 18) period = '下午';
+      else period = '晚上';
+      const h12 = h % 12 === 0 ? 12 : h % 12;
+      return `🕒 ${hh}:${mm} (${period} ${String(h12).padStart(2, '0')}:${mm})`;
+    }
+
+    function setSlotTime(slotIdx, hm) {
+      const inputEl = document.getElementById(`sch-time-${slotIdx}`);
+      const btnEl = document.getElementById(`picker-btn-${slotIdx}`);
+      const labelEl = document.getElementById(`picker-label-${slotIdx}`);
+      const clearBtn = document.getElementById(`picker-clear-${slotIdx}`);
+      if (!inputEl || !btnEl || !labelEl) return;
+
+      const cleanHm = (hm || '').trim();
+      inputEl.value = cleanHm;
+
+      if (cleanHm) {
+        labelEl.textContent = formatTimeLabel(cleanHm);
+        btnEl.classList.remove('empty-slot');
+        if (clearBtn) clearBtn.style.display = 'inline-flex';
+      } else {
+        labelEl.textContent = slotIdx === 1 ? '🕒 請選擇時間' : '➕ 點擊選擇第二時段';
+        btnEl.classList.add('empty-slot');
+        if (clearBtn) clearBtn.style.display = 'none';
+      }
+    }
+
+    function openTimePicker(slotIdx, ev) {
+      if (ev) ev.stopPropagation();
+      activePickerSlot = slotIdx;
+      const pop = document.getElementById('time-picker-popover');
+      const btn = document.getElementById(`picker-btn-${slotIdx}`);
+      const existingVal = document.getElementById(`sch-time-${slotIdx}`).value.trim() || (slotIdx === 1 ? '03:00' : '22:00');
+      const parts = existingVal.split(':');
+      currentPickerHour = String(parseInt(parts[0] || '3', 10)).padStart(2, '0');
+      currentPickerMin = String(parseInt(parts[1] || '0', 10)).padStart(2, '0');
+
+      document.getElementById('tp-title').textContent = slotIdx === 1 ? '🕒 選擇第一執行時段' : '🕒 選擇第二執行時段 (選填)';
+      document.getElementById('tp-clear-btn').style.display = slotIdx === 2 ? 'inline-flex' : 'none';
+
+      // 若點開時該時段原本是空的，先套用預設值方便直接點確定
+      setSlotTime(slotIdx, `${currentPickerHour}:${currentPickerMin}`);
+      renderTimePickerColumns();
+
+      pop.classList.add('open');
+      if (btn) {
+        const rect = btn.getBoundingClientRect();
+        let topPos = rect.bottom + 6;
+        let leftPos = rect.left;
+        if (topPos + 330 > window.innerHeight) {
+          topPos = Math.max(12, rect.top - 330);
+        }
+        if (leftPos + 350 > window.innerWidth) {
+          leftPos = Math.max(12, window.innerWidth - 355);
+        }
+        pop.style.top = `${topPos}px`;
+        pop.style.left = `${leftPos}px`;
+      }
+
+      setTimeout(() => {
+        const activeH = document.querySelector('#tp-hour-list .tp-option.active');
+        const activeM = document.querySelector('#tp-min-list .tp-option.active');
+        if (activeH) activeH.scrollIntoView({ block: 'center' });
+        if (activeM) activeM.scrollIntoView({ block: 'center' });
+      }, 20);
+    }
+
+    function closeTimePicker() {
+      const pop = document.getElementById('time-picker-popover');
+      if (pop) pop.classList.remove('open');
+    }
+
+    function renderTimePickerColumns() {
+      const hm = `${currentPickerHour}:${currentPickerMin}`;
+      document.getElementById('tp-preview-badge').textContent = formatTimeLabel(hm).replace('🕒 ', '');
+
+      const hBox = document.getElementById('tp-hour-list');
+      let hHtml = '';
+      for (let h = 0; h < 24; h++) {
+        const hh = String(h).padStart(2, '0');
+        let tag = '凌晨';
+        if (h === 0) tag = '午夜 12點';
+        else if (h < 6) tag = `凌晨 ${h}點`;
+        else if (h < 12) tag = `上午 ${h}點`;
+        else if (h === 12) tag = '中午 12點';
+        else if (h < 18) tag = `下午 ${h - 12}點`;
+        else tag = `晚上 ${h - 12}點`;
+        const isAct = hh === currentPickerHour ? 'active' : '';
+        hHtml += `<div class="tp-option ${isAct}" onclick="selectPickerHour('${hh}')">
+          <span><b>${hh}</b> 時</span>
+          <span style="font-size:11px; opacity:0.8;">${tag}</span>
+        </div>`;
+      }
+      hBox.innerHTML = hHtml;
+
+      const mBox = document.getElementById('tp-min-list');
+      let mHtml = '';
+      for (let m = 0; m < 60; m++) {
+        const mm = String(m).padStart(2, '0');
+        const isAct = mm === currentPickerMin ? 'active' : '';
+        const isFive = m % 5 === 0;
+        mHtml += `<div class="tp-option ${isAct}" onclick="selectPickerMin('${mm}')">
+          <span><b>${mm}</b> 分</span>
+          ${isFive ? '<span style="font-size:10px; opacity:0.75;">● 常用</span>' : ''}
+        </div>`;
+      }
+      mBox.innerHTML = mHtml;
+    }
+
+    function selectPickerHour(hh) {
+      currentPickerHour = hh;
+      setSlotTime(activePickerSlot, `${currentPickerHour}:${currentPickerMin}`);
+      renderTimePickerColumns();
+    }
+
+    function selectPickerMin(mm) {
+      currentPickerMin = mm;
+      setSlotTime(activePickerSlot, `${currentPickerHour}:${currentPickerMin}`);
+      renderTimePickerColumns();
+    }
+
+    function applyPresetTime(hm) {
+      const [hh, mm] = hm.split(':');
+      currentPickerHour = hh;
+      currentPickerMin = mm;
+      setSlotTime(activePickerSlot, hm);
+      renderTimePickerColumns();
+      closeTimePicker();
+    }
+
+    function clearCurrentPickerSlot() {
+      if (activePickerSlot === 2) {
+        setSlotTime(2, '');
+      }
+      closeTimePicker();
+    }
+
+    document.addEventListener('click', (e) => {
+      const pop = document.getElementById('time-picker-popover');
+      if (pop && pop.classList.contains('open')) {
+        if (!pop.contains(e.target) && !e.target.closest('.time-picker-wrap')) {
+          closeTimePicker();
+        }
+      }
+    });
+
+    function renderSourceFolderChips() {
+      const ta = document.getElementById('sch-source-dirs');
+      const box = document.getElementById('sch-folder-chips');
+      if (!ta || !box) return;
+      const dirs = ta.value.split('\n').map(s => s.trim()).filter(Boolean);
+      if (!dirs.length) {
+        box.innerHTML = `<span style="font-size:12px; color:var(--text-muted);">尚未選擇來源資料夾，請點擊右上角「📁 瀏覽選擇資料夾...」選取</span>`;
+        return;
+      }
+      box.innerHTML = dirs.map((d, idx) => `
+        <div class="folder-chip-item">
+          <span>📁 ${escapeHtml(d)}</span>
+          <span style="cursor:pointer; color:#f87171; font-weight:700; padding:0 3px;" title="移除此資料夾" onclick="removeSourceFolderFromList(${idx})">✖</span>
+        </div>
+      `).join('');
+    }
+
+    async function addSourceFolderToList(folderPath) {
+      if (!folderPath) return;
+      const clean = folderPath.trim();
+      if (!clean) return;
+      const ta = document.getElementById('sch-source-dirs');
+      const existing = ta.value.split('\n').map(s => s.trim()).filter(Boolean);
+      if (!existing.includes(clean)) {
+        existing.push(clean);
+      }
+      ta.value = existing.join('\n');
+      renderSourceFolderChips();
+      await previewSourceDirs();
+    }
+
+    async function removeSourceFolderFromList(idx) {
+      const ta = document.getElementById('sch-source-dirs');
+      const existing = ta.value.split('\n').map(s => s.trim()).filter(Boolean);
+      existing.splice(idx, 1);
+      ta.value = existing.join('\n');
+      renderSourceFolderChips();
+      if (existing.length) {
+        await previewSourceDirs();
+      } else {
+        document.getElementById('sch-source-preview').style.display = 'none';
+      }
+    }
+
+    function openFolderBrowserModal() {
+      const ta = document.getElementById('sch-source-dirs');
+      const existing = ta ? ta.value.split('\n').map(s => s.trim()).filter(Boolean) : [];
+      const initDir = existing.length ? existing[existing.length - 1] : '';
+      document.getElementById('folder-browser-modal').classList.add('open');
+      browseToDirectory(initDir);
+    }
+
+    function closeFolderBrowserModal() {
+      document.getElementById('folder-browser-modal').classList.remove('open');
+    }
+
+    async function browseToDirectory(pathStr = '') {
+      const subBox = document.getElementById('fb-subdir-list');
+      if (subBox) subBox.innerHTML = `<div style="padding:16px; color:var(--text-muted);">⏳ 正在讀取資料夾清單...</div>`;
+
+      const r = await fetch(`/api/schedule/browse_fs?path=${encodeURIComponent(pathStr || '')}`);
+      const d = await r.json();
+
+      currentBrowsePath = d.current_path || '';
+      currentBrowseParent = d.parent_path || '';
+
+      document.getElementById('fb-path-input').value = currentBrowsePath;
+      document.getElementById('fb-selected-display').textContent = currentBrowsePath || '-';
+      document.getElementById('fb-up-btn').disabled = !currentBrowseParent;
+
+      // Render Breadcrumbs
+      const bcBox = document.getElementById('fb-breadcrumbs');
+      const bcs = d.breadcrumbs || [];
+      bcBox.innerHTML = bcs.map((b, i) => `
+        <span class="fb-breadcrumb-item" onclick="browseToDirectory('${escapeJs(b.path)}')">${escapeHtml(b.name)}</span>
+        ${i < bcs.length - 1 ? '<span style="color:#64748b; font-size:11px;">▸</span>' : ''}
+      `).join('');
+
+      // Render Quick Access
+      const qBox = document.getElementById('fb-quick-list');
+      qBox.innerHTML = (d.quick_access || []).map(q => `
+        <button class="btn" style="text-align:left; justify-content:flex-start; padding:6px 8px; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; ${q.path === currentBrowsePath ? 'border-color:#38bdf8; color:#38bdf8;' : ''}" onclick="browseToDirectory('${escapeJs(q.path)}')" title="${escapeHtml(q.path)}">
+          ${escapeHtml(q.name)}
+        </button>
+      `).join('');
+
+      // Render Drives
+      const drBox = document.getElementById('fb-drive-list');
+      drBox.innerHTML = (d.drives || []).map(dr => `
+        <button class="btn" style="text-align:left; justify-content:flex-start; padding:6px 8px; font-size:12px; ${currentBrowsePath.startsWith(dr.path) ? 'border-color:#a5b4fc; color:#a5b4fc;' : ''}" onclick="browseToDirectory('${escapeJs(dr.path)}')">
+          💽 ${escapeHtml(dr.name)}
+        </button>
+      `).join('');
+
+      // Render Current Summary & Subdirectories
+      const sumBox = document.getElementById('fb-current-summary');
+      const subdirs = d.subdirectories || [];
+      if (!d.exists) {
+        sumBox.innerHTML = `<span style="color:#f87171;">⚠️ 此路徑不存在，請從左側切換磁碟或常用位置</span>`;
+        subBox.innerHTML = '';
+        return;
+      }
+
+      sumBox.innerHTML = `
+        <span>📂 目前資料夾內有 <b>${subdirs.length}</b> 個子資料夾、直接包含 <b>${d.direct_image_count || 0}</b> 張圖片/影片</span>
+        <span style="font-size:11px; color:var(--text-muted);">點擊資料夾名稱進入下一層，或點右側「➕ 選取」</span>
+      `;
+
+      if (!subdirs.length) {
+        subBox.innerHTML = `<div style="padding:24px; text-align:center; color:var(--text-muted); font-size:13px;">
+          此資料夾底下沒有更深層的子資料夾（直接包含 <b>${d.direct_image_count || 0}</b> 個圖片/影片檔）。<br><br>
+          👉 請直接點擊右下角 <b>「✅ 選擇目前所在的資料夾加入排程」</b>！
+        </div>`;
+        return;
+      }
+
+      subBox.innerHTML = subdirs.map(sd => {
+        const badges = [];
+        if (sd.direct_media_count > 0) {
+          badges.push(`<span style="background:rgba(16,185,129,0.16); color:#6ee7b7; padding:1px 6px; border-radius:4px; font-size:11px;">🖼️ ${sd.direct_media_count} 張圖</span>`);
+        }
+        if (sd.subdir_count > 0) {
+          badges.push(`<span style="background:rgba(56,189,248,0.14); color:#7dd3fc; padding:1px 6px; border-radius:4px; font-size:11px;">📁 ${sd.subdir_count} 子夾</span>`);
+        }
+        if (sd.is_gallery_root) {
+          badges.push(`<span style="background:rgba(245,158,11,0.2); color:#fcd34d; padding:1px 6px; border-radius:4px; font-size:11px;">⚠️ 圖庫本體</span>`);
+        }
+        return `
+          <div class="fb-dir-row" onclick="browseToDirectory('${escapeJs(sd.path)}')">
+            <div style="display:flex; align-items:center; gap:8px; overflow:hidden;">
+              <span style="font-size:15px;">📁</span>
+              <span style="font-size:13px; font-weight:600; color:#f1f5f9; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(sd.name)}</span>
+              ${badges.join('')}
+            </div>
+            <div style="display:flex; gap:6px; align-items:center;" onclick="event.stopPropagation()">
+              <button class="btn" style="padding:3px 8px; font-size:11px;" onclick="browseToDirectory('${escapeJs(sd.path)}')">進入 ▸</button>
+              ${sd.is_gallery_root ? '' : `<button class="btn btn-primary" style="padding:3px 10px; font-size:11px; background:#059669; border-color:#10b981;" onclick="selectSpecificFolderFromBrowser('${escapeJs(sd.path)}')">➕ 選取此夾</button>`}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function browseUpDirectory() {
+      if (currentBrowseParent) {
+        browseToDirectory(currentBrowseParent);
+      }
+    }
+
+    async function selectSpecificFolderFromBrowser(pathStr) {
+      await addSourceFolderToList(pathStr);
+      closeFolderBrowserModal();
+    }
+
+    async function selectCurrentBrowsedFolder() {
+      if (!currentBrowsePath) return;
+      await addSourceFolderToList(currentBrowsePath);
+      closeFolderBrowserModal();
+    }
+
+    async function pickSourceFolderNative(initDir = '') {
+      const r = await fetch(`/api/schedule/pick_folder?initial_dir=${encodeURIComponent(initDir || currentBrowsePath || '')}`, { method: 'POST' });
+      const d = await r.json();
+      if (d.selected_path) {
+        await addSourceFolderToList(d.selected_path);
+        closeFolderBrowserModal();
+      }
+    }
+
+    function openScheduleModal() {
+      document.getElementById('schedule-modal').classList.add('open');
+      loadScheduleConfig();
+    }
+
+    function closeScheduleModal() {
+      closeTimePicker();
+      document.getElementById('schedule-modal').classList.remove('open');
+    }
+
+    async function loadScheduleConfig() {
+      const r = await fetch('/api/schedule/status');
+      const d = await r.json();
+      const cfg = d.config || {};
+
+      document.getElementById('sch-enabled').checked = !!cfg.enabled;
+      const times = cfg.schedule_times || ['03:00'];
+      setSlotTime(1, times[0] || '03:00');
+      setSlotTime(2, times[1] || '');
+      document.getElementById('sch-source-dirs').value = (cfg.source_dirs || []).join('\n');
+      renderSourceFolderChips();
+      document.getElementById('sch-rm-empty').checked = cfg.remove_empty_subdirs !== false;
+      document.getElementById('sch-run-pixiv').checked = cfg.run_pixiv_lookup !== false;
+      document.getElementById('sch-run-ai').checked = cfg.run_ai_tagger !== false;
+      document.getElementById('sch-run-rev').checked = !!cfg.run_reverse_search;
+      document.getElementById('sch-auto-folder').checked = cfg.auto_create_artist_folders !== false;
+      document.getElementById('sch-auto-rename').checked = cfg.auto_rename_in_artist_folder !== false;
+      document.getElementById('sch-also-root').checked = !!cfg.also_organize_all_root;
+
+      document.getElementById('sch-live-status').textContent = d.status_message || '待機中';
+
+      const histBox = document.getElementById('sch-history-box');
+      const logs = cfg.history_logs || [];
+      if (!logs.length) {
+        histBox.innerHTML = `<div style="color:var(--text-muted);">目前尚無排程執行紀錄。設定好來源路徑後可點左下角「▶️ 立即執行一次」測試！</div>`;
+      } else {
+        histBox.innerHTML = logs.map(lg => `
+          <div style="padding:4px 0; border-bottom:1px solid rgba(255,255,255,0.05);">
+            <span style="color:#fcd34d;">[${escapeHtml(lg.timestamp)}]</span>
+            <b>${escapeHtml(lg.trigger_reason)}</b> —
+            搬入: <b style="color:#38bdf8;">${lg.moved_from_source}</b> 張 |
+            清空空夾: <b style="color:#f472b6;">${lg.empty_dirs_removed}</b> 個 |
+            AI打標: <b style="color:#a5b4fc;">${lg.ai_tagged_count}</b> 張 |
+            歸檔繪師夾: <b style="color:#34d399;">${lg.organized_to_artist_folders}</b> 張 (新建 ${lg.new_artist_folders_created} 夾)
+            <span style="color:#64748b;">(${lg.elapsed_sec}s)</span>
+          </div>
+        `).join('');
+      }
+    }
+
+    async function previewSourceDirs() {
+      const dirs = document.getElementById('sch-source-dirs').value
+        .split('\n')
+        .map(s => s.trim())
+        .filter(Boolean);
+      const box = document.getElementById('sch-source-preview');
+      if (!dirs.length) {
+        box.style.display = 'block';
+        box.innerHTML = '⚠️ 請先輸入或選擇至少一個來源資料夾路徑';
+        return;
+      }
+      box.style.display = 'block';
+      box.innerHTML = '⏳ 正在掃描來源資料夾與子資料夾...';
+
+      const r = await fetch('/api/schedule/preview_source', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source_dirs: dirs })
+      });
+      const d = await r.json();
+      let html = `📊 掃描結果：共發現 <b>${d.total_files}</b> 個圖片/影片檔案，分布在 <b>${d.total_subdirs}</b> 個子資料夾中：<br>`;
+      for (const item of (d.directories || [])) {
+        if (!item.exists) {
+          html += `• ❌ <code>${escapeHtml(item.path)}</code> (路徑不存在)<br>`;
+        } else {
+          html += `• ✅ <code>${escapeHtml(item.path)}</code>：<b>${item.file_count}</b> 個檔案 / <b>${item.subdir_count}</b> 個子資料夾<br>`;
+        }
+      }
+      box.innerHTML = html;
+    }
+
+    function collectSchedulePayload() {
+      const t1 = document.getElementById('sch-time-1').value.trim();
+      const t2 = document.getElementById('sch-time-2').value.trim();
+      const times = [t1, t2].filter(Boolean);
+      const dirs = document.getElementById('sch-source-dirs').value
+        .split('\n')
+        .map(s => s.trim())
+        .filter(Boolean);
+
+      return {
+        enabled: document.getElementById('sch-enabled').checked,
+        schedule_times: times.length ? times : ['03:00'],
+        source_dirs: dirs,
+        remove_empty_subdirs: document.getElementById('sch-rm-empty').checked,
+        run_pixiv_lookup: document.getElementById('sch-run-pixiv').checked,
+        run_ai_tagger: document.getElementById('sch-run-ai').checked,
+        run_reverse_search: document.getElementById('sch-run-rev').checked,
+        auto_create_artist_folders: document.getElementById('sch-auto-folder').checked,
+        auto_rename_in_artist_folder: document.getElementById('sch-auto-rename').checked,
+        also_organize_all_root: document.getElementById('sch-also-root').checked,
+        sync_windows_task: document.getElementById('sch-win-task').checked
+      };
+    }
+
+    async function saveScheduleConfig(silent = false) {
+      const payload = collectSchedulePayload();
+      const r = await fetch('/api/schedule/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const d = await r.json();
+      if (!silent) {
+        let msg = `✅ 排程設定已儲存！\n• 定時狀態：${payload.enabled ? '已啟用 (' + payload.schedule_times.join(', ') + ')' : '未啟用 (可隨時手動執行)'}\n• 監控來源路徑數：${payload.source_dirs.length} 個`;
+        if (d.windows_task && d.windows_task.registered) {
+          msg += `\n• Windows 系統排程器已同步註冊：${d.windows_task.tasks.join(', ')}`;
+        }
+        alert(msg);
+      }
+      await loadScheduleConfig();
+    }
+
+    async function runScheduleNow() {
+      await saveScheduleConfig(true);
+      const r = await fetch('/api/schedule/run_now', { method: 'POST' });
+      const d = await r.json();
+      if (d.status === 'already_running') {
+        alert(d.message || '排程正在執行中');
+      } else {
+        document.getElementById('sch-live-status').textContent = '🚀 正在執行搬移、清空空資料夾、AI 打標與建夾歸檔...';
+        checkAiStatus();
+      }
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str).replace(/[&<>"']/g, s => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[s]));
+    }
+    function escapeJs(str) {
+      if (!str) return '';
+      return String(str).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.env
+
+# Gallery DB & Media Cache
+.tag_gallery/
+thumbs/
+models/
+*.tmp
+deep_search_results.json
