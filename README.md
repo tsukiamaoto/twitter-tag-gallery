@@ -6,6 +6,7 @@
 - MCP 連線設定可選 **Antigravity** 或 **Gemini CLI**；登入與模型選擇在該客戶端管理，圖庫不使用 Gemini API 金鑰或直接呼叫模型 API。
 - 設定 → **背景任務與復原**：跨程序進度、未完成項目重試、檔案操作復原與資料庫備份。
 - 圖庫根目錄可由 `TWITTER_GALLERY_ROOT` 環境變數設定；預設仍為 `D:\圖檔\twitter`。
+- 圖片詳情可單檔刪除，勾選圖片可跨頁批次刪除，支援 **Del** 快捷鍵與確認。檔案移到圖庫回收區，可「復原剛才刪除」並還原標籤；回收區尚未釋放磁碟空間。
 - 前端分成 `gallery-core.js`（請求／擴充介面）、`gallery-app.js`（圖庫）、`gallery-shell.js`（畫面控制）及 `integration-settings.js`（整合設定），CSS 另存於 `gallery-base.css`、`gallery-shell.css`。
 
 工具定義與參數集中於 `tool_registry.py`，共用執行、作業鎖及紀錄在 `tool_runtime.py`，業務實作在 `gallery_tools.py`、`gallery_workflow_tools.py`；`mcp_server.py` 只處理協定。Web 與 MCP 共用 `gallery_query.py` 搜尋及 `gallery_tag_service.py` 標籤寫入。設定頁與 MCP 都會驗證已儲存的權限；寫入工具共用背景作業鎖，停止要求可在忙碌時送出，唯讀工具每個程序最多同時執行兩個。執行紀錄保留最近 200 次，每次最多 128 KiB 結果，不保存輸入參數。這個操作區管理本專案內建工具。

@@ -660,7 +660,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
         const removed = new Set(result.deleted_ids);
         lastDeletedOperation = result.operation_id;
         try { localStorage.setItem(LAST_DELETION_KEY, lastDeletedOperation); } catch (_) {}
-        if (removed.has(state.items[state.detailIndex]?.id)) closeDetailModal();
+        if (document.getElementById('detail-modal').classList.contains('open')) closeDetailModal();
         for (const id of removed) state.selectedIds.delete(id);
         state.items = state.items.filter(item => !removed.has(item.id));
         state.total = Math.max(0, state.total - visible.filter(item => removed.has(item.id)).length);

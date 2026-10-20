@@ -2,7 +2,6 @@
 import json
 import re
 import uuid
-from pathlib import Path
 
 import database
 from background_work import exclusive_job
