@@ -72,42 +72,112 @@
 
 ## 🏛️ 系統架構
 
+<p align="center">
+  <img src="docs/architecture.svg" alt="Twitter & Pixiv AI 智慧標籤圖庫系統架構圖" width="100%">
+</p>
+
+### 1. 分層架構詳細流程 (Layered Architecture Flow)
+
 ```mermaid
 flowchart TD
-    subgraph Storage ["本機儲存與資料庫"]
-        Files["圖庫目錄 (D:\\圖檔\\twitter)"]
-        Thumbs["縮圖快取 (.tag_gallery/thumbs)"]
-        DB[("SQLite 資料庫 (gallery.db)")]
+    %% Clients Layer
+    subgraph Layer1 ["01 / 介面與外部整合層 (Presentation & Clients)"]
+        WebUI["SPA 響應式前端<br/>(static/index.html)<br/>• 虛擬化瀑布流<br/>• 複合標籤篩選 (+/-)<br/>• 快捷鍵與縮放檢視"]
+        MCPClient["LLM Agent 介面<br/>(mcp_server.py Stdio)<br/>• Claude Desktop<br/>• Gemini Flash 3.8<br/>• Antigravity Subagents"]
     end
 
-    subgraph Core ["後端核心服務 (FastAPI)"]
-        API["REST API (app.py:8765)"]
-        Scanner["背景掃描與縮圖生成 (scheduler.py)"]
-        Semantic["語意搜尋與標籤關聯 (semantic_engine.py)"]
-        Renamer["智慧重新命名與還原 (renamer.py)"]
-        Decensor["去馬賽克修復 (decensor_engine.py)"]
+    %% Gateway & Core Layer
+    subgraph Layer2 ["02 / 核心服務與排程調度層 (API Gateway & Scheduler)"]
+        FastAPI["FastAPI 應用伺服器 (app.py:8765)<br/>• /api/images (分頁、篩選、排序)<br/>• /api/tags & /api/reverse-search<br/>• /api/rename & /api/move"]
+        Scheduler["背景守護排程器 (scheduler.py)<br/>• 增量目錄掃描監控<br/>• 縮圖非同步快取佇列"]
     end
 
-    subgraph AI_Engines ["AI 辨識與反查引擎"]
-        AITagger["Camie Tagger v2 / DirectML (ai_tagger.py)"]
-        ReverseSearch["Danbooru MD5 / IQDB / SauceNAO (reverse_search.py)"]
+    %% Processing Layer
+    subgraph Layer3 ["03 / 核心業務與分析引擎 (Core Processing Engines)"]
+        SemanticEng["語意檢索引擎<br/>(semantic_engine.py)<br/>• Jaccard 共現矩陣<br/>• 自然語言標籤展開"]
+        ZhDict["繁中字典在地化<br/>(zh_dict.py)<br/>• 10,000+ 標籤對照<br/>• 畫師資料夾標準化"]
+        Renamer["安全重命名系統<br/>(renamer.py)<br/>• Windows 自然排序<br/>• 交易日誌與 1 鍵還原"]
+        Decensor["去馬賽克修復引擎<br/>(decensor_engine.py)<br/>• YOLOv8 遮罩偵測<br/>• DeepCreamPy v2 重繪"]
     end
 
-    subgraph Clients ["前端與外部整合"]
-        WebUI["SPA Web 前端 (static/index.html)"]
-        MCPAgent["LLM Agents / Claude / Antigravity (mcp_server.py)"]
+    %% AI & Reverse Search Layer
+    subgraph Layer4 ["04 / AI 視覺打標與多重反查校正 (AI Vision & Reverse Search)"]
+        direction TB
+        AIEngine["本機 AI 視覺打標 (ai_tagger.py)<br/>• Camie Tagger v2 (ViT 70,527 標籤)<br/>• 7,007 位畫師風格識別<br/>• DirectML / CUDA GPU 硬體加速"]
+        
+        subgraph RevSearchChain ["以圖搜圖與標籤校正鏈 (reverse_search.py)"]
+            MD5Lookup["1. Danbooru MD5 零頻寬雜湊比對<br/>(100% 官方認證畫師 / Twitter @ / Pixiv ID)"]
+            IQDBLookup["2. IQDB 視覺特徵比對<br/>(Danbooru / Yande.re / Gelbooru)"]
+            SauceLookup["3. SauceNAO API 反查<br/>(推文狀態 URL / Fanbox 作者)"]
+            Calibrate["4. 標籤自動校正 (Tag Calibration)<br/>(權威覆蓋並自動清除 AI 猜錯之標籤)"]
+        end
     end
 
-    Files --> Scanner --> DB
-    Files --> Thumbs
-    DB <--> API
-    API <--> WebUI
-    API <--> AITagger
-    API <--> ReverseSearch
-    API <--> Renamer
-    API <--> Decensor
-    API <--> Semantic
-    DB <--> MCPAgent
+    %% Storage Layer
+    subgraph Layer5 ["05 / 資料持久化與儲存層 (Storage & Persistence)"]
+        LocalFiles[("原始圖片庫 (D:\\圖檔\\twitter)<br/>31,000+ 圖片檔案")]
+        DB[("SQLite 資料庫 (gallery.db)<br/>WAL 模式 · 關聯式正規化")]
+        ThumbDir[("縮圖快取目錄 (.tag_gallery/thumbs)<br/>高品質 WebP / JPEG")]
+        HistLog[("交易歷史日誌 (rename_history.json)<br/>重命名歷程備份")]
+    end
+
+    %% Inter-layer connections
+    WebUI <-->|HTTP REST / JSON| FastAPI
+    MCPClient <-->|Stdio JSON-RPC| FastAPI
+    
+    FastAPI <--> Scheduler
+    FastAPI --> SemanticEng
+    FastAPI --> ZhDict
+    FastAPI --> Renamer
+    FastAPI --> Decensor
+    
+    FastAPI <--> AIEngine
+    FastAPI <--> RevSearchChain
+    
+    Scheduler --> LocalFiles
+    Scheduler --> DB
+    Scheduler --> ThumbDir
+    
+    Renamer <--> LocalFiles
+    Renamer --> HistLog
+    
+    AIEngine --> DB
+    RevSearchChain --> DB
+    FastAPI <--> DB
+```
+
+### 2. 以圖搜圖與標籤自動校正流程 (Reverse Search & Calibration Flow)
+
+```mermaid
+flowchart TD
+    Start(["選定圖片進行反查 / 校正"]) --> Step1["計算本地檔案 MD5 雜湊值"]
+    
+    Step1 --> CheckMD5{"查詢 Danbooru MD5 API<br/>是否命中？"}
+    
+    CheckMD5 -- "是 (100% 精準命中)" --> FetchMeta["取得官方認證完整中繼資料：<br/>• 認證畫師名 & 漢字別名<br/>• 原作者 Twitter @帳號 / Pixiv ID<br/>• 角色 (Character) & 原作 (Copyright)<br/>• 官方 Danbooru 標籤集"]
+    
+    CheckMD5 -- "否 (無 MD5 紀錄)" --> Step2["產生低解析搜尋縮圖並提交 IQDB 視覺比對"]
+    
+    Step2 --> CheckIQDB{"IQDB 是否找到<br/>相似度 &gt; 80% 插圖？"}
+    
+    CheckIQDB -- "是" --> FetchBooru["串接 Yande.re / Gelbooru / Danbooru Post API<br/>擷取結構化標籤與作者"]
+    
+    CheckIQDB -- "否" --> Step3["調用 SauceNAO API<br/>進行特徵指紋反查"]
+    
+    Step3 --> CheckSauce{"SauceNAO 是否命中？"}
+    CheckSauce -- "是" --> ExtractSauce["解析推文 URL、Pixiv 繪師或 Fanbox 原作者"]
+    CheckSauce -- "否" --> FallbackAI["保留本機 Camie Tagger v2 AI 預測標籤<br/>(標記為待人工或 Agent 複審)"]
+    
+    FetchMeta --> CalibrateProc["執行標籤自動校正 (Tag Calibration)：<br/>1. 清除先前本機 AI 低信心度猜錯的畫師<br/>2. 寫入 100% 認證畫師與推特帳號標籤<br/>3. 自動補齊繁中翻譯對照"]
+    FetchBooru --> CalibrateProc
+    ExtractSauce --> CalibrateProc
+    
+    CalibrateProc --> MovePrompt{"是否啟用自動歸檔？"}
+    MovePrompt -- "是" --> AutoMove["自動依畫師名稱建立/移至專屬資料夾<br/>並套用 Windows 自然序號重命名"]
+    MovePrompt -- "否" --> UpdateDB[("更新 SQLite 資料庫 (gallery.db)")]
+    AutoMove --> UpdateDB
+    FallbackAI --> UpdateDB
+    UpdateDB --> Done(["完成！Web UI 與 MCP 即時同步更新"])
 ```
 
 ---
