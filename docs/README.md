@@ -1,6 +1,6 @@
 # WebUI 改善任務
 
-更新日期：2026-10-20
+更新日期：2026-10-21
 
 ## 工作方式
 
@@ -35,7 +35,7 @@
 | 009 智慧標籤與模型設定 | done | [實作與驗收](done/009-smart-tag-ui.md) |
 | 010 標籤、背景任務與縮圖效能 | done（已套用正式服務） | [實作與驗收](done/010-tag-filter-performance.md) |
 | 011 資料夾搜尋與常用捷徑 | done（已套用正式服務） | [實作與驗收](done/011-folder-search-shortcuts.md) |
-| 012 資料一致性、效能與 MCP 管理 | doing（程式與測試完成，待正式套用授權） | [實作與驗收](doing/012-reliability-and-mcp.md) |
+| 012 資料一致性、效能與 MCP 管理 | done（已備份、遷移並驗證 Antigravity MCP） | [實作與驗收](done/012-reliability-and-mcp.md) |
 
 新需求從 `todo/` 開始；正在實作或驗證的任務放在 `doing/`，通過驗收後移至 `done/`。空目錄以 `.gitkeep` 保留。
 

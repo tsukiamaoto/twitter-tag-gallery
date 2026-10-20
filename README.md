@@ -1,6 +1,6 @@
 # Twitter & Pixiv AI 智慧標籤圖庫系統 (Twitter Tag Gallery)
 
-目前新增的可靠性與設定功能請見 [012 驗收紀錄](docs/doing/012-reliability-and-mcp.md)。
+目前新增的可靠性與設定功能請見 [012 驗收紀錄](docs/done/012-reliability-and-mcp.md)。
 
 - 設定 → **MCP 管理**：圖庫 MCP 開關、唯讀模式、工具權限、本機握手診斷、Gemini CLI 設定匯出；「工具操作與執行紀錄」可查看 24 個工具的參數格式、填入 JSON、實際執行並查看結果。
 - MCP 連線設定可選 **Antigravity** 或 **Gemini CLI**；登入與模型選擇在該客戶端管理，圖庫不使用 Gemini API 金鑰或直接呼叫模型 API。
@@ -10,7 +10,7 @@
 
 工具定義與參數集中於 `tool_registry.py`，共用執行、作業鎖及紀錄在 `tool_runtime.py`，業務實作在 `gallery_tools.py`、`gallery_workflow_tools.py`；`mcp_server.py` 只處理協定。Web 與 MCP 共用 `gallery_query.py` 搜尋及 `gallery_tag_service.py` 標籤寫入。設定頁與 MCP 都會驗證已儲存的權限；寫入工具共用背景作業鎖，停止要求可在忙碌時送出，唯讀工具每個程序最多同時執行兩個。執行紀錄保留最近 200 次，每次最多 128 KiB 結果，不保存輸入參數。這個操作區管理本專案內建工具。
 
-新增掃描、圖片搜尋／詳情、人工標籤、本機 AI 打標、搬移預覽／執行、檔案復原、改名還原與任務查詢／停止工具。掃描、AI、搬移及復原會先回傳 `run_id`、`job_id`，使用 `gallery_get_tool_run` 查詢結果、`gallery_cancel_job` 送出停止要求；客戶端需保持 MCP 連線至任務結束。使用順序與完整工具參數見 [圖庫 MCP 流程](docs/doing/012-reliability-and-mcp.md#圖庫-mcp-流程工具2026-10-21)。
+新增掃描、圖片搜尋／詳情、人工標籤、本機 AI 打標、搬移預覽／執行、檔案復原、改名還原與任務查詢／停止工具。掃描、AI、搬移及復原會先回傳 `run_id`、`job_id`，使用 `gallery_get_tool_run` 查詢結果、`gallery_cancel_job` 送出停止要求；客戶端需保持 MCP 連線至任務結束。使用順序與完整工具參數見 [圖庫 MCP 流程](docs/done/012-reliability-and-mcp.md#圖庫-mcp-流程工具2026-10-21)。
 
 開發驗證：先執行 `python -m pip install -r requirements-dev.txt` 與 `npm install`，再執行 `python -B -m unittest discover -s tests -p "test_*.py"`、`npm test`、`npm run test:browser`。瀏覽器測試使用本機 Microsoft Edge 與模擬 API。首次啟動新版會先備份既有資料庫再套用相容性遷移，舊 MCP 客戶端也需要重新連線。
 
@@ -303,7 +303,7 @@ Twitter Tag Gallery 實作了 **Model Context Protocol (MCP)**，可供 Claude D
 ```json
 {
   "mcpServers": {
-    "twitter-tag-gallery": {
+    "gallery": {
       "command": "python",
       "args": ["H:\\code\\twitter-tag-gallery\\mcp_server.py"]
     }

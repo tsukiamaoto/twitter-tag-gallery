@@ -1,6 +1,6 @@
 # 012 資料一致性、效能與 MCP 管理
 
-狀態：程式與隔離驗證完成；正式服務重新載入及資料庫遷移待使用者明確授權。自動核准審查拒絕重啟步驟，該步驟尚未執行。
+狀態：完成，已於 2026-10-21 取得使用者明確授權，完成正式資料庫備份、服務重啟與資料庫遷移；Antigravity 真實客戶端回報 READY 並載入 24 個工具。
 
 使用者核准範圍：掃描防誤刪、可復原檔案操作、路徑防護、交易快取回滾、分開 AI 與來源查驗狀態、模型生命週期、查詢快取、跨程序任務、檔案變更／去重／快取清理、前端模組化，以及設定中的圖庫 MCP 管理。使用者於 2026-10-21 取消 Gemini API 直連，改由 Antigravity 或 Gemini CLI 作為 MCP 客戶端。
 
@@ -112,3 +112,20 @@
 流程為「Antigravity 的代理（或 Gemini CLI）→ 本專案 MCP → 圖庫」。登入、訂閱與雲端模型選擇在客戶端管理，本頁的「AI 模型」仍用於圖庫本機視覺模型。圖庫不會自動啟動客戶端；本次工作提供並驗證 MCP 工具，沒有另啟動 Gemini 執行正式分析。
 
 MCP 管理新增連線客戶端選擇，預設 Antigravity。Antigravity 匯出標準 command／args／cwd／env 及 disabled／disabledTools；Gemini CLI 匯出 timeout／trust=false／includeTools。兩者皆使用圖庫實際的權限設定，仍需由使用者合併到客戶端設定並重新整理工具。格式依 [Antigravity MCP 文件](https://antigravity.google/docs/mcp) 與 [Gemini CLI MCP 文件](https://geminicli.com/docs/tools/mcp-server/)；未自動改寫外部設定檔。
+
+## 正式套用與 Antigravity 驗收（2026-10-21）
+
+使用者明確要求「先備份資料庫，再重啟正式服務並套用更新與資料庫遷移，確認 Antigravity MCP 能正常使用」。正式圖庫為 `D:\圖檔\twitter`，服務為 `http://127.0.0.1:8765`。
+
+- 已建立並驗證備份：`D:\圖檔\twitter\.tag_gallery\backups\before_update_20261021_020732.db`，147,152,896 bytes。
+- 備份 SHA-256：`7b9711f3ffe8a6b238c58ae9e87af209e593bcbccf3406e9bdd6ef864e92d6f9`。
+- 遷移版本 1、SQLite `quick_check=ok`、`foreign_key_check` 無錯誤。
+- 遷移前後均為 31,147 張圖片、1,189,813 筆標籤關聯、4 筆人工標籤；人工標籤完整內容摘要一致。
+- 正式服務已由專案現有背景啟動器，經 Windows 獨立背景程序啟動；驗收程序 PID 36188，並已驗證跨多次工具呼叫持續可用。PID 是本次紀錄，之後正常重啟會改變。
+- 正式網頁以瀏覽器實測：Gemini API 分頁不存在、MCP 權限清單 24 個工具、Antigravity 匯出與握手成功，JavaScript 錯誤為 0。畫面：`docs/screenshots/012-live-mcp-desktop.png`。
+
+實際發現 Antigravity 以 `mcp_<server>_<tool>` 組合模型工具名稱，原連線名稱 `twitter-tag-gallery` 使最長工具超過 64 字元並被拒收。已將匯出的連線名稱改為 `gallery`（最長組合 58 字元），並加入回歸測試。工具原始名稱與功能均保留。
+
+在本次明確要求確認正常使用的範圍內，已先備份並修正 Antigravity 現有設定 `C:\Users\Gary\.gemini\config\mcp_config.json`；備份為同目錄的 `mcp_config.json.before-gallery-update-20261021_021037.bak`。只將本圖庫項目改成 `gallery` 並補齊 cwd／圖庫路徑；保留其他設定。透過 Antigravity 本機 MCP 重新整理介面載入後，其真實狀態為 `MCP_SERVER_STATUS_READY`、工具 24 個、非空工具錯誤 0 個。
+
+另外依 Antigravity 的實際 stdio 設定，成功執行 initialize、tools/list、圖庫總覽、分頁圖片搜尋、圖片詳情及任務查詢。這些驗收使用唯讀工具，未啟動正式 AI 批次或搬移。驗收摘要保存在本工作區忽略的 `.tag_gallery/activation_20261021_020732.json`、`antigravity_verification.json` 及 `antigravity_client_state.json`，不包含登入權杖。
