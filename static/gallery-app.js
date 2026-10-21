@@ -9,7 +9,32 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       };
     }
     const browsePreferences = readBrowsePreferences();
-    const tagLabels = new Map();
+    const TAG_FILTERS_KEY = 'twitter-tag-gallery.tag-filters.v1';
+    function readTagFilters() {
+      let saved;
+      try { saved = JSON.parse(localStorage.getItem(TAG_FILTERS_KEY)); } catch (_) {}
+      const includeTags = Array.isArray(saved?.includeTags)
+        ? [...new Set(saved.includeTags.filter(name => typeof name === 'string' && name.trim()))]
+        : ['最近'];
+      const categories = ['all', 'recent', 'artist', 'character', 'copyright', 'general', 'rating', 'source'];
+      const labels = saved?.labels && typeof saved.labels === 'object' && !Array.isArray(saved.labels)
+        ? Object.entries(saved.labels).filter(([name, label]) => includeTags.includes(name) && typeof label === 'string')
+        : [];
+      return { includeTags, tagCategory: categories.includes(saved?.tagCategory) ? saved.tagCategory : 'recent', labels };
+    }
+    const savedTagFilters = readTagFilters();
+    const tagLabels = new Map(savedTagFilters.labels);
+    const tagCanonicalNames = new Map();
+
+    function saveTagFilters() {
+      try {
+        localStorage.setItem(TAG_FILTERS_KEY, JSON.stringify({
+          includeTags: state.includeTags,
+          tagCategory: state.tagCategory,
+          labels: Object.fromEntries(state.includeTags.filter(name => tagLabels.has(name)).map(name => [name, tagLabels.get(name)]))
+        }));
+      } catch (_) { /* Filtering remains available when browser storage is blocked. */ }
+    }
 
     function saveBrowsePreferences() {
       const status = document.getElementById('preferences-status');
@@ -51,15 +76,17 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
     }
 
     let state = {
-      includeTags: [],
+      includeTags: savedTagFilters.includeTags,
       folder: '__ALL__',
-      tagCategory: 'all',
+      aiStatus: 'all',
+      tagCategory: savedTagFilters.tagCategory,
       page: 1,
       pageSize: browsePreferences.pageSize,
       items: [],
       total: 0,
       selectedIds: new Set(),
       detailIndex: -1,
+      detailImageId: null,
       folders: [],
       stats: {}
     };
@@ -70,9 +97,13 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
 
     window.addEventListener('DOMContentLoaded', async () => {
       syncBrowsePreferences();
+      document.querySelectorAll('.cat-pill').forEach(p => p.classList.toggle('active', p.dataset.cat === state.tagCategory));
       renderActiveFilters();
       setupHoverPreview();
+      setupSelectionGestures();
+      setupTagPagination();
       initializeDeleteNotice();
+      setupDetailActions();
       window.addEventListener('keydown', handleBrowseKeydown);
       document.querySelector('.settings-tabs').addEventListener('keydown', handleSettingsTabKeydown);
       await Promise.all([loadStats(), loadFolders(), loadTags(), loadImages()]);
@@ -82,6 +113,14 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
 
     function handleBrowseKeydown(e) {
       if (e.defaultPrevented || e.isComposing) return;
+      if (document.getElementById('detail-more-actions').open) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          closeDetailActions(true);
+          return;
+        }
+        if (['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
+      }
       if (e.key === 'Escape') {
         hideHoverPreview();
         if (document.getElementById('folder-browser-modal').classList.contains('open')) {
@@ -120,9 +159,9 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       const otherModal = document.querySelector('.modal-backdrop.open:not(#detail-modal)');
       if (otherModal) return;
       if (e.key === 'Delete') {
-        if (imageFileOperationBusy) return;
+        if (imageFileOperationBusy || selectionPointer?.active) return;
         const focusedId = Number(e.target.closest('.card')?.id?.replace('card-', ''));
-        const ids = detailOpen ? [state.items[state.detailIndex]?.id].filter(Boolean)
+        const ids = detailOpen ? [state.detailImageId].filter(Boolean)
           : state.selectedIds.size ? [...state.selectedIds]
           : state.items.some(item => item.id === focusedId) ? [focusedId] : [];
         if (ids.length) { e.preventDefault(); deleteImageFiles(ids); }
@@ -155,9 +194,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       state.folders = await r.json();
       document.getElementById('tab-btn-folders').textContent = `📁 實體資料夾 (${state.folders.length})`;
 
-      const dl = document.getElementById('folder-datalist');
       const adl = document.getElementById('artist-datalist');
-      dl.innerHTML = state.folders.map(f => `<option value="${escapeHtml(f.name)}">`).join('');
       adl.innerHTML = state.folders.map(f => `<option value="${escapeHtml(f.name)}">`).join('');
       renderFolderList();
       };
@@ -229,6 +266,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
         renderActiveFilters();
         loadImages();
       }
+      saveTagFilters();
       };
       return window.GalleryApp ? window.GalleryApp.run("setTagCategory", Array.from(arguments), base) : base(cat, el);
     }
@@ -239,31 +277,114 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
     }
 
     let sidebarTags = [];
-    let tagLoadSequence = 0;
+    const TAG_BATCH_SIZE = 40;
+    let tagAbortController = null;
+    let tagPaging = { loading: false, hasMore: false, error: false };
+    let tagListObserver = null;
+
+    function setupTagPagination() {
+      const box = document.getElementById('sidebar-tag-list');
+      box.addEventListener('scroll', () => {
+        if (!tagPaging.error && box.clientHeight > 0 && box.scrollHeight - box.scrollTop - box.clientHeight < 160) loadMoreTags();
+      }, { passive: true });
+    }
+
     async function loadTags() {
-      const sequence = ++tagLoadSequence;
-      const q = document.getElementById('tag-search-input').value.trim();
-      const url = `/api/tags?category=${encodeURIComponent(state.tagCategory)}&q=${encodeURIComponent(q)}&limit=250`;
-      const r = await fetch(url);
-      const tags = await r.json();
-      if (sequence !== tagLoadSequence) return;
-      renderTagList(tags);
+      tagAbortController?.abort();
+      tagAbortController = new AbortController();
+      tagPaging = { category: state.tagCategory,
+        q: document.getElementById('tag-search-input').value.trim(),
+        offset: 0, loading: false, hasMore: true, error: false, signal: tagAbortController.signal };
+      sidebarTags = [];
+      document.getElementById('sidebar-tag-list').scrollTop = 0;
+      return loadMoreTags();
+    }
+
+    async function loadMoreTags() {
+      const paging = tagPaging;
+      if (paging.loading || !paging.hasMore) return;
+      paging.loading = true;
+      paging.error = false;
+      if (sidebarTags.length) updateTagLoadStatus(); else renderTagList();
+      const params = new URLSearchParams({ category: paging.category, q: paging.q,
+        limit: TAG_BATCH_SIZE, offset: paging.offset, paged: true });
+      try {
+        const r = await fetch(`/api/tags?${params}`, { signal: paging.signal });
+        if (!r.ok) throw new Error('標籤載入失敗');
+        const data = await r.json();
+        if (paging !== tagPaging) return;
+        if (!Array.isArray(data.items)) throw new Error('標籤回應格式錯誤');
+        const existing = new Set(sidebarTags.map(tag => tag.name));
+        const added = data.items.filter(tag => {
+          if (existing.has(tag.name)) return false;
+          existing.add(tag.name);
+          return true;
+        });
+        paging.hasMore = Boolean(data.has_more) && data.next_offset > paging.offset && data.items.length > 0;
+        paging.offset = data.next_offset;
+        if (sidebarTags.length) {
+          sidebarTags.push(...added);
+          rememberSidebarTags(added);
+          document.getElementById('tag-list-status').insertAdjacentHTML('beforebegin', added.map(renderSidebarTag).join(''));
+        } else {
+          renderTagList(added);
+        }
+        return true;
+      } catch (error) {
+        if (paging !== tagPaging || error.name === 'AbortError') return;
+        paging.error = true;
+        return false;
+      } finally {
+        if (paging === tagPaging) {
+          paging.loading = false;
+          updateTagLoadStatus();
+        }
+      }
+    }
+
+    function rememberSidebarTags(tags) {
+      tags.forEach(t => {
+        const label = tagDisplayLabel(t);
+        for (const name of t.aliases || [t.name]) {
+          tagLabels.set(name, label);
+          tagCanonicalNames.set(name, t.name);
+        }
+      });
+      state.includeTags = [...new Set(state.includeTags.map(name => tagCanonicalNames.get(name) || name))];
+      if (tags.length) saveTagFilters();
+      renderActiveFilters();
+    }
+
+    function updateTagLoadStatus() {
+      tagListObserver?.disconnect();
+      const status = document.getElementById('tag-list-status');
+      if (!status) return;
+      const { loading, hasMore, error } = tagPaging;
+      document.getElementById('sidebar-tag-list').setAttribute('aria-busy', String(loading));
+      status.hidden = !loading && !hasMore && !error && sidebarTags.length > 0;
+      status.innerHTML = loading ? '讀取標籤中…' : error
+        ? '<button type="button" class="tag-load-more" onclick="loadMoreTags()">載入失敗，點此重試</button>'
+        : hasMore ? '<button type="button" class="tag-load-more" onclick="loadMoreTags()">載入更多標籤</button>'
+        : '找不到符合的標籤';
+      if (hasMore && !loading && !error && typeof IntersectionObserver === 'function') {
+        tagListObserver ||= new IntersectionObserver(entries => {
+          if (entries.some(entry => entry.isIntersecting && entry.target === document.getElementById('tag-list-status'))) loadMoreTags();
+        }, { root: document.getElementById('sidebar-tag-list'), rootMargin: '0px 0px 160px 0px' });
+        tagListObserver.observe(status);
+      }
     }
 
     function renderTagList(tags = sidebarTags) {
       sidebarTags = tags;
-      const box = document.getElementById('sidebar-tag-list');
-      tags.forEach(t => tagLabels.set(t.name, t.zh_name || t.name));
-      renderActiveFilters();
+      rememberSidebarTags(tags);
+      document.getElementById('sidebar-tag-list').innerHTML = tags.map(renderSidebarTag).join('')
+        + '<div id="tag-list-status" class="tag-list-status" role="status" aria-live="polite"></div>';
+      updateTagLoadStatus();
+    }
 
-      if (!tags.length) {
-        box.innerHTML = `<div style="color:var(--text-muted); padding:12px; font-size:12px;">找不到符合的標籤（可先執行 AI 自動打標）</div>`;
-        return;
-      }
-
-      box.innerHTML = tags.map(t => {
-        const mainLabel = t.zh_name ? `${t.zh_name}` : t.name;
-        const subLabel = (t.zh_name && t.category !== 'recent') ? t.name : '';
+    function renderSidebarTag(t) {
+        const mainLabel = tagDisplayLabel(t);
+        const subLabel = (t.zh_name && t.category !== 'recent' && t.category !== 'artist' && t.zh_name !== t.name) ? t.name : '';
         const included = state.includeTags.includes(t.name);
         return `
           <div class="tag-item ${included ? 'included' : ''}">
@@ -278,10 +399,15 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
             </button>
           </div>
         `;
-      }).join('');
+    }
+
+    function tagDisplayLabel(tag) {
+      const label = tag.zh_name || tag.name;
+      return tag.category === 'artist' ? label.replace(/^現有繪師[：:]\s*/, '') : label;
     }
 
     function toggleIncludeTag(tname) {
+      tname = tagCanonicalNames.get(tname) || tname;
       const selected = state.includeTags.includes(tname);
       state.includeTags = state.includeTags.filter(x => x !== tname);
       if (!selected) {
@@ -293,6 +419,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
         }
       }
       state.page = 1;
+      saveTagFilters();
       renderActiveFilters();
       renderTagList();
       loadImages();
@@ -310,7 +437,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
     }
 
     function setAiFilter(val) {
-      document.getElementById('sel-ai').value = val;
+      state.aiStatus = val;
       resetPageAndLoad();
     }
 
@@ -318,9 +445,9 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       state.includeTags = [];
       state.folder = '__ALL__';
       document.getElementById('main-search').value = '';
-      document.getElementById('sel-media').value = 'all';
-      document.getElementById('sel-ai').value = 'all';
+      state.aiStatus = 'all';
       state.page = 1;
+      saveTagFilters();
       renderFolderList();
       renderActiveFilters();
       renderTagList();
@@ -330,6 +457,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
     function clearTagFilters() {
       state.includeTags = [];
       state.page = 1;
+      saveTagFilters();
       renderActiveFilters();
       renderTagList();
       loadImages();
@@ -376,43 +504,56 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
 
     let imageLoadSequence = 0;
     let imageAbortController = null;
-    async function loadImages() {
-      const base = async function () {
+    const deletedImageIds = new Set();
+
+    function invalidateImageRequests() {
+      imageLoadSequence++;
+      imageAbortController?.abort();
+      imageAbortController = null;
+    }
+
+    async function loadImages(options = {}) {
+      const base = async function (options = {}) {
       hideHoverPreview();
       const sequence = ++imageLoadSequence;
       imageAbortController?.abort();
       imageAbortController = new AbortController();
       document.getElementById('image-grid').setAttribute('aria-busy', 'true');
       const q = document.getElementById('main-search').value.trim();
-      const media = document.getElementById('sel-media').value;
-      const ai = document.getElementById('sel-ai').value;
       const sort = document.getElementById('sel-sort').value;
 
       const params = new URLSearchParams({
         include_tags: state.includeTags.join(','),
         folder: state.folder,
-        media_type: media,
-        ai_status: ai,
+        ai_status: state.aiStatus,
         q: q,
         sort: sort,
         page: state.page,
-        page_size: state.pageSize
+        page_size: state.pageSize,
+        compact: true
       });
 
       try {
-        const r = await fetch(`/api/images?${params.toString()}`, { signal: imageAbortController.signal });
+        const r = await fetch(`/api/images?${params.toString()}`, { signal: imageAbortController.signal, cache: 'no-store' });
         if (!r.ok) throw new Error('圖片載入失敗');
         const data = await r.json();
         if (sequence !== imageLoadSequence) return;
-        state.items = data.items;
-        state.total = data.total;
+        const removedCount = data.items.filter(item => deletedImageIds.has(item.id)).length;
+        state.items = data.items.filter(item => !deletedImageIds.has(item.id));
+        state.total = removedCount ? Math.min(state.total, Math.max(0, data.total - removedCount)) : data.total;
+        if (document.getElementById('detail-modal').classList.contains('open')) {
+          state.detailIndex = state.items.findIndex(item => item.id === state.detailImageId);
+        }
         const totalPages = Math.max(1, Math.ceil(state.total / state.pageSize));
-        if (state.page > totalPages) { state.page = totalPages; return loadImages(); }
+        if (state.page > totalPages) { state.page = totalPages; return loadImages(options); }
         renderGrid();
         renderPagination();
+        if (removedCount && !options.retriedDeletion) return loadImages({ ...options, retriedDeletion: true });
+        return true;
       } catch (error) {
         if (sequence === imageLoadSequence && error.name !== 'AbortError') {
-          document.getElementById('page-info').textContent = '圖片載入失敗，請重新套用或翻頁重試。';
+          if (!options.preserveOnError) document.getElementById('page-info').textContent = '圖片載入失敗，請重新套用或翻頁重試。';
+          return false;
         }
       } finally {
         if (sequence === imageLoadSequence) document.getElementById('image-grid').setAttribute('aria-busy', 'false');
@@ -434,6 +575,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
 
     function renderGrid() {
       const base = function () {
+      finishSelectionPaint();
       const grid = document.getElementById('image-grid');
       if (!state.items.length) {
         grid.innerHTML = `<div style="grid-column:1/-1; text-align:center; padding:60px; color:var(--text-muted);">目前篩選條件下沒有符合的圖片</div>`;
@@ -457,36 +599,21 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
         if (mtimeStr) {
           pills.push(`<span class="pill" style="background:rgba(56,189,248,0.14); color:#7dd3fc; border:1px solid rgba(56,189,248,0.3);" title="檔案最後修改/編輯時間">🕒 ${mtimeStr}</span>`);
         }
-        const seenArtistLabels = new Set();
-        for (const a of item.artists) {
-          const label = (a.zh_name || a.name).replace(/^現有繪師：/, '');
-          const key = label.toLowerCase();
-          if (seenArtistLabels.has(key)) continue;
-          seenArtistLabels.add(key);
+        for (const a of item.artists.slice(0, 1)) {
+          const label = tagDisplayLabel(a);
           pills.push(`<span class="pill artist" onclick="event.stopPropagation(); toggleIncludeTag('${escapeJs(a.name)}')" title="點擊篩選此畫師">🎨 ${escapeHtml(label)}</span>`);
-          if (seenArtistLabels.size >= 2) break;
         }
         if (item.suggested_folder && !item.folder) {
           pills.push(`<span class="pill suggest" onclick="event.stopPropagation(); openDetailModal(${idx})" title="已辨識出目標繪師資料夾">✨ 建議歸檔: ${escapeHtml(item.suggested_folder)}</span>`);
         }
-        for (const c of item.characters.slice(0, 2)) {
-          pills.push(`<span class="pill character" onclick="event.stopPropagation(); toggleIncludeTag('${escapeJs(c.name)}')">👤 ${escapeHtml(c.zh_name || c.name)}</span>`);
-        }
-        for (const cp of item.copyrights.slice(0, 1)) {
-          pills.push(`<span class="pill copyright" onclick="event.stopPropagation(); toggleIncludeTag('${escapeJs(cp.name)}')">📚 ${escapeHtml(cp.zh_name || cp.name)}</span>`);
-        }
-        for (const g of item.preview_tags.slice(0, 4)) {
-          pills.push(`<span class="pill general" onclick="event.stopPropagation(); toggleIncludeTag('${escapeJs(g.name)}')">${escapeHtml(g.zh_name || g.name)}</span>`);
-        }
-
         return `
           <div class="card ${isSel ? 'selected' : ''}" id="card-${item.id}">
-            <div class="thumb-box" data-index="${idx}" tabindex="0" role="button" aria-label="檢視圖片：${escapeHtml(item.filename)}" onclick="openDetailModal(${idx})" onkeydown="if(event.target===this && (event.key==='Enter' || event.key===' ')) { event.preventDefault(); event.stopImmediatePropagation(); openDetailModal(${idx}); }">
-              <div class="card-check" onclick="event.stopPropagation(); toggleSelect(${item.id})">
+            <div class="thumb-box" data-index="${idx}" tabindex="0" role="button" aria-label="檢視圖片：${escapeHtml(item.filename)}" onclick="handleImageClick(event, ${idx})" onkeydown="if(event.target===this && (event.key==='Enter' || event.key===' ')) { event.preventDefault(); event.stopImmediatePropagation(); handleImageClick(event, ${idx}); }">
+              <div class="card-check" role="checkbox" tabindex="0" aria-checked="${isSel}" aria-label="選取 ${escapeHtml(item.filename)}" title="Shift 點選可連選；按住左鍵拖過圖片可連續勾選或取消" onclick="event.stopPropagation(); toggleSelect(${item.id}, event)" onkeydown="if(event.key==='Enter' || event.key===' ') { event.preventDefault(); event.stopImmediatePropagation(); toggleSelect(${item.id}, event); }">
                 ${isSel ? '✓' : ''}
               </div>
               <div class="badge-top-right">${badges}</div>
-              <img src="/api/thumb/${item.id}" loading="lazy" alt="${escapeHtml(item.filename)}" />
+              <img src="/api/thumb/${item.id}" loading="lazy" draggable="false" alt="${escapeHtml(item.filename)}" />
             </div>
             <div class="card-body">
               <div class="card-title" title="${escapeHtml(item.rel_path)}">
@@ -547,6 +674,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
     }
 
     function scheduleHoverPreview(target, point) {
+      if (selectionPointer?.active) return;
       if (hoverTarget === target) return;
       hideHoverPreview();
       if (!browsePreferences.hoverPreview || document.querySelector('.modal-backdrop.open')) return;
@@ -604,26 +732,47 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
 
     /* Selection & Batch Operations */
     const LAST_DELETION_KEY = 'twitter-tag-gallery.last-deletion';
+    const DISMISSED_DELETION_NOTICE_KEY = 'twitter-tag-gallery.last-deletion.dismissed';
     let lastDeletedOperation = null;
+    let lastDeletedImageIds = [];
     let imageFileOperationBusy = false;
 
     function initializeDeleteNotice() {
+      let dismissedOperation = null;
       try {
         const saved = localStorage.getItem(LAST_DELETION_KEY);
         if (/^delete_[a-f0-9]{32}$/.test(saved || '')) lastDeletedOperation = saved;
+        dismissedOperation = localStorage.getItem(DISMISSED_DELETION_NOTICE_KEY);
       } catch (_) {}
-      if (lastDeletedOperation) showDeleteNotice('上次刪除的檔案仍可從圖庫回收區復原。');
+      updateDeleteRestoreControls();
+      if (lastDeletedOperation && dismissedOperation !== lastDeletedOperation) {
+        showDeleteNotice('上次刪除的檔案仍可從圖庫回收區復原。');
+      }
+    }
+
+    function updateDeleteRestoreControls() {
+      for (const id of ['btn-restore-deleted', 'btn-restore-last-deleted']) {
+        document.getElementById(id).hidden = !lastDeletedOperation;
+      }
+    }
+
+    function dismissDeleteNotice() {
+      if (imageFileOperationBusy) return;
+      document.getElementById('file-delete-notice').hidden = true;
+      try {
+        if (lastDeletedOperation) localStorage.setItem(DISMISSED_DELETION_NOTICE_KEY, lastDeletedOperation);
+      } catch (_) {}
     }
 
     function showDeleteNotice(message) {
       document.getElementById('file-delete-notice').hidden = false;
       document.getElementById('file-delete-status').textContent = message;
-      document.getElementById('btn-restore-deleted').hidden = !lastDeletedOperation;
+      updateDeleteRestoreControls();
     }
 
     function setImageFileBusy(busy) {
       imageFileOperationBusy = busy;
-      for (const id of ['btn-delete-selected', 'btn-delete-single', 'btn-restore-deleted']) {
+      for (const id of ['btn-delete-selected', 'btn-delete-single', 'btn-restore-deleted', 'btn-restore-last-deleted', 'btn-dismiss-delete-notice']) {
         document.getElementById(id).disabled = busy;
       }
     }
@@ -638,16 +787,18 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
 
     function deleteSelectedImages() { return deleteImageFiles([...state.selectedIds]); }
     function deleteCurrentImage() {
-      const item = state.items[state.detailIndex];
-      if (document.getElementById('detail-modal').classList.contains('open') && item) return deleteImageFiles([item.id]);
+      if (document.getElementById('detail-modal').classList.contains('open') && state.detailImageId) {
+        return deleteImageFiles([state.detailImageId]);
+      }
     }
 
     async function deleteImageFiles(imageIds) {
       if (imageFileOperationBusy || !imageIds.length) return;
       const ids = [...new Set(imageIds)];
       const visible = state.items.filter(item => ids.includes(item.id));
-      const offPage = ids.length - visible.length;
-      const names = visible.slice(0, 5).map(item => item.filename).join('\n');
+      const detailTarget = ids.length === 1 && ids[0] === state.detailImageId;
+      const offPage = detailTarget ? 0 : ids.length - visible.length;
+      const names = ids.slice(0, 5).map(id => (currentDetailData?.id === id ? currentDetailData : state.items.find(item => item.id === id))?.filename || `圖片 ID ${id}`).join('\n');
       const note = offPage ? `\n包含其他頁面選取的 ${offPage} 個檔案。` : '';
       hideHoverPreview();
       if (!window.confirm(`刪除這 ${ids.length} 個檔案？${note}\n${names}\n\n檔案將移至圖庫回收區，可按「復原剛才刪除」還原。`)) return;
@@ -658,15 +809,54 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image_ids: ids })
         });
         const removed = new Set(result.deleted_ids);
-        lastDeletedOperation = result.operation_id;
-        try { localStorage.setItem(LAST_DELETION_KEY, lastDeletedOperation); } catch (_) {}
-        if (document.getElementById('detail-modal').classList.contains('open')) closeDetailModal();
+        const viewingRemoved = document.getElementById('detail-modal').classList.contains('open') && removed.has(state.detailImageId);
+        const viewedIndex = state.items.findIndex(item => item.id === state.detailImageId);
+        const nextItem = viewingRemoved ? state.items.slice(viewedIndex + 1).find(item => !removed.has(item.id)) : null;
+        const previousItem = viewingRemoved ? state.items.slice(0, Math.max(0, viewedIndex)).reverse().find(item => !removed.has(item.id)) : null;
+        const hasFollowingPage = state.page * state.pageSize < state.total;
+        invalidateImageRequests();
+        for (const id of removed) deletedImageIds.add(id);
+        if (result.restorable !== 0) {
+          lastDeletedOperation = result.operation_id;
+          lastDeletedImageIds = [...removed];
+          try { localStorage.setItem(LAST_DELETION_KEY, lastDeletedOperation); } catch (_) {}
+        }
         for (const id of removed) state.selectedIds.delete(id);
         state.items = state.items.filter(item => !removed.has(item.id));
         state.total = Math.max(0, state.total - visible.filter(item => removed.has(item.id)).length);
+        state.page = Math.min(state.page, Math.max(1, Math.ceil(state.total / state.pageSize)));
         updateSelectionUI(); renderPagination();
-        await Promise.allSettled([loadImages(), loadStats(), loadFolders(), loadTags()]);
-        showDeleteNotice(`已刪除 ${result.deleted} 個檔案，已移至圖庫回收區（尚未釋放磁碟空間）。`);
+        let deferredDetail = null;
+        let detailRequest = Promise.resolve();
+        if (viewingRemoved) {
+          const target = nextItem || (!hasFollowingPage && previousItem);
+          if (target) {
+            detailRequest = refreshDetailView(target.id);
+          } else if (state.total || state.items.length) {
+            deferredDetail = { sequence: ++detailLoadSequence, index: hasFollowingPage ? Math.max(0, viewedIndex) : -1 };
+            closeDetailActions();
+            state.detailImageId = null;
+            state.detailIndex = -1;
+            currentDetailData = null;
+            document.getElementById('dt-filename').textContent = '正在載入下一張圖片…';
+            document.getElementById('detail-media-container').textContent = '正在載入下一張圖片…';
+          } else {
+            closeDetailModal();
+          }
+        }
+        const message = result.already_deleted ? '圖片紀錄已移除，已更新清單。' : result.missing_count
+          ? `已移除 ${result.deleted} 筆圖片紀錄與標籤連結；其中 ${result.missing_count} 個檔案原已不存在。`
+          : `已刪除 ${result.deleted} 個檔案，已移至圖庫回收區（尚未釋放磁碟空間）。`;
+        showDeleteNotice(message);
+        const refreshed = await Promise.allSettled([loadImages({ preserveOnError: true }), loadStats(), loadFolders(), loadTags(), detailRequest]);
+        if (deferredDetail && deferredDetail.sequence === detailLoadSequence && document.getElementById('detail-modal').classList.contains('open')) {
+          const target = deferredDetail.index < 0 ? state.items.at(-1) : state.items[Math.min(deferredDetail.index, state.items.length - 1)];
+          if (target) await refreshDetailView(target.id);
+          else closeDetailModal();
+        }
+        if (refreshed[0].status === 'rejected' || refreshed[0].value === false) {
+          showDeleteNotice(`${message} 其餘圖片暫時無法補載，請稍後重試。`);
+        }
       } catch (error) {
         showDeleteNotice(`刪除失敗：${error.message}`);
       } finally {
@@ -680,8 +870,14 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       showDeleteNotice('正在復原檔案與標籤…');
       try {
         const result = await imageFileRequest(`/api/images/deletions/${lastDeletedOperation}/restore`, { method: 'POST' });
+        invalidateImageRequests();
+        for (const id of lastDeletedImageIds) deletedImageIds.delete(id);
+        lastDeletedImageIds = [];
         lastDeletedOperation = null;
-        try { localStorage.removeItem(LAST_DELETION_KEY); } catch (_) {}
+        try {
+          localStorage.removeItem(LAST_DELETION_KEY);
+          localStorage.removeItem(DISMISSED_DELETION_NOTICE_KEY);
+        } catch (_) {}
         await Promise.allSettled([loadImages(), loadStats(), loadFolders(), loadTags()]);
         showDeleteNotice(`已復原 ${result.restored} 個檔案與原有標籤。`);
       } catch (error) {
@@ -691,27 +887,155 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       }
     }
 
-    function toggleSelect(id) {
-      if (state.selectedIds.has(id)) state.selectedIds.delete(id);
-      else state.selectedIds.add(id);
-      updateSelectionUI();
+    let selectionAnchorId = null;
+    let selectionPointer = null;
+    let suppressSelectionClick = false;
+
+    function handleImageClick(event, index) {
+      if (event.shiftKey) {
+        event.preventDefault();
+        toggleSelect(state.items[index].id, event);
+      } else openDetailModal(index);
+    }
+
+    function toggleSelect(id, event = {}) {
+      const anchor = state.items.findIndex(item => item.id === selectionAnchorId);
+      const target = state.items.findIndex(item => item.id === id);
+      if (event.shiftKey && anchor >= 0 && target >= 0) {
+        for (const item of state.items.slice(Math.min(anchor, target), Math.max(anchor, target) + 1)) state.selectedIds.add(item.id);
+      } else {
+        if (state.selectedIds.has(id)) state.selectedIds.delete(id);
+        else state.selectedIds.add(id);
+        selectionAnchorId = id;
+      }
+      hideHoverPreview();
+      updateSelectionUI(false);
+    }
+
+    function selectionSegmentHitsRect(from, to, rect) {
+      // Clip the pointer segment so fast sweeps also include skipped cards.
+      let low = 0, high = 1;
+      const dx = to.x - from.x, dy = to.y - from.y;
+      for (const [p, q] of [[-dx, from.x - rect.left], [dx, rect.right - from.x], [-dy, from.y - rect.top], [dy, rect.bottom - from.y]]) {
+        if (!p) { if (q < 0) return false; continue; }
+        const value = q / p;
+        if (p < 0) low = Math.max(low, value);
+        else high = Math.min(high, value);
+        if (low > high) return false;
+      }
+      return true;
+    }
+
+    function paintSelectionTo(point) {
+      const pointer = selectionPointer;
+      if (!pointer?.active) return;
+      const viewport = document.getElementById('gallery-scroll').getBoundingClientRect();
+      const inside = new Set();
+      for (const card of document.getElementById('image-grid').querySelectorAll('.card')) {
+        const id = Number(card.id.slice(5));
+        const rect = card.getBoundingClientRect();
+        const visible = { left: Math.max(viewport.left, rect.left), right: Math.min(viewport.right, rect.right),
+          top: Math.max(viewport.top, rect.top), bottom: Math.min(viewport.bottom, rect.bottom) };
+        if (visible.left >= visible.right || visible.top >= visible.bottom) continue;
+        if (point.x >= visible.left && point.x <= visible.right && point.y >= visible.top && point.y <= visible.bottom) inside.add(id);
+        // Do not repeatedly toggle while moving within a card. Once the
+        // pointer leaves and sweeps back in, that card can change again.
+        if (pointer.inside.has(id) || !selectionSegmentHitsRect(pointer.last, point, visible)) continue;
+        const selected = pointer.visited.has(id) ? !state.selectedIds.has(id) : pointer.select;
+        pointer.visited.add(id);
+        if (selected) state.selectedIds.add(id);
+        else state.selectedIds.delete(id);
+      }
+      pointer.inside = inside;
+      pointer.last = point;
+      updateSelectionUI(false);
+    }
+
+    function finishSelectionPaint() {
+      const pointer = selectionPointer;
+      if (!pointer) return;
+      selectionPointer = null;
+      const grid = document.getElementById('image-grid');
+      grid.classList.remove('selection-painting');
+      if (grid.hasPointerCapture?.(pointer.id)) grid.releasePointerCapture(pointer.id);
+      if (pointer.active) {
+        suppressSelectionClick = true;
+        setTimeout(() => { suppressSelectionClick = false; }, 0);
+        updateSelectionUI(false);
+      }
+    }
+
+    function setupSelectionGestures() {
+      const grid = document.getElementById('image-grid');
+      grid.addEventListener('pointerdown', event => {
+        if (event.pointerType !== 'mouse' || event.button !== 0 || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
+        const thumbnail = event.target.closest('.thumb-box');
+        const item = thumbnail && state.items[Number(thumbnail.dataset.index)];
+        if (!item || event.target.closest('button, a, input, .pill')) return;
+        selectionPointer = { id: event.pointerId, itemId: item.id, select: !state.selectedIds.has(item.id),
+          active: false, last: { x: event.clientX, y: event.clientY }, visited: new Set(), inside: new Set([item.id]) };
+      });
+      document.addEventListener('pointermove', event => {
+        const pointer = selectionPointer;
+        if (!pointer || event.pointerId !== pointer.id) return;
+        if (!(event.buttons & 1)) { finishSelectionPaint(); return; }
+        const point = { x: event.clientX, y: event.clientY };
+        if (!pointer.active) {
+          if (Math.hypot(point.x - pointer.last.x, point.y - pointer.last.y) < 6) return;
+          pointer.active = true;
+          selectionAnchorId = pointer.itemId;
+          if (pointer.select) state.selectedIds.add(pointer.itemId);
+          else state.selectedIds.delete(pointer.itemId);
+          pointer.visited.add(pointer.itemId);
+          hideHoverPreview();
+          grid.classList.add('selection-painting');
+          grid.setPointerCapture?.(pointer.id);
+        }
+        event.preventDefault();
+        paintSelectionTo(point);
+      }, { passive: false });
+      document.addEventListener('pointerup', event => { if (event.pointerId === selectionPointer?.id) finishSelectionPaint(); });
+      document.addEventListener('pointercancel', finishSelectionPaint);
+      grid.addEventListener('lostpointercapture', finishSelectionPaint);
+      grid.addEventListener('dragstart', event => { if (event.target.closest('.thumb-box')) event.preventDefault(); });
+      document.addEventListener('click', event => {
+        if (!suppressSelectionClick) return;
+        suppressSelectionClick = false;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }, true);
+      document.getElementById('gallery-scroll').addEventListener('scroll', () => {
+        if (selectionPointer?.active) paintSelectionTo(selectionPointer.last);
+      });
+      window.addEventListener('blur', finishSelectionPaint);
+      window.addEventListener('resize', finishSelectionPaint);
     }
 
     function selectAllCurrentPage() {
       for (const item of state.items) state.selectedIds.add(item.id);
-      updateSelectionUI();
+      updateSelectionUI(false);
     }
 
     function clearSelection() {
       state.selectedIds.clear();
-      updateSelectionUI();
+      selectionAnchorId = null;
+      updateSelectionUI(false);
     }
 
-    function updateSelectionUI() {
+    function updateSelectionUI(render = true) {
       const bar = document.getElementById('batch-bar');
-      bar.classList.toggle('active', state.selectedIds.size > 0);
+      // Keep the grid stationary under the held pointer; reveal/hide the bar
+      // after release instead of moving the first row halfway through a sweep.
+      if (!selectionPointer?.active) bar.classList.toggle('active', state.selectedIds.size > 0);
       document.getElementById('batch-count').textContent = state.selectedIds.size;
-      renderGrid();
+      if (render) renderGrid();
+      else for (const item of state.items) {
+        const card = document.getElementById(`card-${item.id}`);
+        const selected = state.selectedIds.has(item.id);
+        card?.classList.toggle('selected', selected);
+        const check = card?.querySelector?.('.card-check');
+        if (check) { check.textContent = selected ? '✓' : ''; check.setAttribute('aria-checked', String(selected)); }
+      }
     }
 
     function openBatchTagModal(defaultCat) {
@@ -769,11 +1093,46 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
     let currentDecensorPreviewUrl = null;
     let showingDecensoredPreview = false;
 
+    function closeDetailActions(restoreFocus = false) {
+      const actions = document.getElementById('detail-more-actions');
+      if (!actions.open) return;
+      actions.open = false;
+      if (restoreFocus) document.getElementById('btn-detail-more').focus();
+    }
+
+    function setupDetailActions() {
+      const actions = document.getElementById('detail-more-actions');
+      const trigger = document.getElementById('btn-detail-more');
+      const buttons = () => [...actions.querySelectorAll('button')].filter(button => !button.disabled);
+      trigger.addEventListener('keydown', event => {
+        if (event.key !== 'ArrowDown') return;
+        event.preventDefault();
+        event.stopPropagation();
+        actions.open = true;
+        buttons()[0]?.focus();
+      });
+      actions.addEventListener('keydown', event => {
+        if (!actions.open || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const items = buttons();
+        const index = items.indexOf(document.activeElement);
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+          : (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+        items[next]?.focus();
+      });
+      document.addEventListener('click', event => {
+        if (!actions.contains(event.target)) closeDetailActions();
+      });
+      actions.addEventListener('focusout', event => {
+        if (!actions.contains(event.relatedTarget)) closeDetailActions();
+      });
+    }
+
     async function openDetailModal(idx) {
       hideHoverPreview();
-      state.detailIndex = idx;
       const item = state.items[idx];
       if (!item) return;
+      state.detailIndex = idx;
 
       document.getElementById('detail-modal').classList.add('open');
       await refreshDetailView(item.id);
@@ -781,10 +1140,23 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
 
     let detailLoadSequence = 0;
     async function refreshDetailView(imageId) {
+      closeDetailActions();
       const sequence = ++detailLoadSequence;
+      state.detailImageId = imageId;
+      state.detailIndex = state.items.findIndex(item => item.id === imageId);
+      currentDetailData = null;
+      document.getElementById('dt-filename').textContent = '正在載入圖片…';
+      document.getElementById('dt-tags-container').textContent = '';
+      document.getElementById('detail-media-container').textContent = '正在載入圖片…';
       const r = await fetch(`/api/image/${imageId}`);
       const d = await r.json();
       if (sequence !== detailLoadSequence || !document.getElementById('detail-modal').classList.contains('open')) return;
+      if (!r.ok) {
+        closeDetailModal();
+        showDeleteNotice(r.status === 404 ? '圖片紀錄已移除，正在更新圖庫清單。' : '圖片詳情載入失敗，請重試。');
+        await Promise.allSettled([loadImages(), loadStats(), loadFolders(), loadTags()]);
+        return;
+      }
       currentDetailData = d;
       currentDecensorPreviewUrl = null;
       showingDecensoredPreview = false;
@@ -797,16 +1169,17 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       if (saveRow) saveRow.style.display = 'none';
 
       const mediaBox = document.getElementById('detail-media-container');
-      if (d.media_type === 'video') {
-        mediaBox.innerHTML = `<video src="/api/raw/${d.id}?t=${Date.now()}" controls autoplay loop></video>`;
+      if (d.file_missing) {
+        showMissingDetailMedia(d.id);
+      } else if (d.media_type === 'video') {
+        mediaBox.innerHTML = `<video src="/api/raw/${d.id}?t=${Date.now()}" controls autoplay loop onerror="showMissingDetailMedia(${d.id})"></video>`;
       } else {
-        mediaBox.innerHTML = `<img id="dt-main-img" src="/api/raw/${d.id}?t=${Date.now()}" alt="${escapeHtml(d.filename)}" />`;
+        mediaBox.innerHTML = `<img id="dt-main-img" src="/api/raw/${d.id}?t=${Date.now()}" alt="${escapeHtml(d.filename)}" onerror="showMissingDetailMedia(${d.id})" />`;
       }
 
       document.getElementById('dt-filename').textContent = d.filename;
       document.getElementById('dt-folder').textContent = d.folder || '根目錄 (D:\\圖檔\\twitter)';
       document.getElementById('dt-size').textContent = d.size_kb.toLocaleString();
-      document.getElementById('dt-move-folder-input').value = d.suggested_folder || d.folder || '';
 
       const sugBox = document.getElementById('dt-suggest-box');
       if (d.suggested_folder && !d.folder) {
@@ -817,6 +1190,11 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       }
 
       renderDetailTags(d.tags);
+    }
+
+    function showMissingDetailMedia(imageId) {
+      if (state.detailImageId !== imageId) return;
+      document.getElementById('detail-media-container').textContent = '圖片檔案不存在或無法讀取。可按「刪除檔案」同步移除失效紀錄與標籤連結。';
     }
 
     async function openOrRunSingleDecensor() {
@@ -833,13 +1211,14 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       if (!currentDetailData) return;
       const btn = document.getElementById('btn-decensor-preview');
       const mainBtn = document.getElementById('btn-single-decensor');
+      const mainLabel = document.getElementById('dt-decensor-label');
       const statusEl = document.getElementById('dt-decensor-status');
       const cmpBtn = document.getElementById('btn-decensor-compare');
       const saveRow = document.getElementById('dt-decensor-save-row');
       const mode = document.getElementById('dt-decensor-mode') ? document.getElementById('dt-decensor-mode').value : 'auto';
 
       if (btn) { btn.disabled = true; btn.textContent = '⏳ GPU 重繪中...'; }
-      if (mainBtn) { mainBtn.disabled = true; mainBtn.textContent = '⏳ 去馬賽克中...'; }
+      if (mainBtn) { mainBtn.disabled = true; mainLabel.textContent = '去馬賽克中…'; }
       if (statusEl) statusEl.innerHTML = '⏳ 正在透過 AMD RX 9070 XT (DirectML) 載入 YOLO 遮罩偵測與 DeepCreamPy v2 進行局部重繪...';
 
       try {
@@ -875,7 +1254,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
         if (statusEl) statusEl.innerHTML = `<span style="color:#fca5a5;">❌ 預覽失敗：${escapeHtml(e.message)}</span>`;
       } finally {
         if (btn) { btn.disabled = false; btn.textContent = '🔍 重新偵測並預覽'; }
-        if (mainBtn) { mainBtn.disabled = false; mainBtn.textContent = '✨ AI 去馬賽克'; }
+        if (mainBtn) { mainBtn.disabled = false; mainLabel.textContent = 'AI 去馬賽克'; }
       }
     }
 
@@ -965,16 +1344,19 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       }
 
       if (!html) {
-        html = `<div style="color:var(--text-muted); font-size:13px;">此圖片尚無標籤，請點擊上方「🤖 AI 立即辨識此圖標籤與畫師」或手動新增！</div>`;
+        html = `<div style="color:var(--text-muted); font-size:13px;">此圖片尚無標籤，可從「更多」使用「智慧標籤」自動辨識。</div>`;
       }
       box.innerHTML = html;
     }
 
     function closeDetailModal() {
+      closeDetailActions();
       detailLoadSequence++;
       document.getElementById('detail-modal').classList.remove('open');
       document.getElementById('detail-media-container').innerHTML = '';
       currentDetailData = null;
+      state.detailImageId = null;
+      state.detailIndex = -1;
     }
 
     function navigateDetail(delta) {
@@ -1007,26 +1389,6 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       }
     }
 
-    async function addSingleTag() {
-      if (!currentDetailData) return;
-      const cat = document.getElementById('dt-add-cat').value;
-      const val = document.getElementById('dt-add-input').value.trim();
-      if (!val) return;
-
-      await fetch('/api/tags/batch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          image_ids: [currentDetailData.id],
-          add_tags: val.split(',').map(s => ({ name: s.trim(), category: cat }))
-        })
-      });
-      document.getElementById('dt-add-input').value = '';
-      await refreshDetailView(currentDetailData.id);
-      await loadTags();
-      await loadImages();
-    }
-
     async function removeSingleTag(tname) {
       if (!currentDetailData) return;
       await fetch('/api/tags/batch', {
@@ -1045,12 +1407,6 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
     async function moveSingleToSuggested() {
       if (!currentDetailData || !currentDetailData.suggested_folder) return;
       await moveSingleToFolder(currentDetailData.suggested_folder);
-    }
-
-    async function moveSingleToFolderInput() {
-      const target = document.getElementById('dt-move-folder-input').value.trim();
-      if (!target) return alert('請輸入或選擇目標繪師資料夾名稱');
-      await moveSingleToFolder(target);
     }
 
     async function moveSingleToFolder(folderName) {
@@ -1072,7 +1428,15 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
 
     async function openInExplorer() {
       if (!currentDetailData) return;
-      await fetch(`/api/open_explorer/${currentDetailData.id}`, { method: 'POST' });
+      try {
+        const response = await fetch(`/api/open_explorer/${currentDetailData.id}`, { method: 'POST' });
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(typeof data.detail === 'string' ? data.detail : '無法開啟圖片所在的資料夾');
+        }
+      } catch (error) {
+        alert(`開啟資料夾失敗：${error.message}`);
+      }
     }
 
     /* Smart Tagging Modal, Model Load/Unload & Polling */
@@ -1177,7 +1541,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       const revLimit = document.getElementById('rev-limit') ? document.getElementById('rev-limit').value : '30';
       const revSim = document.getElementById('rev-sim') ? document.getElementById('rev-sim').value : '72';
       const revApiKey = document.getElementById('rev-apikey') ? document.getElementById('rev-apikey').value.trim() : '';
-      const runSemThemes = document.getElementById('ai-step-sem') ? document.getElementById('ai-step-sem').checked : true;
+      const runSemThemes = false;
       const autoMove = document.getElementById('ai-auto-move') ? document.getElementById('ai-auto-move').checked : false;
       const runDecensor = document.getElementById('ai-step-decensor') ? document.getElementById('ai-step-decensor').checked : false;
       const decensorSaveMode = document.getElementById('ai-decensor-save-mode') ? document.getElementById('ai-decensor-save-mode').value : 'new_copy';
@@ -1854,10 +2218,16 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
     async function runSingleUnifiedTagAndCalibrate() {
       if (!currentDetailData) return;
       const btn = document.getElementById('btn-single-unified');
+      const label = document.getElementById('dt-unified-label');
+      const hint = document.getElementById('dt-unified-hint');
       const revBox = document.getElementById('dt-rev-links');
-      const oldText = btn ? btn.textContent : '';
+      const oldText = label.textContent;
+      const oldHint = hint.textContent;
+      const oldHintHidden = hint.hidden;
       if (btn) {
-        btn.textContent = '⏳ [1/2] 本機 AI 正在辨識內容屬性標籤...';
+        label.textContent = 'AI 辨識中…';
+        hint.textContent = '步驟 1/2 · 正在辨識圖片內容與標籤';
+        hint.hidden = false;
         btn.disabled = true;
       }
       if (revBox) revBox.style.display = 'none';
@@ -1869,7 +2239,8 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
 
         // 階段 2：接著執行 Danbooru / IQDB / SauceNAO / Google Lens 以圖搜圖校正畫師
         if (btn) {
-          btn.textContent = '⏳ [2/2] 正在以圖搜圖比對真實畫師並校正標籤...';
+          label.textContent = '搜圖校正中…';
+          hint.textContent = '步驟 2/2 · 正在比對畫師與校正標籤';
         }
         const r = await fetch(`/api/reverse_search/single/${currentDetailData.id}`, { method: 'POST' });
         const d = await r.json();
@@ -1912,7 +2283,9 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
         }
       } finally {
         if (btn) {
-          btn.textContent = oldText;
+          label.textContent = oldText;
+          hint.textContent = oldHint;
+          hint.hidden = oldHintHidden;
           btn.disabled = false;
         }
       }

@@ -120,6 +120,7 @@
       ['openRenameModal()', '批次改名與排序'],
       ['openOrganizeModal()', '資料夾歸檔精靈'],
       ["openSettings('history')", '系統操作與處理日誌'],
+      ['restoreLastDeletedImages()', '復原上次刪除'],
       ['rescanLibrary()', '重新掃描圖庫'],
       ['unloadAiModel(false)', '卸載模型・釋放記憶體'],
     ];
@@ -167,7 +168,7 @@
       activateWithKeyboard(pill);
       pill.addEventListener('click', () => {
         // Collection navigation changes scope; content tags remain available.
-        if (scope !== 'ai') byId('sel-ai').value = 'all';
+        if (scope !== 'ai') state.aiStatus = 'all';
         else {
           state.folder = '__ALL__';
           renderFolderList();
@@ -255,7 +256,7 @@
 
   function setupBrowsing() {
     const main = document.querySelector('main');
-    main.insertAdjacentHTML('afterbegin', `<div class="shell-library-heading"><div class="shell-library-title"><button class="btn shell-sidebar-toggle" id="shell-open-filters" aria-controls="shell-sidebar" aria-expanded="false" aria-label="開啟收藏與篩選">${icon('filter')}</button><div class="shell-title-copy"><div class="shell-eyebrow">YOUR COLLECTION</div><h1 id="shell-library-title">全部圖片</h1><div class="shell-result-copy"><span id="shell-result-count">正在讀取圖庫…</span><span class="shell-load-status" id="shell-load-status" role="status" hidden>更新中…</span></div></div></div><div class="shell-view-controls"><span class="shell-view-label">顯示密度</span><div class="shell-density" role="group" aria-label="縮圖顯示密度"><button data-density="comfortable" aria-label="舒適排列" title="舒適排列" aria-pressed="true">${icon('grid')}</button><button data-density="compact" aria-label="緊湊排列" title="緊湊排列" aria-pressed="false">${icon('compact')}</button></div></div></div>`);
+    main.insertAdjacentHTML('afterbegin', `<div class="shell-library-heading"><div class="shell-library-title"><button class="btn shell-sidebar-toggle" id="shell-open-filters" aria-controls="shell-sidebar" aria-expanded="false" aria-label="開啟收藏與篩選">${icon('filter')}</button><div class="shell-title-copy"><div class="shell-eyebrow">YOUR COLLECTION</div><h1 id="shell-library-title">全部圖片</h1><div class="shell-result-copy"><span id="shell-result-count">正在讀取圖庫…</span><span class="shell-load-status" id="shell-load-status" role="status" hidden>更新中…</span></div></div></div><div class="shell-view-controls"><span class="shell-view-label">顯示方式</span><div class="shell-density" role="group" aria-label="圖片顯示方式"><button data-density="comfortable" aria-label="顯示圖片與標籤" title="顯示圖片與標籤" aria-pressed="true">${icon('grid')}</button><button data-density="compact" aria-label="只顯示圖片" title="只顯示圖片" aria-pressed="false">${icon('compact')}</button></div></div></div>`);
     byId('shell-open-filters').addEventListener('click', () => setDrawer(true));
     document.querySelectorAll('[data-density]').forEach(button => {
       button.addEventListener('click', () => setDensity(button.dataset.density));
@@ -272,7 +273,7 @@
     searchField.insertBefore(search, searchField.lastElementChild);
     search.placeholder = '搜尋圖片、檔名、畫師或標籤…';
     search.setAttribute('aria-label', '搜尋圖庫');
-    for (const [id, text] of [['sel-media', '媒體類型'], ['sel-ai', 'AI 標記'], ['sel-sort', '排序方式']]) {
+    for (const [id, text] of [['sel-sort', '排序方式']]) {
       const select = byId(id);
       const label = document.createElement('label');
       label.className = 'shell-select-field';
@@ -497,15 +498,15 @@
         <div data-smart-slot="live"></div>
         <fieldset id="smart-options" class="smart-options">
           <legend class="smart-visually-hidden">智慧標籤處理選項</legend>
-          <section class="smart-scope"><div class="smart-scope-main"><label for="ai-scope" class="smart-section-label">處理範圍</label><div data-smart-slot="ai-scope"></div><p id="smart-scope-note" class="smart-note"></p></div><div class="smart-limit"><label for="ai-limit" class="smart-section-label">本機分析上限</label><div data-smart-slot="ai-limit"></div><p class="smart-note">張，0 表示不限</p></div></section>
+          <section class="smart-scope"><div class="smart-scope-main"><label for="ai-scope" class="smart-section-label">處理範圍</label><div data-smart-slot="ai-scope"></div><p id="smart-scope-note" class="smart-note"></p><p class="smart-note">自動標籤僅保留畫師、角色、作品與來源；人工標籤保留。</p></div><div class="smart-limit"><label for="ai-limit" class="smart-section-label">本機分析上限</label><div data-smart-slot="ai-limit"></div><p class="smart-note">張，0 表示不限</p></div></section>
           <section class="smart-steps-section"><div class="smart-section-heading"><h3>處理步驟</h3><span class="smart-note">依順序執行已勾選項目</span></div><div class="smart-steps">
-            <label class="smart-step"><span class="smart-step-number">1</span><span class="smart-step-copy"><strong>AI 圖片標記</strong><small>辨識角色、服裝、場景與屬性。</small></span><span data-smart-slot="ai-step-local"></span></label>
+            <label class="smart-step"><span class="smart-step-number">1</span><span class="smart-step-copy"><strong>AI 圖片標記</strong><small>辨識畫師、角色與作品。</small></span><span data-smart-slot="ai-step-local"></span></label>
             <label class="smart-step"><span class="smart-step-number">2</span><span class="smart-step-copy"><strong>搜圖校正</strong><small>比對圖片來源，補齊或校正畫師資訊。</small></span><span data-smart-slot="ai-step-rev"></span></label>
-            <label class="smart-step"><span class="smart-step-number">3</span><span class="smart-step-copy"><strong>主題分類</strong><small>依標籤關聯補上主題，方便日後查找。</small></span><span data-smart-slot="ai-step-sem"></span></label>
+            <span hidden data-smart-slot="ai-step-sem"></span>
           </div></section>
           <label class="smart-archive"><span data-smart-slot="ai-auto-move"></span><span><strong>完成後依畫師歸檔</strong><small>會建立畫師資料夾，並將圖片搬入。</small></span></label>
           <details class="smart-advanced" id="smart-advanced"><summary>進階參數與工具<span class="smart-note">辨識門檻、搜圖設定</span></summary><div class="smart-advanced-body">
-            <h4>AI 辨識</h4><div class="smart-fields"><label>內容標籤門檻<div data-smart-slot="ai-gen-thresh"></div></label><label>畫師辨識門檻<div data-smart-slot="ai-art-thresh"></div></label></div>
+            <h4>AI 辨識</h4><div class="smart-fields"><span hidden data-smart-slot="ai-gen-thresh"></span><label>畫師辨識門檻<div data-smart-slot="ai-art-thresh"></div></label></div>
             <h4>搜圖校正</h4><div class="smart-fields"><label>單次校正張數<div data-smart-slot="rev-limit"></div></label><label>最低相似度（%）<div data-smart-slot="rev-sim"></div></label><label class="smart-field-wide">SauceNAO API Key <span class="smart-note">選填</span><div data-smart-slot="rev-apikey"></div></label></div>
             <details class="smart-extra"><summary>其他處理選項</summary><div id="smart-extra-options"></div></details>
             <div class="smart-maintenance"><h4>標籤維護</h4><p class="smart-note">手動查詢 Pixiv ID，或清理低信心度的畫師猜測。</p><div id="smart-maintenance-tools"></div></div>
@@ -599,7 +600,7 @@
     panel.hidden = true;
     panel.setAttribute('role', 'tabpanel');
     panel.setAttribute('aria-labelledby', 'settings-tab-model');
-    panel.innerHTML = `<div><h3>AI 模型</h3><p class="settings-note">管理本機模型的記憶體與硬碟快取。智慧標籤會自動載入所需模型。</p></div>
+    panel.innerHTML = `<div><h3>圖片標籤模型</h3><p class="settings-note">管理本機打標模型的記憶體與硬碟快取。智慧標籤會自動載入所需模型。</p></div>
       <div class="settings-section"><div class="shell-model-status"><span class="muted">目前狀態</span><span id="shell-model-state-slot"></span></div><div class="shell-model-device"><span>運算裝置</span><span id="shell-model-device">讀取中…</span></div><div class="settings-actions" id="shell-model-actions"></div><p class="settings-note" id="shell-model-busy" hidden>背景任務正在執行，完成後即可管理模型。</p></div>
       <div class="settings-section"><label class="settings-check"><span id="shell-model-auto-slot"></span><span>本機打標完成後自動卸載模型<span class="settings-note shell-model-help">釋放顯示卡記憶體，再繼續後續處理。下次任務會重新載入。</span></span></label></div>
       <details class="settings-section"><summary>硬碟快取 <span class="muted" id="shell-model-cache"></span></summary><p class="settings-note">刪除後，下次使用時需要重新下載模型。</p><div id="shell-model-cache-actions"></div></details><p id="shell-model-feedback" class="settings-feedback" role="status" aria-live="polite"></p>`;
@@ -627,9 +628,10 @@
       catch { setModelFeedback('本次選擇已套用；瀏覽器無法儲存此偏好。'); }
     });
     GalleryApp.use('switchSettingsTab', function (next, section) {
-      const selected = ['browse', 'schedule', 'history', 'model', 'mcp', 'tasks'].includes(section) ? section : 'browse';
+      const names = Array.from(tabs.querySelectorAll('[role="tab"]')).map(tab => tab.id.replace('settings-tab-', ''));
+      const selected = names.includes(section) ? section : 'browse';
       next(selected === 'model' ? 'browse' : selected);
-      for (const name of ['browse', 'schedule', 'history', 'model', 'mcp', 'tasks']) {
+      for (const name of names) {
         const active = name === selected;
         byId(`settings-tab-${name}`).setAttribute('aria-selected', String(active));
         byId(`settings-tab-${name}`).tabIndex = active ? 0 : -1;
@@ -639,7 +641,7 @@
       if (selected === 'model') { byId('settings-footer-note').textContent = '模型操作立即生效；自動卸載偏好由此瀏覽器記住。'; void window.checkAiStatus(); }
     });
     GalleryApp.use('handleSettingsTabKeydown', function (_next, event) {
-      const names = ['browse', 'schedule', 'history', 'model', 'mcp', 'tasks'];
+      const names = Array.from(tabs.querySelectorAll('[role="tab"]')).map(tab => tab.id.replace('settings-tab-', ''));
       const current = names.findIndex(name => event.target.id === `settings-tab-${name}`);
       if (current < 0 || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
       event.preventDefault();
@@ -752,11 +754,11 @@
 
   async function startSmartTask() {
     if (smartTaskBusy || smartStartPending || modelActionPending || latestModelStatus?.running) return;
-    const steps = { run_local_ai: byId('ai-step-local').checked, run_reverse_search_calibrate: byId('ai-step-rev').checked, run_semantic_themes: byId('ai-step-sem').checked, run_decensor: byId('ai-step-decensor').checked };
+    const steps = { run_local_ai: byId('ai-step-local').checked, run_reverse_search_calibrate: byId('ai-step-rev').checked, run_semantic_themes: false, run_decensor: byId('ai-step-decensor').checked };
     const feedback = byId('smart-feedback');
     feedback.classList.remove('error');
     if (!Object.values(steps).some(Boolean)) { feedback.textContent = '請至少選擇一個處理步驟。'; return; }
-    const validate = [...(steps.run_local_ai ? ['ai-limit', 'ai-gen-thresh', 'ai-art-thresh'] : []), ...(steps.run_reverse_search_calibrate ? ['rev-limit', 'rev-sim'] : [])];
+    const validate = [...(steps.run_local_ai ? ['ai-limit', 'ai-art-thresh'] : []), ...(steps.run_reverse_search_calibrate ? ['rev-limit', 'rev-sim'] : [])];
     for (const id of validate) {
       const input = byId(id);
       if (input.checkValidity()) continue;
@@ -783,7 +785,7 @@
   function syncShell() {
     if (typeof state === 'undefined' || !byId('shell-library-title')) return;
     const scopeTitles = { __ALL__: '全部圖片', __ROOT__: '待整理', __FOLDERS__: '已歸檔', __SUGGESTED__: '建議歸檔' };
-    const aiOnly = byId('sel-ai').value === 'tagged';
+    const aiOnly = state.aiStatus === 'tagged';
     byId('shell-library-title').textContent = state.folder === '__ALL__' && aiOnly ? 'AI 已標記' : scopeTitles[state.folder] || state.folder;
     byId('shell-library-title').title = byId('shell-library-title').textContent;
     byId('shell-result-count').textContent = `${state.total.toLocaleString()} 張圖片${state.includeTags.length || byId('main-search').value.trim() ? '・已套用篩選' : ''}`;
@@ -821,7 +823,6 @@
         check.setAttribute('aria-checked', String(card.classList.contains('selected')));
         check.setAttribute('aria-label', `選取 ${image?.alt || '圖片'}`);
         check.tabIndex = 0;
-        activateWithKeyboard(check);
       }
       const time = card.querySelector('.card-tags > .pill[title*="時間"]');
       if (time) {
@@ -878,10 +879,11 @@
       syncShell();
       try {
         const result = await next(...args);
-        if (sequence === loadingSequence && byId('page-info').textContent.startsWith('圖片載入失敗')) showLoadError();
+        if (sequence === loadingSequence && !args[0]?.preserveOnError && byId('page-info').textContent.startsWith('圖片載入失敗')) showLoadError();
         return result;
       } catch (error) {
         if (sequence !== loadingSequence) return;
+        if (args[0]?.preserveOnError) return false;
         showLoadError();
         console.warn('Gallery images could not be loaded:', error);
       } finally {

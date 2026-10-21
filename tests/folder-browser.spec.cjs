@@ -34,7 +34,7 @@ const html = fs.readFileSync(path.join(root, 'static/index.html'), 'utf8').repla
         if (failFolders) return route.fulfill({ status: 503, contentType: 'application/json', body: '{"detail":"unavailable"}' });
         data = includeMetadata ? folders : folders.map(({ name, count }) => ({ name, count }));
       } else if (endpoint === '/api/stats') data = { total_images: 31042, root_unorganized: 0, folder_organized: 31042, ai_tagged: 100, suggested_folder_count: 0, ai_status: ai };
-      else if (endpoint === '/api/tags') data = [];
+      else if (endpoint === '/api/tags') data = {items:[], next_offset:0, has_more:false};
       else if (endpoint === '/api/images') { images.push(Object.fromEntries(url.searchParams)); data = { items: [], total: 0 }; }
       else if (endpoint === '/api/ai/status' || endpoint === '/api/reverse_search/status') data = ai;
       else if (endpoint === '/api/schedule/status') data = { running_job: false, config: { source_dirs: [], history_logs: [] } };

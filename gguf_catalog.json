@@ -1,0 +1,28 @@
+{
+  "runtime": {
+    "url": "https://github.com/leejet/stable-diffusion.cpp/releases/download/master-975-95b3090/sd-master-95b3090-bin-win-vulkan-x64.zip",
+    "path": "runtime/sd-vulkan.zip", "bytes": 29371165,
+    "sha256": "17398d07ba89c2fba21b8662db69ecdd917888373e4f82779b7599e97a6b4bd3"
+  },
+  "profiles": {
+    "klein4b": {
+      "label": "FLUX.2 klein 4B · Q8_0", "steps": 4,
+      "source": "https://huggingface.co/unsloth/FLUX.2-klein-4B-GGUF",
+      "assets": {
+        "model": {"repo": "unsloth/FLUX.2-klein-4B-GGUF", "revision": "0084d1df98e2e2137fe776d55170bc4792ec1d66", "file": "flux-2-klein-4b-Q8_0.gguf", "path": "diffusion_models/flux-2-klein-4b-Q8_0.gguf", "bytes": 4300644928, "sha256": "24a812e8f9b640e21c784164ea48571d8017ca22873696f4badeeabb006d509c"},
+        "text_encoder": {"repo": "Qwen/Qwen3-4B-GGUF", "revision": "bc640142c66e1fdd12af0bd68f40445458f3869b", "file": "Qwen3-4B-Q8_0.gguf", "path": "text_encoders/Qwen3-4B-Q8_0.gguf", "bytes": 4280404704, "sha256": "8c2f07f26af9747e41988551106f149b03eb9b5cb6df636027b6bf6278473300"},
+        "vae": {"repo": "black-forest-labs/FLUX.2-klein-4B", "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294", "file": "vae/diffusion_pytorch_model.safetensors", "path": "vae/flux2_vae.safetensors", "bytes": 168120878, "sha256": "ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04"}
+      }
+    },
+    "qwen21": {
+      "label": "Qwen-Image-2.1 · Q6_K", "steps": 40,
+      "source": "https://huggingface.co/abenzerps/Qwen-Image-2.1-Uncensored-Quantized",
+      "assets": {
+        "model": {"repo": "abenzerps/Qwen-Image-2.1-Uncensored-Quantized", "revision": "7959e658915f52274897fb573ffeda49de8dc16b", "file": "qwen-image-2.1-UC-Q6_K.gguf", "path": "diffusion_models/qwen-image-2.1-UC-Q6_K.gguf", "bytes": 5876556576, "sha256": "e14bb312109333b3d73b92ad9b9ac8b29b51f2edca1e7b86d1af1981bf1c4ee3"},
+        "text_encoder": {"repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF", "revision": "f982a07559d4a2f6c8744d840bf6fccab30eea96", "file": "Qwen3VL-8B-Instruct-Q4_K_M.gguf", "path": "text_encoders/Qwen3VL-8B-Instruct-Q4_K_M.gguf", "bytes": 5027784800, "sha256": "67d1659bfe71b89d50b45a4ad1a9e5b997e5bb16ce5da66a6a6167abd569e9e2"},
+        "vision_encoder": {"repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF", "revision": "f982a07559d4a2f6c8744d840bf6fccab30eea96", "file": "mmproj-Qwen3VL-8B-Instruct-F16.gguf", "path": "text_encoders/mmproj-Qwen3VL-8B-Instruct-F16.gguf", "bytes": 1159029824, "sha256": "ca524100ebf825c9a870db1c580d03879e0da0ab2541697e2458e64891cf9d38"},
+        "vae": {"repo": "abenzerps/Qwen-Image-2.1-Uncensored-Quantized", "revision": "7959e658915f52274897fb573ffeda49de8dc16b", "file": "vae/qwen_image_2.1_vae_bf16.safetensors", "path": "vae/qwen_image_2.1_vae_bf16.safetensors", "bytes": 675509688, "sha256": "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9"}
+      }
+    }
+  }
+}

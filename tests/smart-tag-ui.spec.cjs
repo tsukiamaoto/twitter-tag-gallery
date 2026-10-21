@@ -39,7 +39,8 @@ const html = fs.readFileSync(path.join(root, 'static/index.html'), 'utf8').repla
           ai.running = false; ai.status_message = '已停止'; data = { status: 'stopping' };
         } else throw new Error(`Unexpected mutation: ${endpoint}`);
       } else if (endpoint === '/api/stats') data = { total_images: 0, root_unorganized: 0, folder_organized: 0, ai_tagged: 0, suggested_folder_count: 0, ai_status: { ...ai } };
-      else if (endpoint === '/api/folders' || endpoint === '/api/tags') data = [];
+      else if (endpoint === '/api/folders') data = [];
+      else if (endpoint === '/api/tags') data = {items:[], next_offset:0, has_more:false};
       else if (endpoint === '/api/images') data = { items: [], total: 0 };
       else if (endpoint === '/api/runtime') data = { ai: { ...ai }, reverse: { running: false }, schedule: { ...schedule }, model: { busy: false }, active_job: {}, jobs: [] };
       else if (endpoint === '/api/ai/status') data = { ...ai };
@@ -58,7 +59,7 @@ const html = fs.readFileSync(path.join(root, 'static/index.html'), 'utf8').repla
     assert.equal(await page.locator('#ai-modal #ai-auto-unload').count(), 0);
     assert.equal(await page.locator('#btn-top-unload-model').count(), 0);
     assert.equal(await page.locator('#ai-scope').inputValue(), 'all_untagged');
-    for (const id of ['ai-step-local', 'ai-step-rev', 'ai-step-sem', 'ai-auto-move']) assert.equal(await page.locator(`#${id}`).isChecked(), true);
+    for (const id of ['ai-step-local', 'ai-step-rev', 'ai-auto-move']) assert.equal(await page.locator(`#${id}`).isChecked(), true);
     assert.equal(await page.locator('#ai-step-decensor').isChecked(), false);
     assert.equal(await page.locator('#ai-modal-live-box').isVisible(), false);
     await page.screenshot({ path: path.join(artifacts, 'smart-tagging-desktop.png') });
@@ -89,10 +90,11 @@ const html = fs.readFileSync(path.join(root, 'static/index.html'), 'utf8').repla
     await page.locator('#ai-scope').selectOption('ai_low_conf');
     await page.locator('#ai-limit').fill('13');
     await page.locator('#ai-step-rev').uncheck();
-    await page.locator('#ai-step-sem').uncheck();
+    assert.equal(await page.locator('#ai-step-sem').isChecked(), false);
+    assert.equal(await page.locator('#ai-step-sem').isVisible(), false);
     await page.locator('#ai-auto-move').uncheck();
     await page.locator('#smart-advanced > summary').click();
-    await page.locator('#ai-gen-thresh').fill('0.41');
+    assert.equal(await page.locator('#ai-gen-thresh').isVisible(), false);
     await page.locator('#ai-art-thresh').fill('0.99');
     await page.locator('#btn-start-smart-tag').click();
     assert.equal(writes.length, 0, 'Invalid numeric parameters cannot launch a job');
@@ -102,7 +104,7 @@ const html = fs.readFileSync(path.join(root, 'static/index.html'), 'utf8').repla
     await page.locator('#btn-start-smart-tag').click();
     await page.waitForFunction(() => document.querySelector('#ai-modal-live-box').hidden === false);
     assert.deepEqual(writes[0], { endpoint: '/api/ai/start', params: {
-      scope: 'ai_low_conf', limit: '13', general_thresh: '0.41', artist_thresh: '0.70', run_local_ai: 'true', run_reverse_search_calibrate: 'false', run_semantic_themes: 'false', run_decensor: 'false',
+      scope: 'ai_low_conf', limit: '13', general_thresh: '0.38', artist_thresh: '0.70', run_local_ai: 'true', run_reverse_search_calibrate: 'false', run_semantic_themes: 'false', run_decensor: 'false',
       reverse_search_limit: '30', min_similarity: '72', auto_move_to_artist_folder: 'false', auto_unload: 'false', decensor_save_mode: 'new_copy',
     } });
     assert.equal(await page.locator('#btn-start-smart-tag').isDisabled(), true);
@@ -137,7 +139,7 @@ const html = fs.readFileSync(path.join(root, 'static/index.html'), 'utf8').repla
     await page.locator('#btn-modal-unload-vram').click();
     await page.waitForFunction(() => document.querySelector('#btn-modal-load-vram').disabled === false);
     assert.equal(writes.filter(request => request.endpoint === '/api/ai/unload').at(-1).params.delete_disk_files, 'false');
-    await page.locator('#settings-model details > summary').click();
+    await page.locator('#settings-model details').filter({has:page.locator('#shell-model-cache')}).locator('summary').click();
     const beforeCancel = writes.length;
     page.once('dialog', dialog => dialog.dismiss());
     await page.locator('#btn-modal-unload-disk').click();
@@ -153,12 +155,13 @@ const html = fs.readFileSync(path.join(root, 'static/index.html'), 'utf8').repla
     failModel = false;
 
     await page.locator('#settings-tab-browse').focus();
+    const lastTab = page.locator('.settings-tabs [role="tab"]').last();
     await page.keyboard.press('End');
-    assert.equal(await page.locator('#settings-tab-tasks').getAttribute('aria-selected'), 'true');
+    assert.equal(await lastTab.getAttribute('aria-selected'), 'true');
     await page.keyboard.press('Home');
     assert.equal(await page.locator('#settings-browse').isVisible(), true);
     await page.keyboard.press('ArrowLeft');
-    assert.equal(await page.locator('#settings-tasks').isVisible(), true);
+    assert.equal(await page.locator(`#${await lastTab.getAttribute('aria-controls')}`).isVisible(), true);
     await page.keyboard.press('Escape');
     assert.equal(await page.locator('#ai-modal').isVisible(), true);
     await page.keyboard.press('Escape');

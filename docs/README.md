@@ -37,6 +37,12 @@
 | 011 資料夾搜尋與常用捷徑 | done（已套用正式服務） | [實作與驗收](done/011-folder-search-shortcuts.md) |
 | 012 資料一致性、效能與 MCP 管理 | done（已備份、遷移並驗證 Antigravity MCP） | [實作與驗收](done/012-reliability-and-mcp.md) |
 | 013 圖片單檔、多選刪除與 Del | done | [實作與驗收](done/013-image-deletion.md) |
+| 014 Shift 與左鍵拖曳多選 | done | [實作與驗收](done/014-image-selection.md) |
+| 015 圖片卡片標籤精簡與列表查詢 | done（已套用正式服務） | [實作與驗收](done/015-compact-gallery-cards.md) |
+| 016 左側標籤按捲動分批載入 | done（已確認正式服務） | [實作與驗收](done/016-sidebar-tag-pagination.md) |
+| 017 標籤選取本機儲存 | done（已確認正式服務） | [實作與驗收](done/017-tag-filter-persistence.md) |
+| 017 繪師名稱顯示與別名合併 | done（已套用正式服務） | [實作與驗收](done/017-artist-names-and-aliases.md) |
+| 018 模型與自動標籤限制 | done（Web 已套用，模型 MCP 須重連） | [實作與驗收](done/018-core-generated-tags.md) |
 
 新需求從 `todo/` 開始；正在實作或驗證的任務放在 `doing/`，通過驗收後移至 `done/`。空目錄以 `.gitkeep` 保留。
 

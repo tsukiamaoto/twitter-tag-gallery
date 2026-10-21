@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import asyncio
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import Annotated, List, Optional, Dict, Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response, HTMLResponse, JSONResponse
@@ -13,8 +13,8 @@ from starlette.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import BaseModel,Field
-from file_safety import UnsafePath,validate_source
-from query_cache import natural_order, recent_tags, newest_tag_rows
+from file_safety import UnsafePath,validate_source,gallery_path
+from gallery_artist_service import sidebar_tag_rows, recent_sidebar_tag_rows
 from background_work import BackgroundBusy, mark_interactive, exclusive_job, background_checkpoint
 from thumbnail_cache import ThumbnailCache, ThumbnailQueueFull
 
@@ -35,7 +35,7 @@ from database import (
     clear_operation_logs,
 )
 from ai_tagger import tagger_engine, preprocess_image_fast, lookup_pixiv_artists_batch
-from zh_dict import get_tag_zh, resolve_artist_folder_name, DANBOORU_ARTIST_TO_FOLDER
+from zh_dict import get_tag_display_name, resolve_artist_folder_name, DANBOORU_ARTIST_TO_FOLDER
 from renamer import (
     win_natural_key,
     generate_rename_plan_for_folder,
@@ -50,6 +50,10 @@ from renamer import (
 app = FastAPI(title="Twitter & Pixiv AI 智慧標籤圖庫系統")
 from management_api import router as management_router
 app.include_router(management_router)
+from gguf_api import router as gguf_router
+app.include_router(gguf_router)
+from image_skills_api import router as image_skills_router
+app.include_router(image_skills_router)
 
 STATIC_DIR = Path(__file__).parent / "static"
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
@@ -207,7 +211,7 @@ def index():
     if not html_file.exists():
         return HTMLResponse("<h1>UI loading...</h1>")
     html = html_file.read_text(encoding="utf-8")
-    for name in ("gallery-core.js","gallery-app.js","gallery-base.css","gallery-shell.css","gallery-shell.js","integration-settings.js"):
+    for name in ("gallery-core.js","gallery-app.js","gallery-base.css","gallery-shell.css","gallery-shell.js","integration-settings.js","gguf-models.js","gguf-models.css","image-skills.js","image-skills.css"):
         html = html.replace(f'/static/{name}"',f'/static/{name}?v={(STATIC_DIR/name).stat().st_mtime_ns}"')
     return HTMLResponse(html)
 
@@ -270,9 +274,22 @@ def api_folders():
 def api_tags(
     category: str = Query("all"),
     q: str = Query(""),
-    limit: int = Query(250),
+    limit: int = Query(250, ge=1),
+    offset: Annotated[int, Query(ge=0)] = 0,
+    paged: bool = False,
 ):
     import time as _time
+    page_limit = limit
+    if paged:
+        limit = offset + page_limit + 1  # One lookahead row determines whether more exist.
+
+    def response(items):
+        if not paged:
+            return items
+        page = items[offset:offset + page_limit]
+        return {"items": page, "next_offset": offset + len(page),
+                "has_more": len(items) > offset + page_limit}
+
     conn = get_db()
     total_all = conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]
 
@@ -308,53 +325,35 @@ def api_tags(
                     })
 
             # 同時列出最近編輯圖片中最常出現的畫師與標籤（依圖片最新 mtime 排序）
-            recent_tag_rows = recent_tags.get(("recent",limit), lambda: newest_tag_rows(conn,limit))
+            recent_tag_rows = recent_sidebar_tag_rows(conn, q, limit)
             conn.close()
             for r in recent_tag_rows:
-                zh = r["zh_name"] or get_tag_zh(r["name"], r["category"])
+                zh = get_tag_display_name(r["name"], r["category"], r["zh_name"])
                 recent_special_items.append({
                     "id": r["id"],
                     "name": r["name"],
                     "category": r["category"],
                     "zh_name": zh,
                     "count": r["post_count"],
+                    "aliases": r.get("aliases", [r["name"]]) if isinstance(r, dict) else [r["name"]],
                 })
-            return recent_special_items
+            return response(recent_special_items)
 
-    params = []
-    where = ["post_count > 0"]
-
-    if category and category != "all":
-        where.append("category = ?")
-        params.append(category)
-
-    if q.strip():
-        q_like = f"%{q.strip()}%"
-        where.append("(name LIKE ? OR zh_name LIKE ?)")
-        params.extend([q_like, q_like])
-
-    sql = f"""
-        SELECT id, name, category, zh_name, post_count
-        FROM tags
-        WHERE {' AND '.join(where)}
-        ORDER BY post_count DESC, name ASC
-        LIMIT ?
-    """
-    params.append(limit)
-    rows = conn.execute(sql, params).fetchall()
+    rows = sidebar_tag_rows(conn, category, q, limit)
     conn.close()
 
     result = list(recent_special_items)
     for r in rows:
-        zh = r["zh_name"] or get_tag_zh(r["name"], r["category"])
+        zh = get_tag_display_name(r["name"], r["category"], r["zh_name"])
         result.append({
             "id": r["id"],
             "name": r["name"],
             "category": r["category"],
             "zh_name": zh,
             "count": r["post_count"],
+            "aliases": r.get("aliases", [r["name"]]) if isinstance(r, dict) else [r["name"]],
         })
-    return result
+    return response(result)
 
 
 @app.get("/api/images")
@@ -368,10 +367,12 @@ def api_images(
     sort: str = Query("natural_asc"),
     page: int = Query(1, ge=1),
     page_size: int = Query(60, ge=10, le=200),
+    compact: bool = False,
 ):
     from gallery_query import search_images
     return search_images(include_tags, exclude_tags, folder, media_type, ai_status,
-                         q, sort, page, page_size, connect=get_db, prefetch=thumbnail_cache.prefetch)
+                         q, sort, page, page_size, connect=get_db, prefetch=thumbnail_cache.prefetch,
+                         compact=compact)
 
 
 @app.get("/api/image/{image_id}")
@@ -405,7 +406,7 @@ def api_image_detail(image_id: int):
 
     tags = []
     for tr in tag_rows:
-        zh = tr["zh_name"] or get_tag_zh(tr["name"], tr["category"])
+        zh = get_tag_display_name(tr["name"], tr["category"], tr["zh_name"])
         tags.append({
             "id": tr["id"],
             "name": tr["name"],
@@ -420,6 +421,7 @@ def api_image_detail(image_id: int):
         "rel_path": row["rel_path"],
         "full_path": str(GALLERY_ROOT / row["rel_path"]),
         "filename": row["filename"],
+        "file_missing": not (GALLERY_ROOT / row["rel_path"]).is_file(),
         "folder": row["folder"],
         "size_kb": round(row["size_bytes"] / 1024, 1),
         "media_type": row["media_type"],
@@ -791,7 +793,7 @@ def api_ai_start(
     reverse_search_limit: int = Query(30),
     min_similarity: float = Query(72.0),
     saucenao_api_key: Optional[str] = Query(None),
-    run_semantic_themes: bool = Query(True),
+    run_semantic_themes: bool = Query(False),
     run_decensor: bool = Query(False),
     decensor_save_mode: str = Query("new_copy"),
 ):
@@ -913,12 +915,21 @@ def api_pixiv_lookup(
 @app.post("/api/open_explorer/{image_id}")
 def api_open_explorer(image_id: int):
     conn = get_db()
-    row = conn.execute("SELECT rel_path FROM images WHERE id = ?", (image_id,)).fetchone()
-    conn.close()
+    try:
+        row = conn.execute("SELECT rel_path FROM images WHERE id = ?", (image_id,)).fetchone()
+    finally:
+        conn.close()
     if not row:
         raise HTTPException(status_code=404, detail="Image not found")
-    full_path = str(GALLERY_ROOT / row["rel_path"]).replace("/", "\\")
-    subprocess.Popen(["explorer.exe", f"/select,{full_path}"])
+    path = gallery_path(GALLERY_ROOT, row["rel_path"])
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="圖片檔案不存在，可能已移動或刪除，請重新掃描圖庫")
+    full_path = str(path)
+    try:
+        # Keep /select, separate so Windows quotes only the path when it has spaces.
+        subprocess.Popen(["explorer.exe", "/select,", full_path])
+    except OSError as error:
+        raise HTTPException(status_code=503, detail=f"無法開啟檔案總管：{error}") from error
     return {"status": "opened", "path": full_path}
 
 
@@ -951,16 +962,8 @@ def api_semantic_expand(q: str = Query(...)):
 
 @app.post("/api/semantic/apply_themes")
 def api_semantic_apply_themes():
-    res = apply_semantic_theme_tags_batch()
-    log_operation(
-        category="semantic",
-        action="語意主題叢集聚合",
-        summary=f"高階語意主題自動聚合完成，新增/更新 {res.get('theme_links_added', 0)} 筆主題標籤關聯",
-        status="success",
-        affected_count=res.get("theme_links_added", 0),
-        details=res,
-    )
-    return res
+    from tag_policy import POLICY_MESSAGE
+    raise HTTPException(410, POLICY_MESSAGE)
 
 
 @app.post("/api/semantic/gemini_flash")

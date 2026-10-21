@@ -14,7 +14,7 @@ test('tag selection updates the cached sidebar without another tag request', asy
   let requests = 0;
   f.context.fetch = async () => {
     requests++;
-    return { json: async () => [{name:'artist-a', zh_name:'畫師甲', category:'artist', count:10}] };
+    return { ok: true, json: async () => ({items:[{name:'artist-a', zh_name:'畫師甲', category:'artist', count:10}], next_offset:1, has_more:false}) };
   };
   f.run('loadImages = () => {}');
   await f.run('loadTags()');
@@ -32,12 +32,93 @@ test('late tag-category responses cannot overwrite the current sidebar', async (
   f.context.fetch = () => new Promise(resolve => pending.push(resolve));
   const old = f.run('loadTags()');
   const current = f.run("state.tagCategory = 'artist'; loadTags()");
-  pending[1]({json: async () => [{name:'current', category:'artist', count:10}]});
+  pending[1]({ok:true, json: async () => ({items:[{name:'current', category:'artist', count:10}], next_offset:1, has_more:false})});
   await current;
-  pending[0]({json: async () => [{name:'outdated', category:'general', count:20}]});
+  pending[0]({ok:true, json: async () => ({items:[{name:'outdated', category:'general', count:20}], next_offset:1, has_more:false})});
   await old;
   assert.match(f.element('sidebar-tag-list').innerHTML, /current/);
   assert.doesNotMatch(f.element('sidebar-tag-list').innerHTML, /outdated/);
+});
+
+test('artist rows show one name and alias clicks share one removable filter', () => {
+  const f = fixture();
+  f.run('loadImages = () => {}; state.includeTags = ["hara_(harayutaka)", "hara"];');
+  f.run(`renderTagList([
+    {name:'hara', zh_name:'現有繪師：Hara', category:'artist', count:4, aliases:['hara','hara_(harayutaka)']},
+    {name:'blue', zh_name:'藍色', category:'general', count:2}
+  ])`);
+  const sidebar = f.element('sidebar-tag-list').innerHTML;
+  assert.doesNotMatch(sidebar, /現有繪師/);
+  assert.equal((sidebar.match(/class="tag-label-en"/g) || []).length, 1);
+  assert.match(sidebar, /class="tag-label-zh">Hara<\/span>/);
+  assert.equal(f.run('state.includeTags.join(",")'), 'hara');
+  assert.match(f.element('active-filters-bar').innerHTML, />Hara /);
+  f.run("toggleIncludeTag('hara_(harayutaka)')");
+  assert.equal(f.run('state.includeTags.length'), 0);
+  f.run("toggleIncludeTag('hara_(harayutaka)')");
+  assert.equal(f.run('state.includeTags.join(",")'), 'hara');
+  f.run('clearTagFilters()');
+  assert.doesNotMatch(f.element('sidebar-tag-list').innerHTML, /aria-pressed="true"/);
+});
+
+test('sidebar tags load a bounded first batch and only one next page at a time', async () => {
+  const f = fixture(), requests = [], pending = [];
+  f.context.fetch = (url, options) => {
+    requests.push({url:new URL(url, 'http://gallery.test'), options});
+    return new Promise(resolve => pending.push(resolve));
+  };
+  const initial = f.run('loadTags()');
+  assert.equal(requests[0].url.searchParams.get('limit'), '40');
+  assert.equal(requests[0].url.searchParams.get('offset'), '0');
+  assert.equal(requests[0].url.searchParams.get('paged'), 'true');
+  pending[0]({ok:true,json:async()=>({items:[{name:'first',category:'general',count:5}],next_offset:1,has_more:true})});
+  await initial;
+  assert.equal(requests.length, 1, 'No eager request for later pages');
+  const next = f.run('loadMoreTags()');
+  await f.run('loadMoreTags()');
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].url.searchParams.get('offset'), '1');
+  pending[1]({ok:true,json:async()=>({items:[{name:'second',category:'general',count:4}],next_offset:2,has_more:false})});
+  await next;
+  assert.equal(f.run("sidebarTags.map(t=>t.name).join(',')"), 'first,second');
+  await f.run('loadMoreTags()');
+  assert.equal(requests.length, 2, 'Stop at the end of the list');
+});
+
+test('a failed later tag page keeps loaded tags and retries the same offset', async () => {
+  const f = fixture(), offsets = [];
+  let failed = false;
+  f.context.fetch = async url => {
+    const offset = Number(new URL(url, 'http://gallery.test').searchParams.get('offset'));
+    offsets.push(offset);
+    if (offset === 1 && !failed) { failed = true; return {ok:false}; }
+    return {ok:true,json:async()=>({items:[{name:offset ? 'second' : 'first',category:'general',count:1}], next_offset:offset+1,has_more:offset===0})};
+  };
+  await f.run('loadTags()');
+  assert.equal(await f.run('loadMoreTags()'), false);
+  assert.equal(f.run('sidebarTags[0].name'), 'first');
+  assert.match(f.element('tag-list-status').innerHTML, /重試/);
+  await f.run('loadMoreTags()');
+  assert.deepEqual(offsets, [0,1,1]);
+  assert.equal(f.run('sidebarTags.length'), 2);
+});
+
+test('a stale appended tag page cannot join a new search or clear its loading state', async () => {
+  const f = fixture(), pending = [];
+  f.context.fetch = () => new Promise(resolve => pending.push(resolve));
+  const initial = f.run('loadTags()');
+  pending[0]({ok:true,json:async()=>({items:[{name:'old-first',category:'general'}],next_offset:1,has_more:true})});
+  await initial;
+  const old = f.run('loadMoreTags()');
+  f.element('tag-search-input').value = 'new';
+  const current = f.run('loadTags()');
+  pending[1]({ok:true,json:async()=>({items:[{name:'old-next',category:'general'}],next_offset:2,has_more:false})});
+  await old;
+  assert.equal(f.run('tagPaging.loading'), true);
+  pending[2]({ok:true,json:async()=>({items:[{name:'new-match',category:'general'}],next_offset:1,has_more:false})});
+  await current;
+  assert.equal(f.run("sidebarTags.map(t=>t.name).join(',')"), 'new-match');
+  assert.equal(f.run('tagPaging.loading'), false);
 });
 
 function fixture(saved = '{}') {
@@ -51,7 +132,8 @@ function fixture(saved = '{}') {
         classList: { contains: c => classes.has(c), add: c => classes.add(c), remove: c => classes.delete(c),
           toggle(c, value) { if (value) classes.add(c); else classes.delete(c); } },
         setAttribute() {}, removeAttribute() {}, reportValidity: () => true,
-        focus() {}, getClientRects: () => [1]
+        focus() {}, getClientRects: () => [1],
+        insertAdjacentHTML(_position, markup) { element('sidebar-tag-list').innerHTML += markup; }
       });
     }
     return elements.get(id);
@@ -81,6 +163,28 @@ function fixture(saved = '{}') {
   return { run, context, element, images, stored: () => JSON.parse(saved),
     tick() { const callbacks = [...timers.values()]; timers.clear(); callbacks.forEach(fn => fn()); } };
 }
+
+test('folder action reveals the current image and reports missing files or network failures', async () => {
+  const f = fixture();
+  const requests = [], alerts = [];
+  f.context.alert = message => alerts.push(message);
+  f.context.fetch = async (url, options) => {
+    requests.push([url, options.method]);
+    return { ok: true };
+  };
+  await f.run('openInExplorer()');
+  assert.equal(requests.length, 0);
+  f.run('currentDetailData = { id: 42 };');
+  await f.run('openInExplorer()');
+  assert.deepEqual(requests, [['/api/open_explorer/42', 'POST']]);
+  assert.deepEqual(alerts, []);
+  f.context.fetch = async () => ({ ok: false, json: async () => ({ detail: '圖片檔案不存在' }) });
+  await f.run('openInExplorer()');
+  assert.match(alerts.pop(), /圖片檔案不存在/);
+  f.context.fetch = async () => { throw Error('連線中斷'); };
+  await f.run('openInExplorer()');
+  assert.match(alerts.pop(), /連線中斷/);
+});
 
 function key(f, overrides = {}) {
   const event = { key: 'ArrowRight', target: { closest: () => null }, preventDefault() { this.prevented = true; }, ...overrides };
@@ -149,9 +253,9 @@ test('tags toggle on and off; clearing tags preserves folder and search', () => 
   const f = fixture();
   f.run('loadImages = () => {}; loadTags = () => {};');
   f.run("toggleIncludeTag('a'); toggleIncludeTag('b'); toggleIncludeTag('a');");
-  assert.equal(f.run("state.includeTags.join(',')"), 'b');
+  assert.equal(f.run("state.includeTags.join(',')"), '最近,b');
   f.run("toggleIncludeTag('a')");
-  assert.equal(f.run("state.includeTags.join(',')"), 'b,a');
+  assert.equal(f.run("state.includeTags.join(',')"), '最近,b,a');
   f.element('main-search').value = 'kept search';
   f.run("state.folder = 'kept folder'; clearTagFilters()");
   assert.equal(f.run('state.folder'), 'kept folder');
@@ -172,6 +276,33 @@ test('out-of-order image requests cannot replace newer results', async () => {
   await first;
   assert.equal(f.run('state.items[0].id'), 2);
   assert.equal(f.run('state.page'), 2);
+});
+
+test('gallery list requests compact card data', async () => {
+  const f = fixture();
+  let requested;
+  f.context.fetch = async url => {
+    requested = new URL(url, 'http://gallery.test/');
+    return { ok: true, json: async () => ({ items: [], total: 0 }) };
+  };
+  f.run('renderGrid = () => {}; renderPagination = () => {};');
+  await f.run('loadImages()');
+  assert.equal(requested.searchParams.get('compact'), 'true');
+});
+
+test('cards show one artist while other tags remain available in details', () => {
+  const f = fixture();
+  f.context.picture = { id: 1, filename: 'card.jpg', rel_path: 'card.jpg', folder: '',
+    media_type: 'image', rating: 'explicit', mtime: 123, suggested_folder: '',
+    artists: [{name:'artist-a', zh_name:'畫師甲'}, {name:'artist-b', zh_name:'畫師乙'}],
+    characters: [{name:'hidden-character'}], copyrights: [{name:'hidden-copyright'}],
+    preview_tags: [{name:'hidden-general'}] };
+  f.run('state.items = [picture]; renderGrid();');
+  const card = f.element('image-grid').innerHTML;
+  assert.equal((card.match(/class="pill artist"/g) || []).length, 1);
+  assert.match(card, /畫師甲/);
+  assert.match(card, /R-18/);
+  assert.doesNotMatch(card, /畫師乙|hidden-character|hidden-copyright|hidden-general/);
 });
 
 test('preview delay cancels cleanly and ignores late image loads; videos use thumbnails', () => {
@@ -283,7 +414,7 @@ test('Delete uses the current detail, all selected pages, or the focused card', 
   key(f, { key: 'Delete' });
   assert.equal(f.run('JSON.stringify(deleted)'), '[[1,99]]');
   f.element('detail-modal').classList.add('open');
-  f.run('state.detailIndex = 1');
+  f.run('state.detailIndex = 0; state.detailImageId = 2');
   key(f, { key: 'Delete' });
   assert.equal(f.run('JSON.stringify(deleted)'), '[[1,99],[2]]');
   f.element('detail-modal').classList.remove('open');
@@ -328,7 +459,9 @@ test('cancelled deletion sends no request; failures preserve selection and permi
 
 test('successful delete updates selection and detail, prevents duplicate submits, and supports restore', async () => {
   const f = fixture();
-  f.run("loadImages = loadStats = loadFolders = loadTags = async () => {}; state.items = [{id:1,filename:'a.jpg'},{id:2,filename:'b.jpg'}]; state.total = 2; state.selectedIds = new Set([1,2,99]); state.detailIndex = 0;");
+  f.run('renderGrid = () => {}');
+  f.run('refreshDetailView = async id => { state.detailImageId = id; }');
+  f.run("loadImages = loadStats = loadFolders = loadTags = async () => {}; state.items = [{id:1,filename:'a.jpg'},{id:2,filename:'b.jpg'}]; state.total = 2; state.selectedIds = new Set([1,2,99]); state.detailIndex = 0; state.detailImageId = 1;");
   f.element('detail-modal').classList.add('open');
   f.context.window.confirm = () => true;
   let resolveDelete;
@@ -341,10 +474,134 @@ test('successful delete updates selection and detail, prevents duplicate submits
   await pending;
   assert.equal(f.run('JSON.stringify([...state.selectedIds])'), '[2,99]');
   assert.equal(f.run('state.items[0].id'), 2);
-  assert.equal(f.element('detail-modal').classList.contains('open'), false);
+  assert.equal(f.element('detail-modal').classList.contains('open'), true);
+  assert.equal(f.run('state.detailImageId'), 2);
   assert.equal(f.element('btn-restore-deleted').hidden, false);
   f.context.fetch = async () => ({ok:true,json:async () => ({restored:1})});
   await f.run('restoreLastDeletedImages()');
   assert.match(f.element('file-delete-status').textContent, /已復原 1 個檔案/);
   assert.equal(f.element('btn-restore-deleted').hidden, true);
+});
+
+test('single deletion targets the displayed ID after a new copy or list reorder', async () => {
+  const f = fixture();
+  f.run('renderGrid = () => {}');
+  f.run('refreshDetailView = async id => { state.detailImageId = id; }');
+  f.run("loadImages = loadStats = loadFolders = loadTags = async () => {}; state.items = [{id:1,filename:'other.jpg'}]; state.detailIndex = 0; state.detailImageId = 7; currentDetailData = {id:7,filename:'copy.jpg'};");
+  f.element('detail-modal').classList.add('open');
+  let payload, confirmation;
+  f.context.window.confirm = message => { confirmation = message; return true; };
+  f.context.fetch = async (_url, options) => {
+    payload = JSON.parse(options.body);
+    return {ok:true,json:async () => ({deleted:1,deleted_ids:[7],restorable:0,missing_count:1})};
+  };
+  await f.run('deleteCurrentImage()');
+  assert.deepEqual(payload.image_ids, [7]);
+  assert.match(confirmation, /copy.jpg/);
+  assert.doesNotMatch(confirmation, /other.jpg/);
+  assert.equal(f.run('state.items[0].id'), 1);
+  assert.equal(f.element('btn-restore-deleted').hidden, true);
+  assert.match(f.element('file-delete-status').textContent, /已移除 1 筆圖片紀錄與標籤連結/);
+});
+
+test('missing detail renders a clear message and a removed record closes the viewer', async () => {
+  const f = fixture();
+  f.element('detail-modal').classList.add('open');
+  f.context.fetch = async () => ({ok:true,json:async () => ({id:7,filename:'gone.jpg',file_missing:true,size_kb:1,tags:[]})});
+  await f.run('refreshDetailView(7)');
+  assert.match(f.element('detail-media-container').textContent, /檔案不存在/);
+  assert.equal(f.run('state.detailImageId'), 7);
+  f.run('loadImages = loadStats = loadFolders = loadTags = async () => {}');
+  f.context.fetch = async () => ({ok:false,status:404,json:async () => ({detail:'Image not found'})});
+  await f.run('refreshDetailView(7)');
+  assert.equal(f.element('detail-modal').classList.contains('open'), false);
+  assert.equal(f.run('currentDetailData'), null);
+});
+
+test('delete removes cards before refill and old or stale responses cannot bring them back', async () => {
+  const f = fixture();
+  f.run("renderGrid = () => {}; loadStats = loadFolders = loadTags = async () => {}; state.items = [{id:1,filename:'a.jpg'},{id:2,filename:'b.jpg'}]; state.total = 2; state.selectedIds.add(1)");
+  f.context.window.confirm = () => true;
+  const pending = [];
+  f.context.fetch = (url, options) => {
+    if (url === '/api/images/delete') return Promise.resolve({ok:true,json:async () => ({deleted:1,deleted_ids:[1],restorable:0})});
+    assert.equal(options.cache, 'no-store');
+    return new Promise(resolve => pending.push(resolve));
+  };
+  const old = f.run('loadImages()');
+  const deletion = f.run('deleteSelectedImages()');
+  while (pending.length < 2) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.run('state.items.map(item => item.id).join()'), '2', 'Card disappears while refill is pending');
+  assert.match(f.element('file-delete-status').textContent, /已刪除 1/);
+  pending[0]({ok:true,json:async () => ({items:[{id:1},{id:2}],total:2})});
+  await old;
+  assert.equal(f.run('state.items.map(item => item.id).join()'), '2');
+  pending[1]({ok:true,json:async () => ({items:[{id:1},{id:2}],total:2})});
+  while (pending.length < 3) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.run('state.items.map(item => item.id).join()'), '2', 'Stale post-delete response is filtered');
+  pending[2]({ok:true,json:async () => ({items:[{id:2}],total:1})});
+  await deletion;
+  assert.equal(f.run('state.total'), 1);
+});
+
+test('detail deletion advances across page boundaries, falls back to previous, and closes only when empty', async () => {
+  const scenarios = [
+    { items:[1,2], id:2, page:1, total:2, nextItems:[1], expected:1 },
+    { items:[1], id:1, page:1, total:1, nextItems:[], expected:null },
+    { items:[1,2,3,4,5,6,7,8,9,10], id:10, page:1, total:11, nextItems:[1,2,3,4,5,6,7,8,9,11], expected:11 },
+    { items:[11], id:11, page:2, total:11, nextItems:[1,2,3,4,5,6,7,8,9,10], expected:10 },
+  ];
+  for (const scenario of scenarios) {
+    const f = fixture();
+    f.context.scenario = scenario;
+    f.run("renderGrid = () => {}; loadStats = loadFolders = loadTags = async () => {}; state.items = scenario.items.map(id => ({id,filename:id+'.jpg'})); state.total = scenario.total; state.page = scenario.page; state.pageSize = 10; state.detailImageId = scenario.id; refreshDetailView = async id => { state.detailImageId = id; }; loadImages = async () => { state.items = scenario.nextItems.map(id => ({id,filename:id+'.jpg'})); state.total = scenario.total - 1; return true; };");
+    f.element('detail-modal').classList.add('open');
+    f.context.window.confirm = () => true;
+    f.context.fetch = async () => ({ok:true,json:async () => ({deleted:1,deleted_ids:[scenario.id],restorable:0})});
+    await f.run('deleteCurrentImage()');
+    assert.equal(f.run('state.detailImageId'), scenario.expected);
+    assert.equal(f.element('detail-modal').classList.contains('open'), scenario.expected !== null);
+  }
+});
+
+test('Shift selects a forward or backward range in display order and preserves other selections', () => {
+  const f = fixture();
+  f.run('state.items = [8,2,9,4].map(id => ({id})); state.selectedIds.add(99); toggleSelect(2); toggleSelect(4, {shiftKey:true});');
+  assert.equal(f.run('JSON.stringify([...state.selectedIds])'), '[99,2,9,4]');
+  f.run('toggleSelect(8, {shiftKey:true})');
+  assert.equal(f.run('state.selectedIds.has(8)'), true);
+  f.run('clearSelection(); toggleSelect(4); toggleSelect(2, {shiftKey:true})');
+  assert.equal(f.run('JSON.stringify([...state.selectedIds])'), '[4,2,9]');
+});
+
+test('Shift without a visible anchor selects only the target and normal click still toggles', () => {
+  const f = fixture();
+  f.run('state.items = [{id:1}]; toggleSelect(1); state.items = [{id:4},{id:5}]; toggleSelect(5, {shiftKey:true});');
+  assert.equal(f.run('JSON.stringify([...state.selectedIds])'), '[1,5]');
+  f.run('toggleSelect(5)');
+  assert.equal(f.run('JSON.stringify([...state.selectedIds])'), '[1]');
+});
+
+test('paint segment intersection catches fast sweeps without selecting unrelated corners', () => {
+  const f = fixture();
+  assert.equal(f.run('selectionSegmentHitsRect({x:0,y:10},{x:100,y:10},{left:40,right:60,top:0,bottom:20})'), true);
+  assert.equal(f.run('selectionSegmentHitsRect({x:100,y:10},{x:0,y:10},{left:40,right:60,top:0,bottom:20})'), true);
+  assert.equal(f.run('selectionSegmentHitsRect({x:0,y:0},{x:100,y:100},{left:0,right:20,top:80,bottom:100})'), false);
+  assert.equal(f.run('selectionSegmentHitsRect({x:5,y:5},{x:5,y:5},{left:0,right:10,top:0,bottom:10})'), true);
+});
+
+test('paint can reverse over visited cards without flickering while still inside one card', () => {
+  const f = fixture();
+  f.element('gallery-scroll').getBoundingClientRect = () => ({left:0,right:100,top:0,bottom:20});
+  f.element('image-grid').querySelectorAll = () => Array.from({length:5}, (_, index) => ({
+    id:`card-${index+1}`, getBoundingClientRect:() => ({left:index*10,right:index*10+8,top:0,bottom:10})
+  }));
+  f.run('state.items = [1,2,3,4,5].map(id => ({id})); state.selectedIds.add(1); selectionPointer = {active:true,select:true,last:{x:5,y:5},visited:new Set([1]),inside:new Set([1])}; paintSelectionTo({x:45,y:5});');
+  assert.equal(f.run('JSON.stringify([...state.selectedIds])'), '[1,2,3,4,5]');
+  f.run('paintSelectionTo({x:25,y:5})');
+  assert.equal(f.run('JSON.stringify([...state.selectedIds])'), '[1,2,5]');
+  f.run('paintSelectionTo({x:26,y:6}); paintSelectionTo({x:25,y:5})');
+  assert.equal(f.run('JSON.stringify([...state.selectedIds])'), '[1,2,5]');
+  f.run('paintSelectionTo({x:45,y:5})');
+  assert.equal(f.run('JSON.stringify([...state.selectedIds])'), '[1,2,4]');
 });

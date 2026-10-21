@@ -1333,7 +1333,7 @@ def calibrate_image_tags_in_db(
             cur = conn.execute(
                 """
                 DELETE FROM image_tags
-                WHERE image_id = ?
+                WHERE image_id = ? AND source != 'manual'
                   AND tag_id IN (SELECT id FROM tags WHERE name = ? OR zh_name = ?)
                 """,
                 (image_id, tname.strip(), tname.strip()),
@@ -1454,7 +1454,7 @@ def apply_danbooru_posts_batch_to_db(
                     has_verified_copyright=flags[2],
                 )
             for tname, tcat, tconf, tsrc in t_list:
-                tid = ensure_tag(c, tag_cache, tname, tcat)
+                tid = ensure_tag(c, tag_cache, tname, tcat, source=tsrc)
                 if tid > 0:
                     links.append((iid, tid, tconf, tsrc))
                     if tname in cjk_aliases:
@@ -1474,6 +1474,7 @@ def apply_danbooru_posts_batch_to_db(
                 ON CONFLICT(image_id, tag_id) DO UPDATE SET
                 confidence = MAX(image_tags.confidence, excluded.confidence),
                 source = CASE
+                        WHEN image_tags.source = 'manual' THEN image_tags.source
                     WHEN excluded.source IN ('danbooru', 'pixiv', 'saucenao', 'iqdb', 'twitter', 'gemini_mcp') THEN excluded.source
                     ELSE image_tags.source
                 END
@@ -1859,7 +1860,7 @@ def reverse_search_and_tag_image(
             )
             links = []
             for tname, tcat, tconf, tsrc in raw_tags_to_add:
-                tid = ensure_tag(c, tag_cache, tname, tcat)
+                tid = ensure_tag(c, tag_cache, tname, tcat, source=tsrc)
                 if tid > 0:
                     links.append((image_id, tid, tconf, tsrc))
                     if tname in cjk_artist_aliases:
@@ -1875,6 +1876,7 @@ def reverse_search_and_tag_image(
                     ON CONFLICT(image_id, tag_id) DO UPDATE SET
                     confidence = MAX(image_tags.confidence, excluded.confidence),
                     source = CASE
+                        WHEN image_tags.source = 'manual' THEN image_tags.source
                         WHEN excluded.source IN ('danbooru', 'pixiv', 'saucenao', 'iqdb', 'twitter', 'gemini_mcp') THEN excluded.source
                         ELSE image_tags.source
                     END
@@ -1931,7 +1933,7 @@ def reverse_search_and_tag_image(
                 from processing_state import record,AI_MODEL_VERSION
                 ai_links = []
                 for tname, cat, conf in preds:
-                    tid = ensure_tag(c, tag_cache2, tname, cat)
+                    tid = ensure_tag(c, tag_cache2, tname, cat, source="ai")
                     if tid > 0:
                         ai_links.append((image_id, tid, round(conf, 4), "ai"))
                 if ai_links:

@@ -276,6 +276,7 @@ def main():
                     ON CONFLICT(image_id, tag_id) DO UPDATE SET
                     confidence = MAX(image_tags.confidence, excluded.confidence),
                     source = CASE
+                        WHEN image_tags.source = 'manual' THEN image_tags.source
                         WHEN excluded.source IN ('danbooru', 'pixiv', 'saucenao', 'iqdb', 'twitter', 'gemini_mcp', 'filename') THEN excluded.source
                         ELSE image_tags.source
                     END

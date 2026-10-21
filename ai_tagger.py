@@ -203,15 +203,7 @@ class AITaggerEngine:
         results: List[Tuple[str, str, float]] = []
         suggested_folder: Optional[str] = None
 
-        # 1. Pick top Rating
-        if len(self.rating_indices) > 0:
-            r_probs = probs[self.rating_indices]
-            best_r_idx = self.rating_indices[int(np.argmax(r_probs))]
-            r_tag = self.idx_to_tag.get(str(best_r_idx))
-            if r_tag:
-                results.append((r_tag, "rating", float(probs[best_r_idx])))
-
-        # 2. Pick ONLY top-1 Artist prediction if confidence >= artist_thresh (floor 0.65)
+        # Pick only core identities; general/rating predictions are not persisted.
         if len(self.artist_indices) > 0:
             a_probs = probs[self.artist_indices]
             best_pos = int(np.argmax(a_probs))
@@ -228,10 +220,9 @@ class AITaggerEngine:
                             suggested_folder = resolve_artist_folder_name(a_tag)
 
         # 3. Pick Character, Copyright, General, Meta
-        min_t = min(general_thresh, character_thresh, copyright_thresh)
+        min_t = min(character_thresh, copyright_thresh)
         candidate_indices = np.where(probs >= min_t)[0]
 
-        gen_list = []
         for idx in candidate_indices:
             idx_str = str(int(idx))
             tname = self.idx_to_tag.get(idx_str)
@@ -245,12 +236,6 @@ class AITaggerEngine:
                 results.append((tname, "character", p))
             elif cat == "copyright" and p >= copyright_thresh:
                 results.append((tname, "copyright", p))
-            elif cat in ("general", "meta") and p >= general_thresh:
-                gen_list.append((tname, "general", p))
-
-        # Keep top 35 general tags sorted by confidence
-        gen_list.sort(key=lambda x: x[2], reverse=True)
-        results.extend(gen_list[:35])
 
         return results, suggested_folder
 
@@ -331,7 +316,7 @@ class AITaggerEngine:
         reverse_search_limit: int = 30,
         min_similarity: float = 72.0,
         saucenao_api_key: Optional[str] = None,
-        run_semantic_themes: bool = True,
+        run_semantic_themes: bool = False,
         run_decensor: bool = False,
         decensor_save_mode: str = "new_copy",
     ) -> Dict[str, Any]:
@@ -441,7 +426,7 @@ class AITaggerEngine:
         reverse_search_limit: int = 30,
         min_similarity: float = 72.0,
         saucenao_api_key: Optional[str] = None,
-        run_semantic_themes: bool = True,
+        run_semantic_themes: bool = False,
         run_decensor: bool = False,
         decensor_save_mode: str = "new_copy",
     ):
@@ -675,7 +660,7 @@ class AITaggerEngine:
                                 c.execute("DELETE FROM image_tags WHERE image_id=? AND source='ai'",(iid,))
                             db_links = []
                             for iid, tname, cat, conf in entries_snapshot:
-                                tid = ensure_tag(c, tag_cache, tname, cat)
+                                tid = ensure_tag(c, tag_cache, tname, cat, source="ai")
                                 if tid > 0:
                                     db_links.append((iid, tid, round(conf, 4), "ai"))
                             if db_links:
@@ -901,17 +886,7 @@ class AITaggerEngine:
             # =========================================================================
             # 階段 ③：語意相關性主題聚合 & 自動建立繪師資料夾歸檔
             # =========================================================================
-            if run_semantic_themes and not self.stop_requested:
-                self.status_message = (
-                    f"[3/3 語意主題聚合與歸檔] 整體進度：{self.processed_count:,} / {self.total_target:,} — 正在聚合相關性主題標籤..."
-                )
-                try:
-                    from semantic_engine import apply_semantic_theme_tags_batch
-                    apply_semantic_theme_tags_batch()
-                except Exception:
-                    pass
-                self.processed_count = self.total_target
-
+            # Generated theme tags are disabled; continue directly to file actions.
             decensored_count = 0
             if run_decensor and not self.stop_requested:
                 try:
@@ -1275,7 +1250,7 @@ def lookup_pixiv_artists_batch(
                 img_ids = pid_to_img_ids.get(pid, [])
                 user_name = body.get("userName")
                 if user_name:
-                    tid_artist = ensure_tag(c, tag_cache, user_name, "artist")
+                    tid_artist = ensure_tag(c, tag_cache, user_name, "artist", source="pixiv")
                     sug_folder = resolve_artist_folder_name(user_name)
                     for iid in img_ids:
                         if tid_artist > 0:
@@ -1289,7 +1264,8 @@ def lookup_pixiv_artists_batch(
                 for t_item in tags_obj:
                     t_str = t_item.get("tag")
                     if t_str and t_str not in ("R-18", "オリジナル"):
-                        tid_t = ensure_tag(c, tag_cache, t_str, "general")
+                        from reverse_search import get_known_tag_category
+                        tid_t = ensure_tag(c, tag_cache, t_str, get_known_tag_category(t_str), source="pixiv")
                         if tid_t > 0:
                             for iid in img_ids:
                                 links.append((iid, tid_t, 1.0, "pixiv"))
@@ -1298,7 +1274,7 @@ def lookup_pixiv_artists_batch(
             for pid, clue in google_web_rescued.items():
                 img_ids = pid_to_img_ids.get(pid, [])
                 for art_name in clue.get("artists", []):
-                    tid_artist = ensure_tag(c, tag_cache, art_name, "artist")
+                    tid_artist = ensure_tag(c, tag_cache, art_name, "artist", source="pixiv")
                     sug_folder = resolve_artist_folder_name(art_name)
                     for iid in img_ids:
                         if tid_artist > 0:
@@ -1308,7 +1284,7 @@ def lookup_pixiv_artists_batch(
                             if auto_move_to_artist_folder and img_id_to_folder.get(iid, "") == "":
                                 pending_moves.setdefault(sug_folder, []).append(iid)
                 for t_name, t_cat in clue.get("tags", []):
-                    tid_t = ensure_tag(c, tag_cache, t_name, t_cat)
+                    tid_t = ensure_tag(c, tag_cache, t_name, t_cat, source="pixiv")
                     if tid_t > 0:
                         for iid in img_ids:
                             links.append((iid, tid_t, 0.92, "pixiv"))

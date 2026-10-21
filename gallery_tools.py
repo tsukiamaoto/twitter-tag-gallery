@@ -31,6 +31,7 @@ from reverse_search import (
 )
 from gallery_service import move_images_to_folder
 from background_work import exclusive_job
+from tag_policy import reject_generated_details, summary as tag_policy_summary
 
 def tool_gallery_get_overview() -> Dict[str, Any]:
     conn = get_db()
@@ -56,6 +57,7 @@ def tool_gallery_get_overview() -> Dict[str, Any]:
         "ai_tagged": ai_cnt,
         "top_artists": top_artists,
         "top_tags": top_general,
+        "tag_policy": tag_policy_summary(),
     }
 
 
@@ -97,62 +99,20 @@ def tool_gallery_list_untranslated_tags(
 def tool_gallery_apply_gemini_enrichments(
     translations: Optional[Dict[str, str]] = None,
     semantic_theme_groups: Optional[List[Dict[str, Any]]] = None,
-    auto_cluster_builtin_themes: bool = True,
+    auto_cluster_builtin_themes: bool = False,
 ) -> Dict[str, Any]:
+    reject_generated_details(semantic_theme_groups, auto_cluster_builtin_themes)
     conn = get_db()
-    tag_cache: Dict[str, int] = {}
-    for r in conn.execute("SELECT id, name FROM tags"):
-        tag_cache[r["name"]] = r["id"]
-
-    tr_count = 0
-    theme_img_links = 0
-
-    with conn:
-        if translations:
-            for eng_name, zh_val in translations.items():
-                cur = conn.execute(
-                    "UPDATE tags SET zh_name = ? WHERE name = ?",
-                    (zh_val.strip(), eng_name.strip()),
-                )
-                tr_count += cur.rowcount
-
-        if semantic_theme_groups:
-            for group in semantic_theme_groups:
-                theme_name = group.get("theme_name", "").strip()
-                member_tags = [m.strip() for m in group.get("member_tags", []) if m.strip()]
-                if not theme_name or not member_tags:
-                    continue
-                placeholders = ",".join(["?"] * len(member_tags))
-                img_rows = conn.execute(
-                    f"""
-                    SELECT DISTINCT it.image_id
-                    FROM image_tags it
-                    JOIN tags t ON t.id = it.tag_id
-                    WHERE t.name IN ({placeholders})
-                    """,
-                    member_tags,
-                ).fetchall()
-                if img_rows:
-                    tid = ensure_tag(conn, tag_cache, theme_name, "general")
-                    conn.execute("UPDATE tags SET zh_name = ? WHERE id = ?", (theme_name, tid))
-                    conn.executemany(
-                        "INSERT OR IGNORE INTO image_tags (image_id, tag_id, confidence, source) VALUES (?, ?, 1.0, 'gemini_mcp')",
-                        [(r["image_id"], tid) for r in img_rows],
-                    )
-                    theme_img_links += len(img_rows)
-
-        refresh_tag_counts(conn)
-    conn.close()
-
-    builtin_res = {}
-    if auto_cluster_builtin_themes:
-        builtin_res = apply_semantic_theme_tags_batch()
-
-    return {
-        "custom_translations_updated": tr_count,
-        "custom_theme_links_added": theme_img_links,
-        "builtin_clusters": builtin_res,
-    }
+    try:
+        with conn:
+            count = 0
+            for name, translation in (translations or {}).items():
+                count += conn.execute("UPDATE tags SET zh_name=? WHERE name=?",
+                                      (translation.strip(), name.strip())).rowcount
+        return {"custom_translations_updated": count, "custom_theme_links_added": 0,
+                "builtin_clusters": {}, "tag_policy": tag_policy_summary()}
+    finally:
+        conn.close()
 
 
 def tool_gallery_batch_tag_or_move(
@@ -162,6 +122,7 @@ def tool_gallery_batch_tag_or_move(
     move_to_folder: Optional[str] = None,
     only_root_files: bool = True,
 ) -> Dict[str, Any]:
+    reject_generated_details(add_general_tags)
     conn = get_db()
     where = ["1=1"]
     params: List[Any] = []
@@ -194,17 +155,11 @@ def tool_gallery_batch_tag_or_move(
 
     with conn:
         if add_artist_tag:
-            tid_a = ensure_tag(conn, tag_cache, add_artist_tag.strip(), "artist")
-            conn.executemany(
-                "INSERT OR IGNORE INTO image_tags (image_id, tag_id, confidence, source) VALUES (?, ?, 1.0, 'gemini_mcp')",
-                [(iid, tid_a) for iid in img_ids],
-            )
-        if add_general_tags:
-            for gtag in add_general_tags:
-                tid_g = ensure_tag(conn, tag_cache, gtag.strip(), "general")
+            tid_a = ensure_tag(conn, tag_cache, add_artist_tag.strip(), "artist", source="gemini_mcp")
+            if tid_a > 0:
                 conn.executemany(
                     "INSERT OR IGNORE INTO image_tags (image_id, tag_id, confidence, source) VALUES (?, ?, 1.0, 'gemini_mcp')",
-                    [(iid, tid_g) for iid in img_ids],
+                    [(iid, tid_a) for iid in img_ids],
                 )
         refresh_tag_counts(conn)
     conn.close()
@@ -464,12 +419,14 @@ def tool_gallery_calibrate_image_artist_and_tags(
     - twitter_handle (str, 選填): 畫師的 Twitter @帳號 (不含 @ 或含 @ 皆可)
     - characters (list[str], 選填): 校正後的正確角色標籤
     - copyrights (list[str], 選填): 校正後的正確作品標籤
-    - add_general_tags (list[str], 選填): 補充的內容標籤
+    - add_general_tags: 已停用；僅接受空陣列
     - zh_translations (dict[str, str], 選填): 標籤繁體中文翻譯對照
     - remove_tags (list[str], 選填): 欲移除的錯誤標籤名稱清單
     - purge_ai_artist_tags (bool, 預設 True): 是否清除該圖片上所有本機 AI 猜測的畫師標籤
     - move_to_artist_folder (bool, 預設 True): 若有 verified_artist，是否自動建立/搬移至該繪師資料夾並清除舊空資料夾
     """
+    # Validate the entire model batch before any calibration can remove tags.
+    reject_generated_details(*(item.get("add_general_tags") for item in calibrations))
     conn = get_db()
     tag_cache: Dict[str, int] = {}
     for r in conn.execute("SELECT id, name FROM tags"):
@@ -492,7 +449,6 @@ def tool_gallery_calibrate_image_artist_and_tags(
             tw_handle = (item.get("twitter_handle") or "").strip().lstrip("@")
             chars = item.get("characters") or []
             copys = item.get("copyrights") or []
-            gens = item.get("add_general_tags") or []
             zh_map = item.get("zh_translations") or {}
             rem_tags = item.get("remove_tags") or []
             purge_ai = item.get("purge_ai_artist_tags", True)
@@ -509,7 +465,7 @@ def tool_gallery_calibrate_image_artist_and_tags(
 
             links = []
             if v_artist:
-                tid_a = ensure_tag(conn, tag_cache, v_artist, "artist")
+                tid_a = ensure_tag(conn, tag_cache, v_artist, "artist", source="gemini_mcp")
                 if tid_a > 0:
                     links.append((iid, tid_a, 1.0, "gemini_mcp"))
                     if a_zh:
@@ -517,24 +473,19 @@ def tool_gallery_calibrate_image_artist_and_tags(
 
             if tw_handle:
                 tw_tag = f"@{tw_handle}"
-                tid_tw = ensure_tag(conn, tag_cache, tw_tag, "artist")
+                tid_tw = ensure_tag(conn, tag_cache, tw_tag, "artist", source="gemini_mcp")
                 if tid_tw > 0:
                     links.append((iid, tid_tw, 1.0, "twitter"))
 
             for ch in chars:
-                tid_c = ensure_tag(conn, tag_cache, ch.strip(), "character")
+                tid_c = ensure_tag(conn, tag_cache, ch.strip(), "character", source="gemini_mcp")
                 if tid_c > 0:
                     links.append((iid, tid_c, 1.0, "gemini_mcp"))
 
             for cp in copys:
-                tid_cp = ensure_tag(conn, tag_cache, cp.strip(), "copyright")
+                tid_cp = ensure_tag(conn, tag_cache, cp.strip(), "copyright", source="gemini_mcp")
                 if tid_cp > 0:
                     links.append((iid, tid_cp, 1.0, "gemini_mcp"))
-
-            for g in gens:
-                tid_g = ensure_tag(conn, tag_cache, g.strip(), "general")
-                if tid_g > 0:
-                    links.append((iid, tid_g, 1.0, "gemini_mcp"))
 
             for eng_k, zh_v in zh_map.items():
                 conn.execute("UPDATE tags SET zh_name = ? WHERE name = ?", (zh_v.strip(), eng_k.strip()))
@@ -547,6 +498,7 @@ def tool_gallery_calibrate_image_artist_and_tags(
                     ON CONFLICT(image_id, tag_id) DO UPDATE SET
                     confidence = 1.0,
                     source = excluded.source
+                    WHERE image_tags.source != 'manual'
                     """,
                     links,
                 )

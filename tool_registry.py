@@ -45,14 +45,14 @@ class Theme(Arguments):
 
 class Enrichments(Arguments):
     translations: dict[Tag, Tag] | None = Field(default=None, max_length=1000)
-    semantic_theme_groups: list[Theme] | None = Field(default=None, max_length=100)
-    auto_cluster_builtin_themes: bool = True
+    semantic_theme_groups: list[Theme] | None = Field(default=None, max_length=0, description="已停用自動主題標籤，請省略")
+    auto_cluster_builtin_themes: Literal[False] = False
 
 
 class TagOrMove(Arguments):
     include_tags: list[Tag] = Field(max_length=100)
     add_artist_tag: Tag | None = None
-    add_general_tags: list[Tag] | None = Field(default=None, max_length=100)
+    add_general_tags: list[Tag] | None = Field(default=None, max_length=0, description="僅保留核心標籤，請省略")
     move_to_folder: str | None = Field(default=None, min_length=1, max_length=1000)
     only_root_files: bool = True
 
@@ -84,7 +84,7 @@ class Calibration(Arguments):
     twitter_handle: Tag | None = None
     characters: list[Tag] = Field(default_factory=list, max_length=100)
     copyrights: list[Tag] = Field(default_factory=list, max_length=100)
-    add_general_tags: list[Tag] = Field(default_factory=list, max_length=100)
+    add_general_tags: list[Tag] = Field(default_factory=list, max_length=0, description="僅保留核心標籤，請省略")
     zh_translations: dict[Tag, Tag] = Field(default_factory=dict, max_length=300)
     remove_tags: list[Tag] = Field(default_factory=list, max_length=100)
     purge_ai_artist_tags: bool = True
@@ -127,7 +127,7 @@ class ImageDetails(Arguments):
 
 class TagInput(Arguments):
     name: Tag
-    category: Literal["artist", "general", "character", "copyright", "meta", "rating"] = "general"
+    category: Literal["artist", "character", "copyright", "source"]
 
 
 class EditTags(Arguments):
@@ -211,17 +211,17 @@ _tools = [
     Tool("gallery_semantic_search", "語意搜尋", "依關鍵字與中英對照展開搜尋，回傳相關圖片與標籤。", False, Search, {"query": "風景"}),
     Tool("gallery_list_untranslated_tags", "待翻譯標籤", "列出尚未有繁體中文翻譯的高頻標籤。", False, Untranslated, {"category": "all", "limit": 100}),
     Tool("gallery_list_candidates_for_artist_calibration", "待校正圖片", "列出待驗證或 AI 低信心度畫師圖片，包含檔案路徑。", False, Candidates, {"scope": "ai_low_conf", "limit": 30}),
-    Tool("gallery_apply_gemini_enrichments", "寫入翻譯與主題", "儲存標籤翻譯、主題群組，並可重新套用內建主題。", True, Enrichments, {"translations": {"landscape": "風景"}, "auto_cluster_builtin_themes": False}),
-    Tool("gallery_batch_tag_or_move", "批次標籤與搬移", "篩選符合全部指定標籤的圖片，新增標籤或搬移到目標資料夾。", True, TagOrMove, {"include_tags": ["landscape"], "add_general_tags": ["風景"], "only_root_files": True}),
+    Tool("gallery_apply_gemini_enrichments", "寫入標籤翻譯", "更新既有標籤翻譯；自動主題群組已停用，不得產生一般描述標籤。", True, Enrichments, {"translations": {"artist_name": "畫師名稱"}}),
+    Tool("gallery_batch_tag_or_move", "批次標籤與搬移", "篩選符合指定標籤的圖片，新增畫師或搬移到目標資料夾；禁止新增一般描述標籤。", True, TagOrMove, {"include_tags": ["artist_name"], "add_artist_tag": "artist_alias", "only_root_files": True}),
     Tool("gallery_reverse_image_search", "單張反查與校正", "查詢外部圖片來源並寫入認證畫師與標籤；可使用本機 AI 作備援。", True, Reverse, {"image_id": 1, "fallback_to_ai": False}, True),
     Tool("gallery_deep_reverse_search_batch", "批次反查與歸檔", "批次查詢外部來源、校正標籤，並可搬移已認證圖片。", True, DeepReverse, {"image_ids": [1], "auto_move_verified": False}, True),
-    Tool("gallery_calibrate_image_artist_and_tags", "寫入畫師校正", "寫入已驗證的畫師與標籤；依參數清除 AI 畫師標籤並搬移圖片。", True, Calibrations, {"calibrations": [{"image_id": 1, "verified_artist": "artist_name", "move_to_artist_folder": False}]}),
+    Tool("gallery_calibrate_image_artist_and_tags", "寫入畫師校正", "僅寫入已驗證的畫師、角色與作品；保留人工標籤，禁止一般描述或主題標籤。可依參數搬移圖片。", True, Calibrations, {"calibrations": [{"image_id": 1, "verified_artist": "artist_name", "move_to_artist_folder": False}]}),
     Tool("gallery_purge_all_low_conf_ai_artists", "清理畫師與資料夾", "清除低信心度 AI 畫師標籤，並可還原因此誤建的資料夾。", True, Purge, {"max_ai_conf_to_purge": 0.65, "revert_unverified_ai_folders": False}),
     Tool("gallery_auto_organize_artist_folders", "畫師歸檔", "依認證畫師預覽或執行歸檔；execute_move=false 僅預覽。", True, Organize, {"execute_move": False, "min_confidence": 0.25}),
     Tool("gallery_scan_library", "掃描圖庫", "掃描目前設定的圖庫並同步索引；保留人工標籤，完整掃描才標記遺失。回傳 run_id，使用 gallery_get_tool_run 查詢結果。", True, Overview, {}, background=True),
     Tool("gallery_search_images", "搜尋圖片", "以關鍵字、標籤、資料夾及 AI 狀態分頁查詢圖片，取得後續操作所需的 image_id。", False, ImageSearch, {"q": "風景", "page_size": 20}),
     Tool("gallery_get_image_details", "圖片詳細資料", "取得圖片標籤、處理狀態、遺失狀態及圖庫內路徑；tag_limit 限制回傳標籤數。", False, ImageDetails, {"image_id": 1}),
-    Tool("gallery_update_image_tags", "編輯圖片標籤", "對明確指定的圖片新增人工標籤或移除指定標籤名稱，不會搬移檔案。整批 ID 必須存在。", True, EditTags, {"image_ids": [1], "add_tags": [{"name": "landscape", "category": "general"}]}),
+    Tool("gallery_update_image_tags", "編輯核心標籤", "對指定圖片新增畫師、角色、作品或來源標籤，記為模型來源；不能新增一般描述、分級、年份或主題，也不能覆蓋或移除人工標籤。整批 ID 必須存在。", True, EditTags, {"image_ids": [1], "add_tags": [{"name": "artist_name", "category": "artist"}]}),
     Tool("gallery_analyze_images", "本機 AI 打標", "對指定圖片執行本機視覺打標，保留人工標籤。首次使用可能下載模型；預設略過相同檔案與模型版本已完成項目。回傳 run_id。", True, AnalyzeImages, {"image_ids": [1], "skip_completed": True}, network=True, background=True),
     Tool("gallery_move_images", "搬移指定圖片", "預覽或搬移明確指定的圖片至圖庫內資料夾，使用可復原檔案日誌。execute_move=false 預覽，true 才搬移。回傳 run_id。", True, MoveImages, {"image_ids": [1], "target_folder": "artist_name", "execute_move": False}, background=True),
     Tool("gallery_recover_file_operations", "復原中斷檔案操作", "檢查並修復尚未完成的檔案操作日誌；不會撤銷已完成的正常搬移。回傳 run_id。", True, Overview, {}, background=True),

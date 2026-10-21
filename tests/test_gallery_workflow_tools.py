@@ -49,7 +49,7 @@ class WorkflowToolTests(GalleryCase):
 
     def test_search_uses_shared_query_with_tags_sort_pagination_and_missing_filter(self):
         ids=self.scanned("風景_10.png","風景_2.png","artist/other.png")
-        runtime.invoke("gallery_update_image_tags",{"image_ids":[ids["風景_2.png"],ids["風景_10.png"]],"add_tags":[{"name":"landscape"}]})
+        runtime.invoke("gallery_update_image_tags",{"image_ids":[ids["風景_2.png"],ids["風景_10.png"]],"add_tags":[{"name":"landscape","category":"copyright"}]})
         result=runtime.invoke("gallery_search_images",{"include_tags":["landscape"],"q":"風景","sort":"natural_asc","page_size":1})
         self.assertEqual(result["total"],2)
         self.assertEqual(result["items"][0]["filename"],"風景_2.png")
@@ -70,14 +70,14 @@ class WorkflowToolTests(GalleryCase):
             web=app.api_images(**options)
         self.assertEqual(web,workflows.tool_gallery_search_images(**options))
 
-    def test_manual_tag_edit_is_atomic_preserves_unrelated_tags_and_recounts(self):
+    def test_model_tag_edit_is_atomic_preserves_manual_tags_and_recounts(self):
         ids=self.scanned("a.png","b.png");a,b=ids["a.png"],ids["b.png"]
         self.manual(a)
-        result=runtime.invoke("gallery_update_image_tags",{"image_ids":[a,a,b],"add_tags":[{"name":"new_tag"}]})
+        result=runtime.invoke("gallery_update_image_tags",{"image_ids":[a,a,b],"add_tags":[{"name":"new_tag","category":"character"}]})
         self.assertEqual(result["updated"],2)
         self.assertEqual(self.rows("SELECT post_count FROM tags WHERE name='new_tag'")[0]["post_count"],2)
         with self.assertRaises(ValueError):
-            runtime.invoke("gallery_update_image_tags",{"image_ids":[a,999999],"add_tags":[{"name":"must_not_exist"}]})
+            runtime.invoke("gallery_update_image_tags",{"image_ids":[a,999999],"add_tags":[{"name":"must_not_exist","category":"character"}]})
         self.assertEqual(self.rows("SELECT id FROM tags WHERE name='must_not_exist'"),[])
         runtime.invoke("gallery_update_image_tags",{"image_ids":[a],"remove_tag_names":["new_tag"]})
         self.assertEqual(self.rows("SELECT post_count FROM tags WHERE name='new_tag'")[0]["post_count"],1)
@@ -85,7 +85,7 @@ class WorkflowToolTests(GalleryCase):
 
     def test_detail_returns_processing_state_and_bounded_tags(self):
         iid=self.scanned("a.png")["a.png"]
-        runtime.invoke("gallery_update_image_tags",{"image_ids":[iid],"add_tags":[{"name":"one"},{"name":"two"}]})
+        runtime.invoke("gallery_update_image_tags",{"image_ids":[iid],"add_tags":[{"name":"one","category":"character"},{"name":"two","category":"copyright"}]})
         conn=database.get_db()
         try:
             with conn:record(conn,iid,"ai","failed",error="decode error",retry_at=123)

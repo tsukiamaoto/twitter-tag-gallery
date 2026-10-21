@@ -4,12 +4,13 @@ import database
 from background_work import mark_interactive
 from query_cache import natural_order
 from renamer import win_natural_key
-from zh_dict import get_tag_zh
+from zh_dict import get_tag_display_name
+from gallery_artist_service import artist_filter_names
 
 
 def search_images(include_tags="", exclude_tags="", folder="__ALL__", media_type="all",
                   ai_status="all", q="", sort="natural_asc", page=1, page_size=60,
-                  *, connect=None, prefetch=None):
+                  *, connect=None, prefetch=None, compact=False):
     import datetime as _dt
     import time as _time
     mark_interactive()
@@ -75,13 +76,15 @@ def search_images(include_tags="", exclude_tags="", folder="__ALL__", media_type
                 params.append(now_ts - 86400 * days)
                 continue
 
-            where.append("""
+            aliases = artist_filter_names(conn, tname)
+            placeholders = ",".join("?" for _ in aliases)
+            where.append(f"""
                 i.id IN (
                     SELECT image_id FROM image_tags
-                    WHERE tag_id = (SELECT id FROM tags WHERE name = ?)
+                    WHERE tag_id IN (SELECT id FROM tags WHERE name IN ({placeholders}))
                 )
             """)
-            params.append(tname)
+            params.extend(aliases)
 
         if force_mtime_desc:
             sort = "mtime_desc"
@@ -90,13 +93,15 @@ def search_images(include_tags="", exclude_tags="", folder="__ALL__", media_type
         for tname in exc_list:
             if tname == "最近" or tname in recent_bucket_days:
                 continue
-            where.append("""
+            aliases = artist_filter_names(conn, tname)
+            placeholders = ",".join("?" for _ in aliases)
+            where.append(f"""
                 i.id NOT IN (
                     SELECT image_id FROM image_tags
-                    WHERE tag_id = (SELECT id FROM tags WHERE name = ?)
+                    WHERE tag_id IN (SELECT id FROM tags WHERE name IN ({placeholders}))
                 )
             """)
-            params.append(tname)
+            params.extend(aliases)
 
         where_sql = " AND ".join(where)
         offset = (page - 1) * page_size
@@ -145,30 +150,60 @@ def search_images(include_tags="", exclude_tags="", folder="__ALL__", media_type
 
         img_ids = [r["id"] for r in rows]
         tags_by_img: Dict[int, List[Dict[str, Any]]] = {iid: [] for iid in img_ids}
+        tag_counts = {}
 
         if img_ids:
             placeholders = ",".join(["?"] * len(img_ids))
-            tag_rows = conn.execute(
-                f"""
-                SELECT it.image_id, t.name, t.category, t.zh_name, it.confidence, it.source
-                FROM image_tags it
-                JOIN tags t ON t.id = it.tag_id
-                WHERE it.image_id IN ({placeholders})
-                ORDER BY
-                    CASE t.category
-                        WHEN 'artist' THEN 1
-                        WHEN 'character' THEN 2
-                        WHEN 'copyright' THEN 3
-                        WHEN 'rating' THEN 4
-                        ELSE 5
-                    END,
-                    it.confidence DESC
-                """,
-                img_ids,
-            ).fetchall()
+            if compact:
+                # Read link keys from the covering primary-key index first.
+                # Materialization keeps SQLite from fetching general-tag payloads
+                # or probing every artist against every image on the page.
+                tag_rows = conn.execute(
+                    f"""
+                    WITH card_links AS MATERIALIZED (
+                        SELECT it.image_id, it.tag_id
+                        FROM image_tags it
+                        CROSS JOIN tags t ON t.id = it.tag_id
+                        WHERE it.image_id IN ({placeholders})
+                          AND t.category IN ('artist', 'rating')
+                    )
+                    SELECT it.image_id, t.name, t.category, t.zh_name,
+                           it.confidence, it.source
+                    FROM card_links l
+                    JOIN image_tags it ON it.image_id = l.image_id AND it.tag_id = l.tag_id
+                    JOIN tags t ON t.id = l.tag_id
+                    ORDER BY it.confidence DESC, it.tag_id ASC
+                    """,
+                    img_ids,
+                ).fetchall()
+                tag_counts = {r["image_id"]: r["total"] for r in conn.execute(
+                    f"SELECT image_id, COUNT(*) AS total FROM image_tags "
+                    f"WHERE image_id IN ({placeholders}) GROUP BY image_id", img_ids,
+                )}
+            else:
+                tag_rows = conn.execute(
+                    f"""
+                    SELECT it.image_id, t.name, t.category, t.zh_name, it.confidence, it.source
+                    FROM image_tags it
+                    JOIN tags t ON t.id = it.tag_id
+                    WHERE it.image_id IN ({placeholders})
+                    ORDER BY
+                        CASE t.category
+                            WHEN 'artist' THEN 1
+                            WHEN 'character' THEN 2
+                            WHEN 'copyright' THEN 3
+                            WHEN 'rating' THEN 4
+                            ELSE 5
+                        END,
+                        it.confidence DESC
+                    """,
+                    img_ids,
+                ).fetchall()
 
             for tr in tag_rows:
-                zh = tr["zh_name"] or get_tag_zh(tr["name"], tr["category"])
+                if compact and any(t["category"] == tr["category"] for t in tags_by_img[tr["image_id"]]):
+                    continue  # One artist and one rating are enough for a card.
+                zh = get_tag_display_name(tr["name"], tr["category"], tr["zh_name"])
                 tags_by_img[tr["image_id"]].append({
                     "name": tr["name"],
                     "category": tr["category"],
@@ -207,7 +242,7 @@ def search_images(include_tags="", exclude_tags="", folder="__ALL__", media_type
             "copyrights": copyrights,
             "rating": ratings[0]["name"] if ratings else None,
             "preview_tags": generals,
-            "total_tags": len(all_t),
+            "total_tags": tag_counts.get(iid, 0) if compact else len(all_t),
         })
 
     if prefetch is not None:

@@ -496,7 +496,7 @@ class AutoIngestScheduler:
                             with conn:
                                 db_links = []
                                 for iid, tname, cat, conf in pending_tag_entries:
-                                    tid = ensure_tag(conn, tag_cache, tname, cat)
+                                    tid = ensure_tag(conn, tag_cache, tname, cat, source="ai")
                                     if tid > 0:
                                         db_links.append((iid, tid, round(conf, 4), "ai"))
                                 if db_links:
@@ -520,9 +520,6 @@ class AutoIngestScheduler:
                                 refresh_tag_counts(conn)
                         finally:
                             conn.close()
-
-            from semantic_engine import apply_semantic_theme_tags_batch
-            apply_semantic_theme_tags_batch()
 
             # === STEP 5: 自動建立繪師資料夾並將圖片歸檔 ===
             self.processed_count = 90

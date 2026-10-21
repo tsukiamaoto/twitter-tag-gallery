@@ -24,6 +24,8 @@ def analyze(image_id, *, report_progress=True):
         if report_progress:
             update_job(stage="本機 AI 分析",processed_count=0,total_target=1,current_file=row["filename"])
         predictions,suggested=tagger_engine.predict_single(tensor)
+        from tag_policy import allows_tag
+        predictions = [tag for tag in predictions if allows_tag(tag[1], "ai")]
     except Exception as error:
         conn=database.get_db()
         try:
@@ -36,14 +38,17 @@ def analyze(image_id, *, report_progress=True):
     try:
         def write(c):
             c.execute("DELETE FROM image_tags WHERE image_id=? AND source='ai'",(image_id,))
+            added = 0
             for name,category,confidence in predictions:
-                tid=database.ensure_tag(c,cache,name,category)
-                c.execute("INSERT OR IGNORE INTO image_tags(image_id,tag_id,confidence,source) VALUES(?,?,?,'ai')",(image_id,tid,round(confidence,4)))
+                tid=database.ensure_tag(c,cache,name,category,source="ai")
+                if tid > 0:
+                    added += c.execute("INSERT OR IGNORE INTO image_tags(image_id,tag_id,confidence,source) VALUES(?,?,?,'ai')",(image_id,tid,round(confidence,4))).rowcount
             c.execute("UPDATE images SET suggested_folder=COALESCE(?,suggested_folder) WHERE id=?",(suggested,image_id))
             stat=path.stat()
             record(c,image_id,"ai","succeeded",model_version=AI_MODEL_VERSION,file_version=f"{stat.st_size}:{stat.st_mtime_ns}")
             database.refresh_tag_counts(c)
-        database.run_db_write_with_retry(conn,write)
+            return added
+        added = database.run_db_write_with_retry(conn,write)
     finally:
         conn.close()
-    return {"filename":row["filename"],"tags_added":len(predictions),"suggested_folder":suggested}
+    return {"filename":row["filename"],"tags_added":added,"suggested_folder":suggested}

@@ -1,0 +1,13 @@
+.gguf-card { border: 1px solid var(--border); border-radius: 12px; margin: 0 0 24px; padding: 18px; background: rgba(139,124,248,.035); }
+.gguf-card h3 { margin: 0 0 8px; }
+.gguf-path { display: block; overflow-wrap: anywhere; padding: 10px 12px; margin: 8px 0; border-radius: 8px; background: rgba(148,163,184,.08); font-size: 12px; user-select: all; }
+.gguf-grid { display: grid; grid-template-columns: minmax(0,2fr) minmax(130px,1fr); gap: 12px; margin: 16px 0; }
+.gguf-grid label { display: grid; gap: 7px; min-width: 0; }
+.gguf-grid select { width: 100%; min-width: 0; }
+.gguf-status { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 14px 0; }
+.gguf-status strong[data-phase="loaded"] { color: #34d399; }
+.gguf-download { padding: 12px 0; }
+.gguf-download progress { display: block; width: 100%; height: 7px; accent-color: #38bdf8; margin: 9px 0; }
+.gguf-card .settings-feedback { white-space: pre-wrap; overflow-wrap: anywhere; }
+.gguf-card details ul { padding-left: 20px; overflow-wrap: anywhere; }
+@media (max-width: 600px) { .gguf-grid { grid-template-columns: minmax(0,1fr); } }

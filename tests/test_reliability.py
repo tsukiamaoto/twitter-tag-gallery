@@ -147,6 +147,30 @@ class TransactionTests(GalleryCase):
         with conn:conn.execute("INSERT INTO images(rel_path,filename,ext) VALUES('one.png','one.png','.png')")
         conn.close();self.assertEqual(cache.get('count',read),1);self.assertEqual(len(reads),2)
 
+    def test_explicit_invalidation_does_not_join_or_republish_an_old_load(self):
+        from query_cache import QueryCache
+        cache = QueryCache()
+        started, release = threading.Event(), threading.Event()
+        old = []
+        def slow():
+            started.set()
+            if not release.wait(3):
+                raise RuntimeError("test load timed out")
+            return "old"
+        thread = threading.Thread(target=lambda: old.append(cache.get("list", slow)))
+        with patch("query_cache.database_version", return_value="unchanged"):
+            thread.start()
+            self.assertTrue(started.wait(2))
+            try:
+                cache.clear()
+                self.assertEqual(cache.get("list", lambda: "fresh"), "fresh")
+            finally:
+                release.set()
+                thread.join(3)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(old, ["old"])
+            self.assertEqual(cache.get("list", lambda: "unexpected"), "fresh")
+
 
 class FileRecoveryTests(GalleryCase):
     def prepare(self):

@@ -4,14 +4,19 @@
 
 - 設定 → **MCP 管理**：圖庫 MCP 開關、唯讀模式、工具權限、本機握手診斷、Gemini CLI 設定匯出；「工具操作與執行紀錄」可查看 24 個工具的參數格式、填入 JSON、實際執行並查看結果。
 - MCP 連線設定可選 **Antigravity** 或 **Gemini CLI**；登入與模型選擇在該客戶端管理，圖庫不使用 Gemini API 金鑰或直接呼叫模型 API。
+- 模型與自動流程只寫入**畫師、角色、作品、來源**；人工標籤保留。模型不能透過 MCP 寫入一般描述、分級、年份或主題，更新後需重連 MCP，見 [018 驗收紀錄](docs/done/018-core-generated-tags.md)。
 - 設定 → **背景任務與復原**：跨程序進度、未完成項目重試、檔案操作復原與資料庫備份。
 - 圖庫根目錄可由 `TWITTER_GALLERY_ROOT` 環境變數設定；預設仍為 `D:\圖檔\twitter`。
 - 圖片詳情可單檔刪除，勾選圖片可跨頁批次刪除，支援 **Del** 快捷鍵與確認。檔案移到圖庫回收區，可「復原剛才刪除」並還原標籤；回收區尚未釋放磁碟空間。
+- 支援 **Shift 點選範圍多選**，或按住滑鼠左鍵拖過一排圖片連續勾選；從已勾選的圖片開始拖曳可連續取消。
+- 圖片卡片只顯示一位畫師；角色、作品與一般標籤在詳情查看。Web 列表使用精簡查詢，完整標籤仍可搜尋與篩選，見 [015 驗收紀錄](docs/done/015-compact-gallery-cards.md)。
+- 左側標籤先載入 40 筆，接近清單底部時再追加下一批；搜尋仍涵蓋全部標籤，載入失敗可原地重試，見 [016 驗收紀錄](docs/done/016-sidebar-tag-pagination.md)。
+- 已選標籤與左側標籤分類會自動儲存在此瀏覽器，重新整理或重開分頁後恢復；清除標籤與重設篩選也會記住清除結果，見 [017 驗收紀錄](docs/done/017-tag-filter-persistence.md)。
 - 前端分成 `gallery-core.js`（請求／擴充介面）、`gallery-app.js`（圖庫）、`gallery-shell.js`（畫面控制）及 `integration-settings.js`（整合設定），CSS 另存於 `gallery-base.css`、`gallery-shell.css`。
 
 工具定義與參數集中於 `tool_registry.py`，共用執行、作業鎖及紀錄在 `tool_runtime.py`，業務實作在 `gallery_tools.py`、`gallery_workflow_tools.py`；`mcp_server.py` 只處理協定。Web 與 MCP 共用 `gallery_query.py` 搜尋及 `gallery_tag_service.py` 標籤寫入。設定頁與 MCP 都會驗證已儲存的權限；寫入工具共用背景作業鎖，停止要求可在忙碌時送出，唯讀工具每個程序最多同時執行兩個。執行紀錄保留最近 200 次，每次最多 128 KiB 結果，不保存輸入參數。這個操作區管理本專案內建工具。
 
-新增掃描、圖片搜尋／詳情、人工標籤、本機 AI 打標、搬移預覽／執行、檔案復原、改名還原與任務查詢／停止工具。掃描、AI、搬移及復原會先回傳 `run_id`、`job_id`，使用 `gallery_get_tool_run` 查詢結果、`gallery_cancel_job` 送出停止要求；客戶端需保持 MCP 連線至任務結束。使用順序與完整工具參數見 [圖庫 MCP 流程](docs/done/012-reliability-and-mcp.md#圖庫-mcp-流程工具2026-10-21)。
+新增掃描、圖片搜尋／詳情、核心標籤編輯、本機 AI 打標、搬移預覽／執行、檔案復原、改名還原與任務查詢／停止工具。掃描、AI、搬移及復原會先回傳 `run_id`、`job_id`，使用 `gallery_get_tool_run` 查詢結果、`gallery_cancel_job` 送出停止要求；客戶端需保持 MCP 連線至任務結束。使用順序與完整工具參數見 [圖庫 MCP 流程](docs/done/012-reliability-and-mcp.md#圖庫-mcp-流程工具2026-10-21)。
 
 開發驗證：先執行 `python -m pip install -r requirements-dev.txt` 與 `npm install`，再執行 `python -B -m unittest discover -s tests -p "test_*.py"`、`npm test`、`npm run test:browser`。瀏覽器測試使用本機 Microsoft Edge 與模擬 API。首次啟動新版會先備份既有資料庫再套用相容性遷移，舊 MCP 客戶端也需要重新連線。
 
@@ -317,7 +322,7 @@ Twitter Tag Gallery 實作了 **Model Context Protocol (MCP)**，可供 Claude D
 - `gallery_find_tag_correlations`：查詢標籤共現性與 Jaccard 關聯度。
 - `gallery_semantic_search`：自然語言展開之語意搜尋。
 - `gallery_list_untranslated_tags`：列出待翻譯標籤供 LLM 批次處理。
-- `gallery_apply_gemini_enrichments`：批次寫入繁中翻譯與高階主題分類群組。
+- `gallery_apply_gemini_enrichments`：更新既有標籤的繁中翻譯；自動主題群組已停用。
 - `gallery_batch_tag_or_move`：依標籤篩選、批次加標籤及搬移。
 - `gallery_list_candidates_for_artist_calibration`：列出待驗證的畫師圖片。
 - `gallery_reverse_image_search`：單張圖片來源反查與標籤校正。

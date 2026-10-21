@@ -81,7 +81,7 @@
 | `gallery_scan_library` | 掃描目前設定的圖庫並同步索引 | 背景任務 ID |
 | `gallery_search_images` | 關鍵字／標籤／資料夾／AI 狀態與分頁搜尋 | 圖片清單及 ID |
 | `gallery_get_image_details` | 圖片詳細標籤、處理階段、錯誤及版本 | 詳情，標籤最多 500 筆 |
-| `gallery_update_image_tags` | 明確指定圖片 ID 批次增刪人工標籤 | 更新數量 |
+| `gallery_update_image_tags` | 明確指定圖片 ID 批次編輯核心模型標籤，保護人工標籤 | 更新數量 |
 | `gallery_analyze_images` | 指定最多 100 張圖片本機 AI 打標 | 背景任務 ID |
 | `gallery_move_images` | 指定圖片搬移，預設只預覽 | 背景任務 ID |
 | `gallery_recover_file_operations` | 修復中斷的檔案操作，保留衝突日誌 | 背景任務 ID |
@@ -95,7 +95,7 @@
 
 1. `gallery_scan_library` 傳 `{}`，取得 `run_id`；使用 `gallery_get_tool_run` 傳 `{"run_id":"實際回傳的 ID"}` 每 1–2 秒查詢，直到 `run.status` 不再是 `running`。
 2. `gallery_search_images` 傳 `{"q":"風景","page_size":20}`，或 `{"include_tags":["landscape"],"folder":"__ROOT__"}`。`include_tags` 使用原始標籤名稱；中文關鍵字使用 `q`。
-3. `gallery_update_image_tags` 傳 `{"image_ids":[實際圖片ID],"add_tags":[{"name":"landscape","category":"general"}]}`；或使用 `gallery_analyze_images` 讓本機 AI 分析。相同模型與檔案版本已完成時預設略過；`skip_completed=false` 可重新分析。
+3. `gallery_update_image_tags` 傳 `{"image_ids":[實際圖片ID],"add_tags":[{"name":"artist_name","category":"artist"}]}`；或使用 `gallery_analyze_images` 讓本機 AI 分析。模型目前只可新增畫師、角色、作品、來源，不能覆蓋或移除人工標籤，詳見 [018 分類限制](018-core-generated-tags.md)。相同模型與檔案版本已完成時預設略過；`skip_completed=false` 可重新分析。
 4. `gallery_move_images` 先傳 `{"image_ids":[實際圖片ID],"target_folder":"畫師名稱","execute_move":false}`；查看結果內 `entries`，確認後以相同條件傳 `execute_move=true`。執行會重新建立計畫並再次檢查檔案衝突。
 5. 需要停止時，用啟動回應或 `gallery_get_jobs` 中的 `job_id` 呼叫 `gallery_cancel_job`。`run_id` 用於工具結果，`job_id` 用於作業控制，兩者用途不同。
 

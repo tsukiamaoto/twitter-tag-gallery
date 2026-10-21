@@ -211,7 +211,7 @@ def commit_batch_with_retry(conn, tag_cache, results, max_retries=15):
 
             links = []
             for t_name, t_cat, t_zh, t_conf, t_src in tags:
-                tid = ensure_tag(conn, tag_cache, t_name, t_cat)
+                tid = ensure_tag(conn, tag_cache, t_name, t_cat, source=t_src)
                 if tid > 0:
                     if t_zh:
                         conn.execute(
@@ -228,6 +228,7 @@ def commit_batch_with_retry(conn, tag_cache, results, max_retries=15):
                     ON CONFLICT(image_id, tag_id) DO UPDATE SET
                     confidence = MAX(image_tags.confidence, excluded.confidence),
                     source = CASE
+                        WHEN image_tags.source = 'manual' THEN image_tags.source
                         WHEN excluded.source IN ('danbooru', 'pixiv', 'saucenao', 'iqdb', 'twitter', 'gemini_mcp', 'filename') THEN excluded.source
                         ELSE image_tags.source
                     END

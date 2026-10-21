@@ -11,3 +11,5 @@ thumbs/
 models/
 *.tmp
 deep_search_results.json
+image_skills/
+.deployment_backups/

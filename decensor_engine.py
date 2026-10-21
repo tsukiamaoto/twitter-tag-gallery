@@ -912,7 +912,9 @@ class AnimeDecensorEngine:
                     conn.execute(
                         """
                         INSERT OR IGNORE INTO image_tags (image_id, tag_id, confidence, source)
-                        SELECT ?, tag_id, confidence, source FROM image_tags WHERE image_id = ?
+                        SELECT ?, it.tag_id, it.confidence, it.source
+                        FROM image_tags it JOIN tags t ON t.id=it.tag_id WHERE it.image_id = ?
+                        AND (it.source='manual' OR t.category IN ('artist','character','copyright','source'))
                         """,
                         (target_id, image_id),
                     )
@@ -944,28 +946,19 @@ class AnimeDecensorEngine:
                     except Exception:
                         pass
 
-        # 更新標籤：加入 uncensored / AI去馬賽克，移除 mosaic_censoring / bar_censor
+        # Record processing as a source marker, without generating content tags.
         conn = get_db()
         try:
-            tag_cache: Dict[str, int] = {}
-            for r in conn.execute("SELECT id, name FROM tags WHERE name IN ('AI去馬賽克', 'uncensored')"):
-                tag_cache[r["name"]] = r["id"]
-
             with conn:
-                tid_dec = ensure_tag(conn, tag_cache, "AI去馬賽克", "meta")
-                tid_unc = ensure_tag(conn, tag_cache, "uncensored", "general")
+                tid_dec = ensure_tag(conn, {}, "AI去馬賽克", "source", source="decensor")
                 conn.execute(
-                    "INSERT OR REPLACE INTO image_tags (image_id, tag_id, confidence, source) VALUES (?, ?, 1.0, 'manual')",
+                    "INSERT OR IGNORE INTO image_tags (image_id, tag_id, confidence, source) VALUES (?, ?, 1.0, 'decensor')",
                     (target_id, tid_dec),
-                )
-                conn.execute(
-                    "INSERT OR REPLACE INTO image_tags (image_id, tag_id, confidence, source) VALUES (?, ?, 1.0, 'manual')",
-                    (target_id, tid_unc),
                 )
                 conn.execute(
                     """
                     DELETE FROM image_tags
-                    WHERE image_id = ?
+                    WHERE image_id = ? AND source != 'manual'
                       AND tag_id IN (SELECT id FROM tags WHERE name IN ('mosaic_censoring', 'bar_censor'))
                     """,
                     (target_id,),

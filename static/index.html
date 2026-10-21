@@ -10,6 +10,10 @@
   <link rel="stylesheet" href="/static/gallery-shell.css" />
   <script defer src="/static/gallery-shell.js"></script>
   <script defer src="/static/integration-settings.js"></script>
+  <link rel="stylesheet" href="/static/gguf-models.css" />
+  <script defer src="/static/gguf-models.js"></script>
+  <link rel="stylesheet" href="/static/image-skills.css" />
+  <script defer src="/static/image-skills.js"></script>
 </head>
 <body>
 
@@ -45,6 +49,7 @@
       <button class="btn" onclick="openOrganizeModal()">📂 資料夾歸檔精靈</button>
       <button class="btn" onclick="rescanLibrary()" title="重新掃描 D:\圖檔\twitter 檔案變動">🔄 重新掃描</button>
       <button class="btn" onclick="openSettings('history')" title="檢視全系統操作日誌與執行紀錄">📋 操作日誌</button>
+      <button class="btn" id="btn-restore-last-deleted" onclick="restoreLastDeletedImages()" title="復原最後一批刪除的檔案與標籤" hidden>復原上次刪除</button>
       <button class="btn" id="btn-settings" onclick="openSettings()" title="瀏覽偏好、匯入排程與執行紀錄">⚙ 設定</button>
     </div>
   </header>
@@ -74,8 +79,8 @@
       <!-- Tags Panel -->
       <div class="sidebar-section" id="panel-tags">
         <div class="cat-pills">
-          <div class="cat-pill active" data-cat="all" onclick="setTagCategory('all', this)">全部</div>
-          <div class="cat-pill" data-cat="recent" onclick="setTagCategory('recent', this)" title="依編輯時間由最新排到最舊檢視所有圖片">🕒 最近</div>
+          <div class="cat-pill" data-cat="all" onclick="setTagCategory('all', this)">全部</div>
+          <div class="cat-pill active" data-cat="recent" onclick="setTagCategory('recent', this)" title="依編輯時間由最新排到最舊檢視所有圖片">🕒 最近</div>
           <div class="cat-pill" data-cat="artist" onclick="setTagCategory('artist', this)">🎨 畫師</div>
           <div class="cat-pill" data-cat="character" onclick="setTagCategory('character', this)">👤 角色</div>
           <div class="cat-pill" data-cat="copyright" onclick="setTagCategory('copyright', this)">📚 作品</div>
@@ -101,26 +106,16 @@
         <div class="toolbar-row">
           <div class="search-group">
             <input type="text" id="main-search" class="search-input" placeholder="🔍 全域搜尋檔名、畫師、角色、中文標籤 (按 Enter 或自動篩選)..." oninput="debounceLoadImages()" />
-            <select id="sel-media" class="select-box" onchange="resetPageAndLoad()">
-              <option value="all">全部媒體</option>
-              <option value="image">靜態圖片 (JPG/PNG)</option>
-              <option value="gif_video">動圖與影片 (GIF/MP4)</option>
-            </select>
-            <select id="sel-ai" class="select-box" onchange="resetPageAndLoad()">
-              <option value="all">全部 AI 狀態</option>
-              <option value="tagged">🤖 AI 已分析標籤</option>
-              <option value="untagged">⏳ 尚未 AI 分析</option>
-            </select>
             <select id="sel-sort" class="select-box" onchange="resetPageAndLoad()">
               <option value="natural_asc">🔢 Windows 自然順序 (_2 在 _10 前)</option>
-              <option value="mtime_desc">🕒 最新修改日期優先</option>
+              <option value="mtime_desc" selected>🕒 最新修改日期優先</option>
               <option value="mtime_asc">🕒 最舊修改日期優先</option>
               <option value="size_desc">💾 檔案大小 (大 → 小)</option>
             </select>
           </div>
 
           <div style="display:flex; align-items:center; gap:8px;">
-            <button class="btn" onclick="selectAllCurrentPage()">☑️ 全選本頁</button>
+            <button class="btn" onclick="selectAllCurrentPage()" title="Shift 點選可連選；按住左鍵拖過圖片可連續勾選">☑️ 全選本頁</button>
             <button class="btn" onclick="clearAllFilters()">🧹 重設篩選</button>
           </div>
         </div>
@@ -138,6 +133,7 @@
       <div id="batch-bar">
         <div>
           已選取 <b id="batch-count" style="color:#a5b4fc; font-size:15px;">0</b> 張圖片
+          <span class="selection-hint">Shift 連選 · 左鍵拖曳勾選／取消</span>
         </div>
         <div style="display:flex; gap:8px; flex-wrap:wrap;">
           <button class="btn btn-primary" onclick="openBatchTagModal('artist')">🎨 批次設定畫師標籤</button>
@@ -151,6 +147,7 @@
       <div id="file-delete-notice" class="file-delete-notice" hidden>
         <span id="file-delete-status" role="status" aria-live="polite"></span>
         <button class="btn" id="btn-restore-deleted" onclick="restoreLastDeletedImages()" hidden>復原剛才刪除</button>
+        <button class="btn btn-text file-delete-dismiss" id="btn-dismiss-delete-notice" onclick="dismissDeleteNotice()" aria-label="關閉刪除提示" title="關閉提示，保留復原功能">✕ 關閉提示</button>
       </div>
 
       <!-- Image Grid -->
@@ -205,11 +202,34 @@
 
         <div id="dt-rev-links" style="display:none; font-size:12px; background:rgba(5,150,105,0.15); border:1px solid #059669; padding:6px 8px; border-radius:6px;"></div>
 
-        <div style="display:flex; gap:6px; flex-wrap:wrap;">
-          <button class="btn btn-primary" style="flex:1; background:linear-gradient(135deg, #4f46e5, #059669); border-color:#34d399; justify-content:center; font-weight:700;" id="btn-single-unified" onclick="runSingleUnifiedTagAndCalibrate()">🤖 智慧標籤 (AI 打標 ➔ 搜圖校正)</button>
-          <button class="btn btn-primary" style="background:linear-gradient(135deg, #db2777, #9333ea); border-color:#f472b6; font-weight:700;" id="btn-single-decensor" onclick="openOrRunSingleDecensor()" title="使用本機 AMD RX 9070 XT GPU (YOLO + DeepCreamPy v2) 偵測並去除二次元馬賽克/黑條">✨ AI 去馬賽克</button>
-          <button class="btn" onclick="openInExplorer()" title="在 Windows 檔案總管中顯示此檔案">📂 檔案總管</button>
-          <button class="btn btn-danger" id="btn-delete-single" onclick="deleteCurrentImage()" title="刪除此檔案 (Del)">🗑 刪除檔案 (Del)</button>
+        <div class="detail-tools">
+          <div class="detail-actions">
+            <button class="btn detail-direct-action" id="btn-detail-explorer" onclick="closeDetailActions(); openInExplorer()" title="開啟圖片所在資料夾，並在檔案總管中選取此圖片">
+              <svg class="detail-action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7Z"/></svg>
+              開啟資料夾
+            </button>
+            <button class="btn detail-direct-action detail-delete-action" id="btn-delete-single" onclick="closeDetailActions(); deleteCurrentImage()" title="刪除檔案 (Del)" aria-keyshortcuts="Delete">
+              <svg class="detail-action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg>
+              刪除檔案
+            </button>
+            <details class="detail-more" id="detail-more-actions">
+              <summary class="btn" id="btn-detail-more" aria-label="更多圖片操作" aria-controls="detail-more-panel">
+                <svg class="detail-action-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>
+                <span class="detail-more-label">更多</span>
+              </summary>
+              <div class="detail-more-panel" id="detail-more-panel" aria-label="圖片操作">
+                <button class="btn" id="btn-single-unified" onclick="closeDetailActions(true); runSingleUnifiedTagAndCalibrate()" aria-describedby="dt-unified-hint">
+                  <svg class="detail-action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.7 6.3L21 12l-6.3 2.7L12 21l-2.7-6.3L3 12l6.3-2.7Z"/><path d="m20 2 .6 1.4L22 4l-1.4.6L20 6l-.6-1.4L18 4l1.4-.6Z"/></svg>
+                  <span id="dt-unified-label">智慧標籤</span>
+                </button>
+                <button class="btn" id="btn-single-decensor" onclick="closeDetailActions(true); openOrRunSingleDecensor()">
+                  <svg class="detail-action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m16 3 5 5-11 11H5l-3-3L16 3ZM9 10l5 5M10 19h11"/></svg>
+                  <span id="dt-decensor-label">AI 去馬賽克</span>
+                </button>
+              </div>
+            </details>
+          </div>
+          <p class="detail-action-hint" id="dt-unified-hint" role="status" hidden>AI 自動打標，再以圖搜圖校正</p>
         </div>
 
         <!-- 本機 GPU 二次元去馬賽克預覽與儲存控制面板 -->
@@ -234,25 +254,6 @@
           <div id="dt-decensor-save-row" style="display:none; gap:6px; flex-wrap:wrap;">
             <button class="btn btn-primary" style="flex:1; justify-content:center; background:#059669; border-color:#34d399; font-weight:700;" onclick="applySingleDecensor('new_copy')">📄 另存無碼新檔 (_decensored.png 保留原圖)</button>
             <button class="btn btn-warn" style="flex:1; justify-content:center; font-weight:700;" onclick="applySingleDecensor('overwrite')">💾 直接覆蓋原圖</button>
-          </div>
-        </div>
-
-        <!-- Quick Add Tag / Artist -->
-        <div style="background:var(--bg-main); padding:10px; border-radius:8px; border:1px solid var(--border); display:flex; flex-direction:column; gap:6px;">
-          <div class="tag-group-title" style="margin:0;">➕ 手動新增標籤 / 指定畫師</div>
-          <div style="display:flex; gap:6px;">
-            <select id="dt-add-cat" class="select-box" style="padding:5px;">
-              <option value="artist">🎨 畫師</option>
-              <option value="character">👤 角色</option>
-              <option value="copyright">📚 作品</option>
-              <option value="general">🏷️ 屬性</option>
-            </select>
-            <input type="text" id="dt-add-input" class="search-input" list="artist-datalist" placeholder="輸入畫師或標籤名稱..." onkeydown="if(event.key==='Enter') addSingleTag()" />
-            <button class="btn btn-primary" onclick="addSingleTag()">新增</button>
-          </div>
-          <div style="display:flex; gap:6px; margin-top:4px;">
-            <input type="text" id="dt-move-folder-input" class="search-input" list="folder-datalist" placeholder="輸入或選擇要移入的繪師資料夾..." />
-            <button class="btn btn-warn" onclick="moveSingleToFolderInput()">搬移檔案</button>
           </div>
         </div>
 
@@ -326,7 +327,7 @@
         <div style="background:var(--bg-main); border:1px solid #6366f1; border-radius:8px; padding:10px 12px; display:flex; flex-direction:column; gap:8px;">
           <label style="font-size:13px; font-weight:700; color:#a5b4fc; display:flex; align-items:center; gap:8px; cursor:pointer;">
             <input type="checkbox" id="ai-step-local" checked style="width:16px; height:16px;" />
-            <span>① 第一階段：先透過本機 AMD GPU AI (Camie v2) 高速視覺打標（~25張/秒，辨識服裝、場景、角色與屬性，含三層 Pixiv 反查與救援）</span>
+            <span>① 第一階段：先透過本機 AMD GPU AI (Camie v2) 高速視覺打標（僅辨識畫師、角色與作品，含 Pixiv 反查與救援）</span>
           </label>
           <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; font-size:12px;">
             <label>
@@ -334,8 +335,8 @@
               <input type="number" id="ai-limit" class="search-input" value="0" min="0" step="100" style="margin-top:4px;" />
             </label>
             <label>
-              <b>一般屬性門檻 (預設 0.38)：</b>
-              <input type="number" id="ai-gen-thresh" class="search-input" value="0.38" min="0.15" max="0.85" step="0.02" style="margin-top:4px;" />
+              <b>一般描述標籤已停用：</b>
+              <input type="number" id="ai-gen-thresh" disabled hidden class="search-input" value="0.38" min="0.15" max="0.85" step="0.02" style="margin-top:4px;" />
             </label>
             <label>
               <b>AI 畫師門檻 (預設 0.65 防誤猜)：</b>
@@ -369,8 +370,8 @@
         <!-- 階段 ③：語意相關性主題聚合 & 自動建立繪師資料夾歸檔 -->
         <div style="background:rgba(16,185,129,0.1); border:1px solid #059669; border-radius:8px; padding:10px 12px; display:flex; flex-direction:column; gap:6px;">
           <label style="font-size:13px; font-weight:700; color:#fcd34d; display:flex; align-items:center; gap:8px; cursor:pointer;">
-            <input type="checkbox" id="ai-step-sem" checked style="width:16px; height:16px;" />
-            <span>③ 第三階段：自動聚合 9 大高階語意相關性主題標籤 (兔女郎/女僕/泳裝/黑絲等)</span>
+            <input type="checkbox" id="ai-step-sem" disabled hidden style="width:16px; height:16px;" />
+            <span>自動主題標籤已停用</span>
           </label>
           <label style="font-size:13px; font-weight:700; color:#6ee7b7; display:flex; align-items:center; gap:8px; cursor:pointer;">
             <input type="checkbox" id="ai-auto-move" checked style="width:16px; height:16px;" />
@@ -787,7 +788,6 @@
   </div>
 
   <datalist id="artist-datalist"></datalist>
-  <datalist id="folder-datalist"></datalist>
 
   <!-- Application scripts are versioned by app.index. -->
 

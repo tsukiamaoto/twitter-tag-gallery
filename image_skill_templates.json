@@ -1,0 +1,24 @@
+[
+  {
+    "id": "portrait-repair-klein",
+    "name": "臉部、頭髮與背景修補 · FLUX",
+    "description": "修補非性內容頭像中的局部缺損，保留角色、線條與畫風。",
+    "profile": "klein4b",
+    "model_id": "diffusion_models/flux-2-klein-4b-Q8_0.gguf",
+    "prompt": "Repair only the marked missing or damaged patches on the face, hair and background of this nonsexual portrait. Reconstruct continuous lines, matching colors and texture. Preserve the original identity, eye shapes, hairstyle, composition, lighting and drawing style. Keep intact areas unchanged. Do not add objects, accessories or text.",
+    "steps": 4,
+    "seed": 42,
+    "output_mode": "copy"
+  },
+  {
+    "id": "portrait-repair-qwen",
+    "name": "臉部、頭髮與背景修補 · Qwen",
+    "description": "使用 Qwen 進行一般頭像的細節修補，結果另存副本。",
+    "profile": "qwen21",
+    "model_id": "diffusion_models/qwen-image-2.1-UC-Q6_K.gguf",
+    "prompt": "Repair only the marked missing or damaged patches on the face, hair and background of this nonsexual portrait. Reconstruct continuous lines, matching colors and texture. Preserve the original identity, eye shapes, hairstyle, composition, lighting and drawing style. Keep intact areas unchanged. Do not add objects, accessories or text.",
+    "steps": 40,
+    "seed": 42,
+    "output_mode": "copy"
+  }
+]

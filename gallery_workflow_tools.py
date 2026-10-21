@@ -50,7 +50,7 @@ def tool_gallery_get_image_details(image_id, tag_limit=100):
 
 def tool_gallery_update_image_tags(image_ids, add_tags=None, remove_tag_names=None):
     from gallery_tag_service import edit_tags
-    return edit_tags(image_ids, add_tags or [], remove_tag_names or [])
+    return edit_tags(image_ids, add_tags or [], remove_tag_names or [], source="gemini_mcp")
 
 
 def tool_gallery_analyze_images(image_ids, skip_completed=True):

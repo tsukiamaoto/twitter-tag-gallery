@@ -45,7 +45,8 @@ const html = fs.readFileSync(path.join(root, 'static/index.html'), 'utf8').repla
       else if (endpoint.startsWith('/api/jobs/') && endpoint.endsWith('/stop')) data = { status: 'stopping', message: '已要求停止' };
       else if (endpoint === '/api/runtime') data = runtime;
       else if (endpoint === '/api/stats') data = { total_images: 0, root_unorganized: 0, folder_organized: 0, ai_tagged: 0, suggested_folder_count: 0, ai_status: ai };
-      else if (endpoint === '/api/folders' || endpoint === '/api/tags') data = [];
+      else if (endpoint === '/api/folders') data = [];
+      else if (endpoint === '/api/tags') data = {items:[], next_offset:0, has_more:false};
       else if (endpoint === '/api/images') data = { items: [], total: 0 };
       else if (endpoint === '/api/schedule/status') data = schedule;
       return route.fulfill({ contentType: 'application/json', body: JSON.stringify(data) });

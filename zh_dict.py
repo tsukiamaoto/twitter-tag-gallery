@@ -469,12 +469,27 @@ def get_tag_zh(tag_name: str, category: str = "") -> str:
     if not tag_name:
         return ""
     lower = tag_name.lower().strip()
+    if category == "artist":
+        folder = resolve_artist_folder_name(tag_name)
+        return folder if folder in FOLDER_TO_DANBOORU_ARTIST else ""
     if lower in TAG_ZH_DICT:
         return TAG_ZH_DICT[lower]
-    if category == "artist":
-        if lower in DANBOORU_ARTIST_TO_FOLDER:
-            return f"現有繪師：{DANBOORU_ARTIST_TO_FOLDER[lower]}"
     return ""
+
+
+def get_tag_display_name(tag_name: str, category: str = "", zh_name: str = "") -> str:
+    """Normalize legacy artist labels without rewriting stored tags or sources."""
+    if category != "artist":
+        return zh_name or get_tag_zh(tag_name, category)
+    known = get_tag_zh(tag_name, category)
+    if known:
+        return known
+    label = (zh_name or "").strip()
+    for prefix in ("現有繪師：", "現有繪師:"):
+        if label.startswith(prefix):
+            label = label[len(prefix):].strip()
+            break
+    return get_tag_zh(label, "artist") or label or tag_name
 
 
 # 建立不分大小寫的現有資料夾名稱索引

@@ -185,10 +185,20 @@ def _init_db():
         conn.close()
 
 
-def ensure_tag(conn: sqlite3.Connection, tag_cache: Dict[str, int], name: str, category: str) -> int:
+def ensure_tag(conn: sqlite3.Connection, tag_cache: Dict[str, int], name: str, category: str, *, source=None) -> int:
+    # Check before the cache: an existing legacy tag must not bypass the policy.
+    from tag_policy import allows_tag
+    if source is not None and not allows_tag(category, source):
+        return -1
     name_clean = name.strip()
     if not name_clean:
         return -1
+    if source is not None and source != "manual":
+        stored = conn.execute("SELECT category FROM tags WHERE name=?", (name_clean,)).fetchone()
+        if stored is not None and not allows_tag(stored[0], source):
+            # Do not relabel a retained manual/legacy description as a core
+            # identity merely because a model submitted a different category.
+            return -1
     if name_clean in tag_cache:
         return tag_cache[name_clean]
 
@@ -404,18 +414,8 @@ def _scan_library(conn, t0):
                         if db_artist.lower() != folder.lower():
                             tid2 = ensure_tag(conn, tag_cache, db_artist, "artist")
                             tag_links.append((img_id, tid2, 1.0, "folder"))
-                elif folder == "Pussy Spreading":
-                    tid = ensure_tag(conn, tag_cache, "spreading", "general")
-                    tag_links.append((img_id, tid, 1.0, "folder"))
 
                 # 2. Filename-based Date / Source / Konachan tags
-                m_date = RE_DATE_SEQ.match(base)
-                if m_date:
-                    yr = m_date.group(1)
-                    ym = f"{m_date.group(1)}-{m_date.group(2)}"
-                    tid_y = ensure_tag(conn, tag_cache, f"{yr}年", "year")
-                    tag_links.append((img_id, tid_y, 1.0, "filename"))
-
                 if row["pixiv_id"]:
                     tid_p = ensure_tag(conn, tag_cache, "Pixiv來源", "source")
                     tag_links.append((img_id, tid_p, 1.0, "filename"))
@@ -430,11 +430,6 @@ def _scan_library(conn, t0):
                     if m_kona:
                         tid_k = ensure_tag(conn, tag_cache, "Konachan圖站", "source")
                         tag_links.append((img_id, tid_k, 1.0, "filename"))
-                        raw_tags = m_kona.group(2).strip().split()
-                        for rt in raw_tags:
-                            if rt and rt != "sample":
-                                tid_rt = ensure_tag(conn, tag_cache, rt, "general")
-                                tag_links.append((img_id, tid_rt, 1.0, "filename"))
 
             if tag_links:
                 conn.executemany(

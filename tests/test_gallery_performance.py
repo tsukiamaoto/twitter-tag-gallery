@@ -228,6 +228,106 @@ class GalleryTests(unittest.TestCase):
         self.assertIn("INTEGER PRIMARY KEY", plan)
         self.assertEqual(self.prefetch_mock.call_count, 1)
 
+    def test_sidebar_pages_include_special_tags_once_and_match_legacy_order(self):
+        for category in ("all", "recent", "general", "artist"):
+            expected = self.app.api_tags(category=category, q="", limit=500)
+            actual = []
+            offset = 0
+            for _ in range(20):
+                page = self.app.api_tags(category=category, q="", limit=2, offset=offset, paged=True)
+                self.assertLessEqual(len(page["items"]), 2)
+                self.assertEqual(page["next_offset"], offset + len(page["items"]))
+                actual.extend(page["items"])
+                offset = page["next_offset"]
+                if not page["has_more"]:
+                    break
+            else:
+                self.fail("Tag pagination did not terminate")
+            self.assertEqual(actual, expected)
+            self.assertEqual(len({tag["name"] for tag in actual}), len(actual))
+
+    def test_sidebar_pages_merge_artist_aliases_before_slicing_and_search_all_tags(self):
+        c = database.get_db()
+        with c:
+            c.execute("INSERT INTO tags(id,name,category,zh_name) VALUES(4,'artistA_alias','artist','畫師甲')")
+            c.execute("INSERT INTO image_tags(image_id,tag_id) VALUES(4,4)")
+            c.executemany("INSERT INTO tags(id,name,category,post_count) VALUES(?,?,'general',1)",
+                          [(i, f"lazy-tag-{i:03}") for i in range(10, 105)])
+            c.execute("UPDATE tags SET post_count=1 WHERE id=4")
+        c.close()
+        artist = self.app.api_tags(category="artist", q="", limit=1, paged=True)
+        self.assertFalse(artist["has_more"])
+        self.assertEqual(set(artist["items"][0]["aliases"]), {"artistA", "artistA_alias"})
+        first = self.app.api_tags(category="general", q="", limit=40, paged=True)
+        second = self.app.api_tags(category="general", q="", limit=40, offset=40, paged=True)
+        last = self.app.api_tags(category="general", q="", limit=40, offset=80, paged=True)
+        self.assertEqual([len(p["items"]) for p in (first, second, last)], [40, 40, 17])
+        self.assertTrue(first["has_more"])
+        self.assertFalse(last["has_more"])
+        names = [tag["name"] for p in (first, second, last) for tag in p["items"]]
+        self.assertEqual(len(names), len(set(names)))
+        searched = self.app.api_tags(category="general", q="lazy-tag-104", limit=40, paged=True)
+        self.assertEqual([t["name"] for t in searched["items"]], ["lazy-tag-104"])
+        empty = self.app.api_tags(category="all", q="no-such-tag", limit=40, paged=True)
+        self.assertEqual(empty, {"items": [], "next_offset": 0, "has_more": False})
+
+    def test_sidebar_page_parameters_are_validated_by_http(self):
+        from fastapi.testclient import TestClient
+        client = TestClient(self.app.app)
+        for params in ({"offset": -1}, {"limit": 0}, {"limit": "invalid"}):
+            self.assertEqual(client.get("/api/tags", params={"paged": True, **params}).status_code, 422)
+
+    def test_compact_cards_keep_one_artist_rating_and_full_tag_count(self):
+        c = database.get_db()
+        with c:
+            c.execute("UPDATE image_tags SET confidence=0.4 WHERE image_id=1")
+            c.executemany("INSERT INTO tags(id,name,category) VALUES(?,?,?)", [
+                (4, "top-artist", "artist"), (5, "tied-artist", "artist"),
+                (6, "explicit", "rating"), (7, "safe", "rating"),
+                (8, "hidden-character", "character"), (9, "hidden-copyright", "copyright"),
+            ])
+            c.executemany("INSERT INTO image_tags(image_id,tag_id,confidence) VALUES(1,?,?)", [
+                (4, 0.95), (5, 0.95), (6, 0.9), (7, 0.6), (8, 0.8), (9, 0.8), (2, 0.7), (3, 0.7),
+            ])
+        c.close()
+        card = self.images(compact=True)["items"][0]
+        self.assertEqual([t["name"] for t in card["artists"]], ["top-artist"])
+        self.assertEqual(card["rating"], "explicit")
+        self.assertEqual(card["total_tags"], 9)
+        for category in ("characters", "copyrights", "preview_tags"):
+            self.assertEqual(card[category], [])
+        full = self.images()["items"][0]
+        self.assertEqual(len(full["artists"]), 3)
+        self.assertEqual(full["characters"][0]["name"], "hidden-character")
+        self.assertEqual(len(self.app.api_image_detail(1)["tags"]), 9)
+
+    def test_compact_display_keeps_hidden_tag_filters_search_and_empty_images(self):
+        options = dict(include_tags="tagB", exclude_tags="tagC", sort="natural_asc")
+        self.assertEqual(self.ids(compact=True, **options), self.ids(**options))
+        self.assertEqual(self.ids(compact=True, q="條件乙"), self.ids(q="條件乙"))
+        empty = self.images(compact=True)["items"][9]
+        self.assertEqual(empty["total_tags"], 0)
+        self.assertEqual(empty["artists"], [])
+        self.assertIsNone(empty["rating"])
+        self.assertEqual(self.images(compact=True, page=100)["items"], [])
+
+    def test_compact_tag_selection_reads_covering_keys_before_tag_payloads(self):
+        statements = []
+        def connect():
+            c = database.get_db()
+            c.set_trace_callback(statements.append)
+            return c
+        with patch.object(self.app, "get_db", connect):
+            self.images(compact=True)
+        sql = next(s for s in statements if "WITH card_links" in s)
+        c = database.get_db()
+        try:
+            plan = " ".join(r[3] for r in c.execute("EXPLAIN QUERY PLAN " + sql))
+        finally:
+            c.close()
+        self.assertIn("MATERIALIZE card_links", plan)
+        self.assertIn("SEARCH it USING COVERING INDEX", plan)
+
     def test_busy_batch_start_does_not_start_a_second_thread(self):
         from ai_tagger import AITaggerEngine
         from reverse_search import BatchReverseSearchWorker
@@ -247,16 +347,15 @@ class GalleryTests(unittest.TestCase):
                 self.images(include_tags="artistA")
         connection.close.assert_called_once()
 
-    def test_semantic_batches_are_idempotent_and_update_only_their_counts(self):
+    def test_generated_theme_batch_is_rejected_before_changing_counts(self):
         semantic = importlib.import_module("semantic_engine")
-        with patch.object(semantic, "SEMANTIC_THEME_CLUSTERS", {"test-theme": {"core_tags": ["tagB"]}}):
-            first = semantic.apply_semantic_theme_tags_batch()
-            second = semantic.apply_semantic_theme_tags_batch()
-        self.assertEqual(first["theme_links_added"], 3)
-        self.assertEqual(second["theme_links_added"], 0)
+        before = self.images()["total"]
+        with self.assertRaisesRegex(ValueError, "自動標籤"):
+            semantic.apply_semantic_theme_tags_batch()
+        self.assertEqual(self.images()["total"], before)
         c = database.get_db()
         try:
-            self.assertEqual(c.execute("SELECT post_count FROM tags WHERE name='test-theme'").fetchone()[0], 3)
+            self.assertIsNone(c.execute("SELECT id FROM tags WHERE name='test-theme'").fetchone())
         finally:
             c.close()
 

@@ -10,7 +10,7 @@ fs.mkdirSync(artifacts, { recursive: true });
 const html = fs.readFileSync(path.join(root, 'static/index.html'), 'utf8').replace('</head>',
   '<link rel="stylesheet" href="/static/gallery-shell.css"><script defer src="/static/gallery-shell.js"></script><script defer src="/static/integration-settings.js"></script></head>');
 const tags = [
-  { name: 'aoi', zh_name: '青井', category: 'artist', count: 48 },
+  { name: 'aoi', zh_name: '現有繪師：青井', category: 'artist', count: 48, aliases: ['aoi', 'aoi_alt'] },
   { name: 'haru', zh_name: '春野', category: 'artist', count: 32 },
   { name: 'landscape', zh_name: '風景', category: 'general', count: 24 },
   { name: 'night', zh_name: '夜景', category: 'general', count: 16 },
@@ -47,7 +47,10 @@ function illustration(id) {
       let data = {};
       if (pathname === '/api/stats') data = { total_images: 96, root_unorganized: 32, folder_organized: 64, ai_tagged: 48, suggested_folder_count: 0, ai_status: status };
       else if (pathname === '/api/folders') data = [{ name: '青井', count: 48 }, { name: '春野', count: 16 }];
-      else if (pathname === '/api/tags') data = tags.filter(tag => ['all', tag.category].includes(url.searchParams.get('category')));
+      else if (pathname === '/api/tags') {
+        const items = tags.filter(tag => ['all', 'recent', tag.category].includes(url.searchParams.get('category')));
+        data = {items, next_offset:items.length, has_more:false};
+      }
       else if (pathname === '/api/runtime') data = { ai: status, reverse: status, schedule: { running_job: false, config: { enabled: false, schedule_times: [], source_dirs: [], history_logs: [] } }, model: { busy: false }, active_job: {}, jobs: [] };
       else if (pathname === '/api/ai/status' || pathname === '/api/reverse_search/status') data = status;
       else if (pathname === '/api/schedule/status') data = { running_job: false, status_message: '待機中', config: { enabled: false, schedule_times: ['03:00'], source_dirs: [], history_logs: [] } };
@@ -69,8 +72,29 @@ function illustration(id) {
     await page.goto('http://gallery.test/');
     await page.waitForFunction(() => document.querySelectorAll('.card').length > 0 && document.querySelector('#shell-load-status').hidden);
     assert.equal(await page.locator('#shell-library-title').textContent(), '全部圖片');
+    assert.equal(queries[0].compact, 'true', 'The gallery requests compact card summaries');
+    assert.equal(await page.locator('.card .pill.artist').count(), 60);
+    assert.equal(await page.locator('.card .pill.general, .card .pill.character, .card .pill.copyright').count(), 0);
     assert.equal(await page.locator('.shell-nav .stat-pill').count(), 5);
     assert.equal(await page.locator('#ai-banner').isVisible(), false, 'Idle model must not show 0% / pause');
+    assert.equal(await page.locator('.cat-pill.active[data-cat]').getAttribute('data-cat'), 'recent');
+    assert.equal(await page.locator('#sel-sort').inputValue(), 'mtime_desc');
+    assert.equal(queries[0].include_tags, '最近');
+    const artistRow = page.locator('#sidebar-tag-list .tag-item').filter({ hasText: '青井' });
+    assert.equal(await artistRow.count(), 1);
+    assert.equal(await artistRow.locator('.tag-label-zh').textContent(), '青井');
+    assert.equal(await artistRow.locator('.tag-label-en').count(), 0);
+    assert.ok(!(await page.locator('#sidebar-tag-list').textContent()).includes('現有繪師'));
+    await page.evaluate(() => toggleIncludeTag('aoi_alt'));
+    await page.waitForFunction(() => document.querySelector('#sidebar-tag-list .tag-toggle').getAttribute('aria-pressed') === 'true');
+    await page.waitForFunction(() => !document.querySelector('#image-grid .loading-overlay'));
+    assert.equal(await page.locator('#active-filters-bar .filter-chip').filter({ hasText: '青井' }).count(), 1);
+    await artistRow.getByRole('button').click();
+    assert.deepEqual(await page.evaluate(() => state.includeTags), ['最近']);
+    assert.equal(queries[0].sort, 'mtime_desc');
+    assert.equal(await page.locator('.filter-summary').isVisible(), true, 'Show the default recent filter');
+    await page.locator('#btn-clear-tags').click();
+    await page.waitForFunction(() => document.querySelector('#shell-load-status').hidden);
     assert.equal(await page.locator('.filter-summary').isVisible(), false, 'Hide empty conditions row');
     assert.equal(await page.locator('.shell-sidebar').evaluate(el => el.inert), false);
     assert.equal(await page.locator('.sidebar-tabs [role="tab"]').count(), 3);
@@ -188,16 +212,16 @@ function illustration(id) {
           const box = document.querySelector(selector).getBoundingClientRect();
           return { top: box.top, bottom: box.bottom, right: box.right, center: (box.top + box.bottom) / 2 };
         };
-        return { controls: ['.shell-search-field', '#sel-media', '#sel-ai', '#sel-sort', '.shell-toolbar-actions'].map(rect), edge: rect('.filter-toolbar').right };
+        return { controls: ['.shell-search-field', '#sel-sort', '.shell-toolbar-actions'].map(rect), edge: rect('.filter-toolbar').right };
       });
       assert.ok(toolbar.controls.every(box => box.right <= toolbar.edge), `All toolbar controls remain visible at ${width}px`);
       if (width >= 1024) {
         const centers = toolbar.controls.map(box => box.center);
-        assert.ok(Math.max(...centers) - Math.min(...centers) < 2, `Search, filters, sorting and actions share one row at ${width}px`);
+        assert.ok(Math.max(...centers) - Math.min(...centers) < 2, `Search, sorting and actions share one row at ${width}px`);
       }
       if (width <= 650) {
-        const filterTops = toolbar.controls.slice(1, 4).map(box => box.top);
-        assert.ok(Math.max(...filterTops) - Math.min(...filterTops) < 2, `Mobile filter dropdowns share one row at ${width}px`);
+        const actionTops = toolbar.controls.slice(1).map(box => box.top);
+        assert.ok(Math.max(...actionTops) - Math.min(...actionTops) < 2, `Mobile sorting and actions share one row at ${width}px`);
       }
       if (width <= 800) {
         assert.equal(await page.locator('.shell-sidebar').evaluate(el => el.inert), true);

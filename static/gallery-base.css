@@ -230,6 +230,10 @@
       user-select: none;
     }
     .tag-item:hover, .folder-item:hover { background: var(--bg-hover); }
+    .tag-list-status { flex-shrink: 0; padding: 10px 4px; color: var(--text-muted); font-size: 11px; text-align: center; }
+    .tag-list-status[hidden] { display: none; }
+    .tag-load-more { width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+    .tag-load-more:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
     .folder-item.active { background: var(--accent); color: #fff; font-weight: 600; }
     .tag-item-left {
       display: flex;
@@ -347,6 +351,7 @@
 
     .file-delete-notice { padding: 8px 16px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background: var(--bg-panel); font-size: 13px; border-bottom: 1px solid var(--border); }
     .file-delete-notice[hidden] { display: none; }
+    .file-delete-dismiss { margin-left: auto; }
 
     /* Gallery Grid */
     #gallery-scroll {
@@ -386,6 +391,8 @@
       overflow: hidden;
     }
     .thumb-box img {
+      -webkit-user-drag: none;
+      user-select: none;
       width: 100%;
       height: 100%;
       object-fit: cover;
@@ -412,6 +419,9 @@
       background: var(--accent);
       border-color: var(--accent);
     }
+    .selection-hint { display: block; margin-top: 3px; font-size: 11px; color: var(--text-muted); }
+    .grid.selection-painting, .grid.selection-painting * { user-select: none; cursor: crosshair; }
+    .grid.selection-painting .card:hover { transform: none; }
     .badge-top-right {
       position: absolute;
       top: 8px;
@@ -546,6 +556,51 @@
       overflow-y: auto;
       padding: 16px;
       gap: 14px;
+    }
+    .detail-tools { flex-shrink: 0; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+    .detail-actions { display: flex; align-items: stretch; gap: 8px; }
+    .detail-action-icon {
+      width: 18px; height: 18px; flex-shrink: 0;
+      fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round;
+    }
+    .detail-actions .detail-direct-action {
+      flex: 1; min-width: 0; min-height: 40px; justify-content: center; gap: 8px;
+      padding: 8px 10px; font-size: 12px; font-weight: 500;
+    }
+    #btn-detail-explorer .detail-action-icon { color: #b7aeff; }
+    .detail-actions .detail-delete-action { background: transparent; color: #f3a5ad; border-color: #64414a; }
+    .detail-actions .detail-delete-action:hover { background: #ef444414; border-color: #a45c6a; }
+    .detail-action-hint { margin-top: 9px; color: var(--text-muted); font-size: 11px; line-height: 1.6; }
+    .detail-more { position: relative; flex-shrink: 0; }
+    .detail-more > summary {
+      height: 100%; min-height: 40px; padding: 8px 12px; list-style: none;
+      background: transparent; color: var(--text-muted); font-size: 12px;
+    }
+    .detail-more > summary::-webkit-details-marker { display: none; }
+    .detail-more[open] > summary { color: var(--text-main); background: var(--bg-hover); border-color: var(--accent); }
+    .detail-more-panel {
+      position: absolute; top: calc(100% + 8px); right: 0; z-index: 5;
+      width: 236px; padding: 6px; border: 1px solid var(--border); border-radius: 10px;
+      background: var(--bg-panel); box-shadow: 0 12px 32px #0008;
+    }
+    .detail-more-panel .btn {
+      width: 100%; min-height: 40px; justify-content: flex-start; gap: 10px;
+      padding: 9px 10px; border: 0; border-radius: 6px; background: transparent;
+      color: var(--text-main); font-size: 12px; font-weight: 400; text-align: left;
+    }
+    .detail-more-panel .btn:hover { background: var(--bg-hover); }
+    @media (max-width: 700px) {
+      #detail-modal { padding: 10px; }
+      #detail-modal .modal-card { flex-direction: column; height: 94dvh; }
+      #detail-modal .modal-media { min-height: 0; }
+      #detail-modal .modal-info {
+        flex: 0 1 auto; width: 100%; min-width: 0; max-height: 52dvh;
+        border-left: 0; border-top: 1px solid var(--border); padding: 16px;
+      }
+    }
+    @media (max-width: 380px) {
+      .detail-more > summary { padding-inline: 10px; }
+      .detail-more-label { display: none; }
     }
     .dialog-box {
       background: var(--bg-panel);

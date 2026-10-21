@@ -2,11 +2,13 @@
 import json
 import re
 import uuid
+import stat
 
 import database
 from background_work import exclusive_job
-from file_operations import execute
+from file_operations import execute, recover
 from file_safety import gallery_path, UnsafePath
+from query_cache import invalidate_gallery_queries
 
 
 @exclusive_job("刪除圖片檔案")
@@ -14,8 +16,14 @@ def delete_images(image_ids):
     ids = list(dict.fromkeys(image_ids))
     if not ids or any(type(iid) is not int or iid <= 0 for iid in ids):
         raise ValueError("請選取有效的圖片 ID")
+    if not database.GALLERY_ROOT.is_dir():
+        raise OSError("圖庫根目錄無法存取，保留圖片紀錄")
+    if (database.DATA_DIR / "file_journals" / "PENDING").exists():
+        if recover(database.GALLERY_ROOT, database.DATA_DIR, database.get_db)["errors"]:
+            raise RuntimeError("前次檔案操作尚未復原，已停止刪除")
     operation_id = "delete_" + uuid.uuid4().hex
     entries = []
+    found_ids, missing_ids = set(), []
     conn = database.get_db()
     try:
         for start in range(0, len(ids), 500):
@@ -23,11 +31,20 @@ def delete_images(image_ids):
             placeholders = ",".join("?" for _ in chunk)
             rows = conn.execute(f"SELECT * FROM images WHERE id IN ({placeholders})", chunk).fetchall()
             for row in rows:
+                found_ids.add(row["id"])
                 source = gallery_path(database.GALLERY_ROOT, row["rel_path"])
                 if ".tag_gallery" in {part.casefold() for part in source.relative_to(database.GALLERY_ROOT.resolve()).parts}:
                     raise UnsafePath("不可刪除圖庫系統檔案")
-                if not source.is_file():
-                    raise FileNotFoundError(f"圖片檔案不存在：{row['filename']}；尚未刪除任何檔案")
+                try:
+                    info = source.stat()
+                except FileNotFoundError:
+                    # Explicit deletion also removes stale records for files
+                    # already deleted outside the gallery. Other I/O errors
+                    # must keep the index so an unavailable file is not lost.
+                    missing_ids.append(row["id"])
+                    continue
+                if not stat.S_ISREG(info.st_mode):
+                    raise UnsafePath(f"圖片路徑不是一般檔案：{row['filename']}")
                 tags = [dict(tag) for tag in conn.execute(
                     "SELECT t.name,t.category,t.zh_name,it.confidence,it.source "
                     "FROM image_tags it JOIN tags t ON t.id=it.tag_id WHERE it.image_id=?", (row["id"],))]
@@ -38,21 +55,30 @@ def delete_images(image_ids):
                     "new_rel_path": f".tag_gallery/trash/{operation_id}/{row['id']}/{source.name}",
                     "image": dict(row), "tags": tags, "processing": processing,
                 })
-        if len(entries) != len(ids):
+        if len(found_ids) != len(ids):
+            if len(ids) == 1 and not found_ids:
+                # A still-open viewer can refer to a record removed by another
+                # request/tab. Treat repeating this single deletion as done.
+                invalidate_gallery_queries()
+                return {"deleted": 0, "deleted_ids": ids, "operation_id": None,
+                        "restorable": 0, "missing_count": 0, "already_deleted": True}
             raise ValueError("包含不存在的圖片 ID；尚未刪除任何檔案")
     finally:
         conn.close()
 
     def remove_rows(conn, records):
-        conn.executemany("DELETE FROM images WHERE id=?", [(entry["id"],) for entry in records])
+        conn.executemany("DELETE FROM images WHERE id=?", [(iid,) for iid in ids])
         database.refresh_tag_counts(conn)
 
     execute(database.GALLERY_ROOT, database.DATA_DIR, database.get_db, entries,
             kind="delete", operation_id=operation_id, after_write=remove_rows)
+    invalidate_gallery_queries()
     database.log_operation(category="files", action="刪除圖片至圖庫回收區",
-                           summary=f"已刪除 {len(entries)} 個檔案，可復原", affected_count=len(entries),
-                           details={"operation_id": operation_id})
-    return {"deleted": len(entries), "deleted_ids": ids, "operation_id": operation_id}
+                           summary=f"已移除 {len(ids)} 筆圖片紀錄，{len(entries)} 個檔案移至回收區、{len(missing_ids)} 個檔案原已不存在",
+                           affected_count=len(ids),
+                           details={"operation_id": operation_id, "image_ids": ids, "missing_ids": missing_ids})
+    return {"deleted": len(ids), "deleted_ids": ids, "operation_id": operation_id,
+            "restorable": len(entries), "missing_count": len(missing_ids)}
 
 
 @exclusive_job("復原刪除圖片")
@@ -63,6 +89,8 @@ def restore_deleted_images(operation_id):
     plan = json.loads(manifest.read_text(encoding="utf-8"))
     if plan.get("kind") != "delete" or plan.get("status") != "committed":
         raise ValueError("此刪除批次尚未完成，請先執行檔案復原檢查")
+    if not plan["entries"]:
+        raise ValueError("此批次只清除了失效索引，原檔案已不存在，無可復原的檔案")
     restore_prefix = "restore_" + operation_id + "_"
     conn = database.get_db()
     try:
@@ -110,6 +138,7 @@ def restore_deleted_images(operation_id):
 
     execute(database.GALLERY_ROOT, database.DATA_DIR, database.get_db, entries,
             kind="restore_delete", operation_id=restore_prefix + uuid.uuid4().hex[:8], after_write=restore_rows)
+    invalidate_gallery_queries()
     database.log_operation(category="files", action="復原刪除圖片",
                            summary=f"已復原 {len(entries)} 個檔案與標籤", affected_count=len(entries),
                            details={"operation_id": operation_id})
