@@ -57,8 +57,8 @@ def tool_gallery_analyze_images(image_ids, skip_completed=True):
     from processing_state import AI_MODEL_VERSION
     from vision_service import analyze
     rows = _images(image_ids, present=True)
-    if any(row["media_type"] not in ("image", "gif") for row in rows):
-        raise ValueError("本機 AI 工具僅支援靜態圖片及 GIF；尚未開始打標")
+    if any(row["media_type"] not in ("image", "gif", "video") for row in rows):
+        raise ValueError("本機 AI 工具僅支援靜態圖片、GIF 及 MP4 影片；尚未開始打標")
     conn = database.get_db()
     try:
         ids = [row["id"] for row in rows]

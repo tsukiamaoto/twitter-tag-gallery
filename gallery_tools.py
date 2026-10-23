@@ -243,7 +243,7 @@ def tool_gallery_list_candidates_for_artist_calibration(
             SELECT i.id, i.rel_path, i.filename, i.folder, i.pixiv_id
             FROM images i
             WHERE i.folder = ''
-              AND i.media_type = 'image'
+              AND i.media_type IN ('image', 'gif', 'video')
               AND i.id NOT IN ({verified_sql})
             ORDER BY i.mtime DESC
             LIMIT ?
@@ -255,7 +255,7 @@ def tool_gallery_list_candidates_for_artist_calibration(
             f"""
             SELECT i.id, i.rel_path, i.filename, i.folder, i.pixiv_id
             FROM images i
-            WHERE i.media_type = 'image'
+            WHERE i.media_type IN ('image', 'gif', 'video')
               AND i.id IN (
                   SELECT it.image_id FROM image_tags it
                   JOIN tags t ON t.id = it.tag_id

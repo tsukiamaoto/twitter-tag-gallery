@@ -571,7 +571,7 @@ def api_organize_artist_folders_preview(
         """
         SELECT COUNT(*) FROM images i
         WHERE i.folder = ''
-          AND i.media_type IN ('image', 'gif')
+          AND i.media_type IN ('image', 'gif', 'video')
           AND (
               i.ai_tagged = 0
               OR NOT EXISTS (

@@ -441,7 +441,7 @@ class AutoIngestScheduler:
                     ai_rows = [
                         dict(r)
                         for r in conn.execute(
-                            f"SELECT id, rel_path, filename FROM images WHERE folder = '' AND media_type = 'image' AND filename IN ({placeholders}) AND ai_tagged = 0",
+                            f"SELECT id, rel_path, filename FROM images WHERE folder = '' AND media_type IN ('image', 'gif', 'video') AND filename IN ({placeholders}) AND ai_tagged = 0",
                             moved_dest_filenames,
                         ).fetchall()
                     ]
@@ -449,7 +449,7 @@ class AutoIngestScheduler:
                     ai_rows = [
                         dict(r)
                         for r in conn.execute(
-                            "SELECT id, rel_path, filename FROM images WHERE folder = '' AND media_type = 'image' AND ai_tagged = 0 ORDER BY mtime DESC LIMIT 200"
+                            "SELECT id, rel_path, filename FROM images WHERE folder = '' AND media_type IN ('image', 'gif', 'video') AND ai_tagged = 0 ORDER BY mtime DESC LIMIT 200"
                         ).fetchall()
                     ]
                 conn.close()
