@@ -2,7 +2,7 @@
 (() => {
   'use strict';
   const app = window.GalleryApp, byId = id => document.getElementById(id), api = '/api/image-skills';
-  const defaults = { klein4b: { model: 'diffusion_models/flux-2-klein-4b-Q8_0.gguf', steps: 4 }, qwen21: { model: 'diffusion_models/qwen-image-2.1-UC-Q6_K.gguf', steps: 40 } };
+  const defaults = { wai_illustrious: { model: 'diffusion_models/WAI-illustrious-SDXL-v170-Q4_K_M.gguf', steps: 20 } };
   let catalog = { skills: [], active_id: null }, models = [], selected = null, dirty = false, busy = false, pending = null;
   const fields = ['name', 'description', 'profile', 'model', 'prompt', 'steps', 'seed'];
   function feedback(message, error = false) { byId('image-skills-feedback').textContent = message; byId('image-skills-feedback').classList.toggle('error', error); }
@@ -33,14 +33,15 @@
   }
   function modelOptions(profile, value) {
     const select = byId('image-skill-model'); select.replaceChildren();
-    const candidates = new Set([defaults[profile].model, ...models.filter(m => m.valid && (m.profile === profile || !m.profile)).map(m => m.id)]);
+    const defModel = (defaults[profile] || defaults.wai_illustrious).model;
+    const candidates = new Set([defModel, ...models.filter(m => m.valid && (m.profile === profile || !m.profile)).map(m => m.id)]);
     if (value) candidates.add(value);
     for (const id of candidates) select.add(new Option(`${id.split('/').pop()}${models.some(m => m.id === id) ? '' : ' · 尚未下載'}`, id));
-    select.value = value || defaults[profile].model;
+    select.value = value || defModel;
   }
   function edit(skill) {
     selected = skill?.id || null;
-    const value = skill || { name: '', description: '', profile: 'klein4b', model_id: defaults.klein4b.model, prompt: '', steps: 4, seed: 42 };
+    const value = skill || { name: '', description: '', profile: 'wai_illustrious', model_id: defaults.wai_illustrious.model, prompt: '', steps: 20, seed: 42 };
     for (const field of fields.filter(f => f !== 'model')) byId(`image-skill-${field}`).value = value[field];
     modelOptions(value.profile, value.model_id);
     byId('image-skill-picker').value = selected || '';
@@ -83,13 +84,13 @@
         <div class="image-skill-workspace">
           <section class="image-skill-card image-skill-prompt-card" aria-labelledby="image-skill-prompt-label">
             <div class="image-skill-card-heading"><label for="image-skill-prompt" id="image-skill-prompt-label">修補指示 <span>Prompt</span></label><span class="image-skill-badge">主要設定</span></div>
-            <p class="settings-note" id="image-skill-prompt-help">描述修補區域、要保留的特徵與預期畫風。</p>
-            <textarea id="image-skill-prompt" required maxlength="12000" rows="10" spellcheck="false" aria-describedby="image-skill-prompt-help" placeholder="例如：修補臉部與頭髮的局部缺損，保留原本的五官、線條、光線與畫風。"></textarea>
+            <p class="settings-note" id="image-skill-prompt-help">描述要去除的馬賽克、白邊／黑條或模糊區域，以及要補強的線條、膚質與光影細節。</p>
+            <textarea id="image-skill-prompt" required maxlength="12000" rows="10" spellcheck="false" aria-describedby="image-skill-prompt-help" placeholder="例如：去除遮罩區域的馬賽克、白邊與模糊，補強清晰的連續線條、自然膚質、光影漸層與細節，並保留周圍未遮罩區域。"></textarea>
             <div class="image-skill-prompt-meta"><span>支援中文與英文</span><span id="image-skill-prompt-count"></span></div>
           </section>
           <section class="image-skill-card image-skill-model-card" aria-labelledby="image-skill-model-heading">
             <div class="image-skill-card-heading"><h4 id="image-skill-model-heading">模型 <span>Model</span></h4><span class="image-skill-badge" id="image-skill-model-status"></span></div>
-            <label>模型系列<select class="select-box" id="image-skill-profile"><option value="klein4b">FLUX.2 klein 4B</option><option value="qwen21">Qwen-Image-2.1</option></select></label>
+            <label>模型系列<select class="select-box" id="image-skill-profile"><option value="wai_illustrious">WAI-NSFW-illustrious-SDXL v17.0</option></select></label>
             <label>GGUF 模型檔<select class="select-box" id="image-skill-model"></select></label>
             <div class="image-skill-model-help"><p class="settings-note">套用技能後，至 AI 模型頁載入模型。</p><button class="btn btn-text" type="button" id="image-skills-models">管理 GGUF 模型 <span aria-hidden="true">↗</span></button></div>
           </section>

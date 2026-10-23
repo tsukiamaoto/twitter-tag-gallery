@@ -15,7 +15,13 @@ def migrate(conn):
     }.items():
         if name not in columns:
             conn.execute(f"ALTER TABLE images ADD COLUMN {name} {definition}")
+    tag_idx = conn.execute("SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_image_tags_tag'").fetchone()
+    if tag_idx and "image_id" not in (tag_idx[0] or ""):
+        conn.execute("DROP INDEX IF EXISTS idx_image_tags_tag")
     conn.executescript("""
+        DROP INDEX IF EXISTS idx_image_tags_img;
+        CREATE INDEX IF NOT EXISTS idx_image_tags_tag ON image_tags(tag_id, image_id);
+        CREATE INDEX IF NOT EXISTS idx_images_folder_mtime ON images(folder, mtime);
         CREATE INDEX IF NOT EXISTS idx_images_hash ON images(content_hash);
         CREATE INDEX IF NOT EXISTS idx_images_identity ON images(file_identity);
         CREATE INDEX IF NOT EXISTS idx_images_present_mtime ON images(missing_since,mtime DESC,id DESC);
@@ -40,6 +46,9 @@ def migrate(conn):
         );
         CREATE TABLE IF NOT EXISTS semantic_rules(theme TEXT PRIMARY KEY,rule_hash TEXT NOT NULL);
     """)
+    if len(conn.execute("PRAGMA index_info(idx_image_tags_tag)").fetchall()) < 2:
+        conn.execute("DROP INDEX IF EXISTS idx_image_tags_tag")
+        conn.execute("CREATE INDEX idx_image_tags_tag ON image_tags(tag_id, image_id)")
     if not conn.execute("SELECT 1 FROM gallery_schema WHERE version=1").fetchone():
         now = time.time()
         # A historical generic flag is not evidence of successful vision inference.

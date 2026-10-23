@@ -175,7 +175,7 @@
       <rect width="240" height="75" rx="8" fill="#1e293b" stroke="#475569" stroke-width="1" />
       <text x="16" y="25" class="card-title" fill="#f8fafc">去馬賽克修復引擎</text>
       <text x="16" y="43" class="card-desc">decensor_engine.py</text>
-      <text x="16" y="60" class="card-desc">YOLOv8 遮罩 + DeepCreamPy</text>
+      <text x="16" y="60" class="card-desc">YOLOv11-seg + GGUF 模型重繪</text>
     </g>
   </g>
 

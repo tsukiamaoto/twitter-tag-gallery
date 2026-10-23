@@ -2,9 +2,7 @@
 import ast
 from pathlib import Path
 import sqlite3
-import subprocess
 import tempfile
-from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
 
@@ -29,7 +27,7 @@ class OpenExplorerTests(unittest.TestCase):
                      if isinstance(node, ast.FunctionDef) and node.name == "api_open_explorer")
         namespace = {"app": app, "get_db": self.connect, "GALLERY_ROOT": self.root,
                      "gallery_path": gallery_path, "HTTPException": HTTPException,
-                     "subprocess": SimpleNamespace(Popen=self.launch)}
+                     "reveal_file": self.launch}
         exec(compile(ast.Module(body=[route], type_ignores=[]), str(source), "exec"), namespace)
         self.client = TestClient(app)
         self.addCleanup(self.client.close)
@@ -56,16 +54,13 @@ class OpenExplorerTests(unittest.TestCase):
         response = self.client.post("/api/open_explorer/1")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"status": "opened", "path": str(target)})
-        args = self.launch.call_args.args[0]
-        # Explorer must receive the switch outside the quoted filename.
-        self.assertEqual(subprocess.list2cmdline(args), f'explorer.exe /select, "{target}"')
-        self.launch.assert_called_once()
+        self.launch.assert_called_once_with(target)
 
     def test_root_image_is_selected_in_the_library_folder(self):
         target = self.add_image("root image.png")
         response = self.client.post("/api/open_explorer/1")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.launch.call_args.args[0][-1], str(target))
+        self.launch.assert_called_once_with(target)
 
     def test_unknown_or_missing_image_does_not_open_an_unrelated_folder(self):
         self.assertEqual(self.client.post("/api/open_explorer/999").status_code, 404)

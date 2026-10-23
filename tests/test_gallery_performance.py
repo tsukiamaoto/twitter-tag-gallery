@@ -271,6 +271,28 @@ class GalleryTests(unittest.TestCase):
         empty = self.app.api_tags(category="all", q="no-such-tag", limit=40, paged=True)
         self.assertEqual(empty, {"items": [], "next_offset": 0, "has_more": False})
 
+    def test_artist_sidebar_batches_alias_counts_and_hits_cache_across_requests(self):
+        from query_cache import invalidate_gallery_queries
+        c = database.get_db()
+        with c:
+            c.execute("INSERT INTO tags(id,name,category,zh_name,post_count) VALUES(4,'artistA_alias','artist','畫師甲',1)")
+            c.execute("INSERT INTO image_tags(image_id,tag_id) VALUES(4,4)")
+            cols = [r[2] for r in c.execute("PRAGMA index_info(idx_image_tags_tag)")]
+        c.close()
+        self.assertEqual(cols, ["tag_id", "image_id"])
+        invalidate_gallery_queries()
+        statements = []
+        def connect():
+            conn = database.get_db()
+            conn.set_trace_callback(statements.append)
+            return conn
+        with patch.object(self.app, "get_db", connect):
+            first = self.app.api_tags(category="artist", q="", limit=40, paged=True)
+            first_sql_count = len(statements)
+            second = self.app.api_tags(category="artist", q="", limit=40, paged=True)
+        self.assertEqual(first, second)
+        self.assertEqual(len(statements), first_sql_count, "Warm artist sidebar request should hit QueryCache without SQL queries")
+
     def test_sidebar_page_parameters_are_validated_by_http(self):
         from fastapi.testclient import TestClient
         client = TestClient(self.app.app)
@@ -451,7 +473,15 @@ class ThumbnailTests(unittest.TestCase):
             second_cache.close()
 
     def test_video_missing_image_and_queue_limits(self):
-        self.assertTrue(self.cache.submit(2).result(timeout=3).video)
+        fallback = self.cache.submit(2).result(timeout=3)
+        self.assertTrue(fallback.video)
+        self.assertIsNone(self.cache.cached(2))
+        with patch("thumbnail_cache._extract_video_thumbnail", return_value=Image.new("RGB", (320, 180), "purple")):
+            extracted = self.cache.submit(2).result(timeout=3)
+        self.assertFalse(extracted.video)
+        self.assertTrue(extracted.path.is_file())
+        self.assertNotEqual(fallback.etag, extracted.etag)
+        self.assertEqual(self.cache.cached(2).path, extracted.path)
         with self.assertRaises(FileNotFoundError):
             self.cache.submit(999).result(timeout=3)
         release = threading.Event()

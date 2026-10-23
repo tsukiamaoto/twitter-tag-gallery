@@ -120,7 +120,7 @@
       ['openRenameModal()', '批次改名與排序'],
       ['openOrganizeModal()', '資料夾歸檔精靈'],
       ["openSettings('history')", '系統操作與處理日誌'],
-      ['restoreLastDeletedImages()', '復原上次刪除'],
+
       ['rescanLibrary()', '重新掃描圖庫'],
       ['unloadAiModel(false)', '卸載模型・釋放記憶體'],
     ];

@@ -20,6 +20,211 @@ from background_work import (
 
 log = logging.getLogger(__name__)
 PIPELINE_VERSION = "v3"
+VIDEO_PIPELINE_VERSION = "v4"
+
+
+def _extract_windows_video_thumbnail(source: Path, max_size: int = 380) -> Image.Image | None:
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class GUID(ctypes.Structure):
+        _fields_ = [
+            ("Data1", wintypes.DWORD),
+            ("Data2", wintypes.WORD),
+            ("Data3", wintypes.WORD),
+            ("Data4", ctypes.c_ubyte * 8),
+        ]
+
+    class SIZE(ctypes.Structure):
+        _fields_ = [("cx", wintypes.LONG), ("cy", wintypes.LONG)]
+
+    class BITMAP(ctypes.Structure):
+        _fields_ = [
+            ("bmType", wintypes.LONG),
+            ("bmWidth", wintypes.LONG),
+            ("bmHeight", wintypes.LONG),
+            ("bmWidthBytes", wintypes.LONG),
+            ("bmPlanes", wintypes.WORD),
+            ("bmBitsPixel", wintypes.WORD),
+            ("bmBits", ctypes.c_void_p),
+        ]
+
+    class BITMAPINFOHEADER(ctypes.Structure):
+        _fields_ = [
+            ("biSize", wintypes.DWORD),
+            ("biWidth", wintypes.LONG),
+            ("biHeight", wintypes.LONG),
+            ("biPlanes", wintypes.WORD),
+            ("biBitCount", wintypes.WORD),
+            ("biCompression", wintypes.DWORD),
+            ("biSizeImage", wintypes.DWORD),
+            ("biXPelsPerMeter", wintypes.LONG),
+            ("biYPelsPerMeter", wintypes.LONG),
+            ("biClrUsed", wintypes.DWORD),
+            ("biClrImportant", wintypes.DWORD),
+        ]
+
+    ole32 = ctypes.windll.ole32
+    shell32 = ctypes.windll.shell32
+    gdi32 = ctypes.windll.gdi32
+    user32 = ctypes.windll.user32
+
+    ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+    ole32.CoInitializeEx.restype = ctypes.c_long
+    ole32.CoUninitialize.argtypes = []
+    ole32.CoUninitialize.restype = None
+
+    sh_create_item = shell32.SHCreateItemFromParsingName
+    sh_create_item.argtypes = [
+        wintypes.LPCWSTR,
+        ctypes.c_void_p,
+        ctypes.POINTER(GUID),
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    sh_create_item.restype = ctypes.c_long
+
+    gdi32.GetObjectW.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p]
+    gdi32.GetObjectW.restype = ctypes.c_int
+    gdi32.GetDIBits.argtypes = [
+        wintypes.HDC,
+        wintypes.HBITMAP,
+        wintypes.UINT,
+        wintypes.UINT,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.UINT,
+    ]
+    gdi32.GetDIBits.restype = ctypes.c_int
+    gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+    gdi32.DeleteObject.restype = wintypes.BOOL
+    user32.GetDC.argtypes = [wintypes.HWND]
+    user32.GetDC.restype = wintypes.HDC
+    user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+    user32.ReleaseDC.restype = ctypes.c_int
+
+    iid_factory = GUID(
+        0xBCC18B79,
+        0xBA16,
+        0x442F,
+        (ctypes.c_ubyte * 8)(0x80, 0xC4, 0x8A, 0x59, 0xC3, 0x0C, 0x46, 0x3B),
+    )
+    get_image_proto = ctypes.WINFUNCTYPE(
+        ctypes.c_long,
+        ctypes.c_void_p,
+        SIZE,
+        ctypes.c_int,
+        ctypes.POINTER(wintypes.HBITMAP),
+    )
+    release_proto = ctypes.WINFUNCTYPE(wintypes.ULONG, ctypes.c_void_p)
+
+    hr_init = ole32.CoInitializeEx(None, 0x0)
+    should_uninit = hr_init in (0, 1)
+    try:
+        p_factory = ctypes.c_void_p()
+        hr = sh_create_item(
+            os.fspath(source.resolve()),
+            None,
+            ctypes.byref(iid_factory),
+            ctypes.byref(p_factory),
+        )
+        if hr < 0 or not p_factory.value:
+            return None
+        vtable = ctypes.cast(
+            p_factory, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))
+        ).contents
+        get_image = get_image_proto(vtable[3])
+        release = release_proto(vtable[2])
+        hbitmap = wintypes.HBITMAP()
+        try:
+            # SIIGBF_THUMBNAILONLY (0x08) | SIIGBF_BIGGERSIZEOK (0x01)
+            hr = get_image(p_factory, SIZE(max_size, max_size), 0x08 | 0x01, ctypes.byref(hbitmap))
+            if hr < 0 or not hbitmap.value:
+                return None
+            bmp = BITMAP()
+            if not gdi32.GetObjectW(hbitmap, ctypes.sizeof(bmp), ctypes.byref(bmp)):
+                return None
+            w, h = int(bmp.bmWidth), int(bmp.bmHeight)
+            if w <= 0 or h <= 0:
+                return None
+            bmi = BITMAPINFOHEADER()
+            bmi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+            bmi.biWidth = w
+            bmi.biHeight = -h  # Top-down DIB
+            bmi.biPlanes = 1
+            bmi.biBitCount = 32
+            bmi.biCompression = 0  # BI_RGB
+            buf = ctypes.create_string_buffer(w * h * 4)
+            hdc = user32.GetDC(None)
+            try:
+                lines = gdi32.GetDIBits(hdc, hbitmap, 0, h, buf, ctypes.byref(bmi), 0)
+            finally:
+                if hdc:
+                    user32.ReleaseDC(None, hdc)
+            if not lines:
+                return None
+            image = Image.frombuffer("RGBA", (w, h), buf.raw, "raw", "BGRA", 0, 1).copy()
+            image.thumbnail((max_size, max_size), Image.Resampling.BILINEAR)
+            return image.convert("RGB")
+        finally:
+            if hbitmap.value:
+                gdi32.DeleteObject(hbitmap)
+            release(p_factory)
+    except Exception:
+        log.debug("Windows shell video thumbnail extraction failed for %s", source, exc_info=True)
+        return None
+    finally:
+        if should_uninit:
+            ole32.CoUninitialize()
+
+
+def _extract_ffmpeg_video_thumbnail(source: Path, max_size: int = 380) -> Image.Image | None:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+    import io
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                "0.1",
+                "-i",
+                os.fspath(source),
+                "-frames:v",
+                "1",
+                "-vf",
+                f"scale='min({max_size},iw)':'min({max_size},ih)':force_original_aspect_ratio=decrease",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "mjpeg",
+                "-",
+            ],
+            capture_output=True,
+            timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        if proc.returncode == 0 and proc.stdout:
+            with Image.open(io.BytesIO(proc.stdout)) as img:
+                img.thumbnail((max_size, max_size), Image.Resampling.BILINEAR)
+                return img.convert("RGB")
+    except Exception:
+        log.debug("ffmpeg video thumbnail extraction failed for %s", source, exc_info=True)
+    return None
+
+
+def _extract_video_thumbnail(source: Path, max_size: int = 380) -> Image.Image | None:
+    image = _extract_windows_video_thumbnail(source, max_size=max_size)
+    if image is not None:
+        return image
+    return _extract_ffmpeg_video_thumbnail(source, max_size=max_size)
 
 
 @dataclass
@@ -50,6 +255,7 @@ class ThumbnailCache:
         self._queue = queue.PriorityQueue()
         self._counter = itertools.count()
         self._pending = {}
+        self._warm_ids = set()
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._threads = []
@@ -68,17 +274,18 @@ class ThumbnailCache:
     def _target(self, row):
         source = self.root / row["rel_path"]
         stat = source.stat()
-        fingerprint = f"{PIPELINE_VERSION}|{row['rel_path']}|{stat.st_size}|{stat.st_mtime_ns}"
+        pipeline = VIDEO_PIPELINE_VERSION if row["media_type"] == "video" else PIPELINE_VERSION
+        fingerprint = f"{pipeline}|{row['rel_path']}|{stat.st_size}|{stat.st_mtime_ns}"
         version = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:24]
         return source, stat, self.cache_dir / f"{row['id']}-{version}.jpg", f'"{version}"'
 
     def cached(self, image_id):
         row = self._record(image_id)
         source, stat, target, etag = self._target(row)
-        if row["media_type"] == "video":
-            return Thumbnail(None, etag, video=True)
         if target.is_file():
+            self._warm_ids.add(image_id)
             return Thumbnail(target, etag)
+        self._warm_ids.discard(image_id)
         return None
 
     def submit(self, image_id, foreground=True):
@@ -108,6 +315,8 @@ class ThumbnailCache:
         # Enqueue only IDs here; no per-image DB connections or source reads on
         # the image-list request's critical path.
         for image_id in image_ids:
+            if image_id in self._warm_ids:
+                continue
             with self._lock:
                 if len(self._pending) >= self.max_pending // 2:
                     break  # Reserve queue capacity for visible image requests.
@@ -134,8 +343,10 @@ class ThumbnailCache:
             try:
                 result = self._generate(job)
             except BaseException as exc:
+                self._warm_ids.discard(job.image_id)
                 job.future.set_exception(exc)
             else:
+                self._warm_ids.add(job.image_id)
                 job.future.set_result(result)
             finally:
                 with self._lock:
@@ -145,8 +356,6 @@ class ThumbnailCache:
     def _generate(self, job):
         row = self._record(job.image_id)
         source, stat, target, etag = self._target(row)
-        if row["media_type"] == "video":
-            return Thumbnail(None, etag, video=True)
         if target.is_file():
             return Thumbnail(target, etag)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -162,26 +371,32 @@ class ThumbnailCache:
                 return Thumbnail(target, etag)
             tmp = target.with_name(target.name + "." + uuid.uuid4().hex + ".tmp")
             with media_io(background=not job.foreground):
-                legacy = self.cache_dir / f"{job.image_id}.jpg"
-                reuse = False
-                if legacy.is_file() and legacy.stat().st_mtime_ns >= stat.st_mtime_ns:
-                    try:
-                        with Image.open(legacy) as image:
-                            image.verify()
-                        reuse = True
-                    except (OSError, ValueError, SyntaxError):
-                        pass
-                if reuse:
-                    shutil.copyfile(legacy, tmp)
+                if row["media_type"] == "video":
+                    image = _extract_video_thumbnail(source, max_size=380)
+                    if image is None:
+                        return Thumbnail(None, f'"{etag.strip(chr(34))}-svg"', video=True)
+                    image.save(tmp, "JPEG", quality=82)
                 else:
-                    with Image.open(source) as image:
-                        image.draft("RGB", (760, 760))
-                        image = ImageOps.exif_transpose(image)
-                        # Resize before converting large RGBA images to RGB.
-                        image.thumbnail((380, 380), Image.Resampling.BILINEAR)
-                        if image.mode != "RGB":
-                            image = image.convert("RGB")
-                        image.save(tmp, "JPEG", quality=82)
+                    legacy = self.cache_dir / f"{job.image_id}.jpg"
+                    reuse = False
+                    if legacy.is_file() and legacy.stat().st_mtime_ns >= stat.st_mtime_ns:
+                        try:
+                            with Image.open(legacy) as image:
+                                image.verify()
+                            reuse = True
+                        except (OSError, ValueError, SyntaxError):
+                            pass
+                    if reuse:
+                        shutil.copyfile(legacy, tmp)
+                    else:
+                        with Image.open(source) as image:
+                            image.draft("RGB", (760, 760))
+                            image = ImageOps.exif_transpose(image)
+                            # Resize before converting large RGBA images to RGB.
+                            image.thumbnail((380, 380), Image.Resampling.BILINEAR)
+                            if image.mode != "RGB":
+                                image = image.convert("RGB")
+                            image.save(tmp, "JPEG", quality=82)
             if source.stat().st_mtime_ns != stat.st_mtime_ns or source.stat().st_size != stat.st_size:
                 raise OSError("Source changed while generating thumbnail; retry")
             os.replace(tmp, target)
@@ -210,7 +425,7 @@ class ThumbnailCache:
             conn = self.get_db()
             try:
                 rows = conn.execute(
-                    "SELECT id FROM images WHERE id > ? AND media_type != 'video' AND missing_since IS NULL ORDER BY id LIMIT 32", (cursor,)
+                    "SELECT id FROM images WHERE id > ? AND missing_since IS NULL ORDER BY id LIMIT 32", (cursor,)
                 ).fetchall()
             finally:
                 conn.close()

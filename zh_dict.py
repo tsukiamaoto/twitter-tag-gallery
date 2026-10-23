@@ -74,6 +74,7 @@ DANBOORU_ARTIST_TO_FOLDER.update({
     "casino": "casino (casinoep)",
     "hagi": "hagi_萩",
     "coro_tret": "Coro Tret Coro Fae",
+    "topu2782": "Topu",
 })
 
 # 常用 Danbooru 標籤繁體中文翻譯
@@ -513,10 +514,20 @@ def resolve_artist_folder_name(artist_tag: str) -> str:
             return ""
 
     lower = raw.lower()
-    if lower in DANBOORU_ARTIST_TO_FOLDER:
-        return DANBOORU_ARTIST_TO_FOLDER[lower]
-    if lower in _EXISTING_FOLDERS_LOWER:
-        return _EXISTING_FOLDERS_LOWER[lower]
+    lower_no_at = lower.lstrip("@")
+    for cand in (lower, lower_no_at):
+        if cand in DANBOORU_ARTIST_TO_FOLDER:
+            return DANBOORU_ARTIST_TO_FOLDER[cand]
+        if cand in _EXISTING_FOLDERS_LOWER:
+            return _EXISTING_FOLDERS_LOWER[cand]
+
+    import re
+    stripped_num = re.sub(r"_?\d+$", "", lower_no_at)
+    if len(stripped_num) >= 4:
+        if stripped_num in DANBOORU_ARTIST_TO_FOLDER:
+            return DANBOORU_ARTIST_TO_FOLDER[stripped_num]
+        if stripped_num in _EXISTING_FOLDERS_LOWER:
+            return _EXISTING_FOLDERS_LOWER[stripped_num]
 
     # 將底線轉為空白（符合使用者既有資料夾如 'casino (casinoep)', 'box wonderland' 的命名習慣）
     spaced = raw.replace("_", " ").strip()
@@ -526,7 +537,6 @@ def resolve_artist_folder_name(artist_tag: str) -> str:
         return _EXISTING_FOLDERS_LOWER[spaced.lower()]
 
     # 移除 Windows 資料夾非法字元
-    import re
     clean = re.sub(r'[<>:"/\\|?*]', "_", spaced).strip(" .")
     return clean
 

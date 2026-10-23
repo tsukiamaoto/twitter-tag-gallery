@@ -10,17 +10,20 @@ def database_version():
     import database
     path = Path(database.DB_PATH)
     signature = [str(path.resolve())]
-    for file in (path,Path(str(path)+"-wal")):
+    for is_wal, file in ((False, path), (True, Path(str(path) + "-wal"))):
         try:
             stat = file.stat()
-            signature.extend((stat.st_ino,stat.st_size,stat.st_mtime_ns))
+            if is_wal and stat.st_size == 0:
+                signature.extend((0, 0, 0))
+            else:
+                signature.extend((stat.st_ino, stat.st_size, stat.st_mtime_ns))
         except FileNotFoundError:
-            signature.extend((0,0,0))
+            signature.extend((0, 0, 0))
     return tuple(signature)
 
 
 class QueryCache:
-    def __init__(self,capacity=8,ttl=30):
+    def __init__(self,capacity=8,ttl=300):
         self.capacity,self.ttl = capacity,ttl
         self._lock = threading.Lock()
         self._items = OrderedDict()
@@ -31,6 +34,18 @@ class QueryCache:
         with self._lock:
             self._generation += 1
             self._items.clear()
+
+    def filter_rows(self,predicate,version=None):
+        version = database_version() if version is None else version
+        now = time.monotonic()
+        with self._lock:
+            previous_generation = self._generation
+            self._generation += 1
+            next_items = OrderedDict()
+            for (gen,_ver,user_key),(ts,value) in self._items.items():
+                if gen == previous_generation and now-ts < self.ttl and isinstance(value,list):
+                    next_items[(self._generation,version,user_key)] = (ts,[row for row in value if predicate(row)])
+            self._items = next_items
 
     def get(self,key,load):
         version = database_version()
@@ -74,6 +89,13 @@ def invalidate_gallery_queries():
     # A completed write must be visible immediately, including while Windows
     # still reports an unchanged timestamp for an open/preallocated WAL file.
     natural_order.clear()
+    recent_tags.clear()
+    artist_tags.clear()
+
+
+def remove_deleted_images_from_cache(image_ids):
+    deleted = set(image_ids)
+    natural_order.filter_rows(lambda row: row["id"] not in deleted)
     recent_tags.clear()
     artist_tags.clear()
 

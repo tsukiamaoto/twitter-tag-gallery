@@ -54,9 +54,18 @@ def preprocess_image_fast(image_path: str, image_size: int = 512) -> Optional[np
 
 
 def _preprocess_image(image_path: str, image_size: int = 512) -> Optional[np.ndarray]:
-    """將圖片預處理為 (1, 3, 512, 512) float32 Tensor，保持長寬比並做 ImageNet 標準化"""
+    """將圖片或影片影格預處理為 (1, 3, 512, 512) float32 Tensor，保持長寬比並做 ImageNet 標準化"""
     try:
-        with Image.open(image_path) as img:
+        if str(image_path).lower().endswith(".mp4"):
+            import io
+            from thumbnail_cache import _extract_video_thumbnail
+            frame_bytes = _extract_video_thumbnail(Path(image_path), max_size=max(512, image_size))
+            if not frame_bytes:
+                return None
+            img_ctx = Image.open(io.BytesIO(frame_bytes))
+        else:
+            img_ctx = Image.open(image_path)
+        with img_ctx as img:
             if img.mode != "RGB":
                 img = img.convert("RGB")
             w, h = img.size
@@ -282,7 +291,7 @@ class AITaggerEngine:
         deleted_files = []
         freed_bytes = 0
         if delete_disk_files and MODEL_DIR.exists():
-            for fn in ("camie-tagger-v2.onnx", "camie-tagger-v2-metadata.json", "decensor_mosaic.onnx", "decensor_bar.onnx"):
+            for fn in ("camie-tagger-v2.onnx", "camie-tagger-v2-metadata.json"):
                 fp = MODEL_DIR / fn
                 if fp.exists():
                     try:
@@ -464,7 +473,7 @@ class AITaggerEngine:
                     sql = f"""
                         SELECT i.id, i.rel_path, i.filename, i.folder
                         FROM images i
-                        WHERE i.missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=i.id AND p.stage='ai' AND p.status='failed' AND p.retry_at>strftime('%s','now')) AND i.media_type IN ('image', 'gif')
+                        WHERE i.missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=i.id AND p.stage='ai' AND p.status='failed' AND p.retry_at>strftime('%s','now')) AND i.media_type IN ('image', 'gif', 'video')
                           AND i.folder = ''
                           AND (
                               i.ai_tagged = 0
@@ -487,14 +496,14 @@ class AITaggerEngine:
                         ai_rows = [
                             dict(r)
                             for r in conn.execute(
-                                f"SELECT id, rel_path, filename, folder FROM images WHERE missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=images.id AND p.stage='ai' AND p.status='failed' AND p.retry_at>strftime('%s','now')) AND media_type IN ('image', 'gif') AND folder = '' ORDER BY mtime DESC{limit_sql}"
+                                f"SELECT id, rel_path, filename, folder FROM images WHERE missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=images.id AND p.stage='ai' AND p.status='failed' AND p.retry_at>strftime('%s','now')) AND media_type IN ('image', 'gif', 'video') AND folder = '' ORDER BY mtime DESC{limit_sql}"
                             ).fetchall()
                         ]
                 elif scope == "all_untagged":
                     sql = f"""
                         SELECT i.id, i.rel_path, i.filename, i.folder
                         FROM images i
-                        WHERE i.missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=i.id AND p.stage='ai' AND p.status='failed' AND p.retry_at>strftime('%s','now')) AND i.media_type IN ('image', 'gif')
+                        WHERE i.missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=i.id AND p.stage='ai' AND p.status='failed' AND p.retry_at>strftime('%s','now')) AND i.media_type IN ('image', 'gif', 'video')
                           AND (
                               i.ai_tagged = 0
                               OR NOT EXISTS (
@@ -519,7 +528,7 @@ class AITaggerEngine:
                     ai_rows = [
                         dict(r)
                         for r in conn.execute(
-                            f"SELECT id, rel_path, filename, folder FROM images WHERE missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=images.id AND p.stage='ai' AND p.status='failed' AND p.retry_at>strftime('%s','now')) AND media_type IN ('image', 'gif') AND folder = '' ORDER BY mtime DESC{limit_sql}"
+                            f"SELECT id, rel_path, filename, folder FROM images WHERE missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=images.id AND p.stage='ai' AND p.status='failed' AND p.retry_at>strftime('%s','now')) AND media_type IN ('image', 'gif', 'video') AND folder = '' ORDER BY mtime DESC{limit_sql}"
                         ).fetchall()
                     ]
                 elif scope == "ai_low_conf":
@@ -529,7 +538,7 @@ class AITaggerEngine:
                             f"""
                             SELECT i.id, i.rel_path, i.filename, i.folder
                             FROM images i
-                            WHERE i.missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=i.id AND p.stage='ai' AND p.status='failed' AND p.retry_at>strftime('%s','now')) AND i.media_type IN ('image', 'gif')
+                            WHERE i.missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=i.id AND p.stage='ai' AND p.status='failed' AND p.retry_at>strftime('%s','now')) AND i.media_type IN ('image', 'gif', 'video')
                               AND (
                                   i.ai_tagged = 0
                                   OR NOT EXISTS (
@@ -557,7 +566,7 @@ class AITaggerEngine:
                         FROM images i
                         LEFT JOIN image_tags it ON i.id = it.image_id
                         LEFT JOIN tags t ON it.tag_id = t.id AND t.category = 'artist'
-                        WHERE i.missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=i.id AND p.stage='ai' AND p.status='failed' AND p.retry_at>strftime('%s','now')) AND i.media_type IN ('image', 'gif')
+                        WHERE i.missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=i.id AND p.stage='ai' AND p.status='failed' AND p.retry_at>strftime('%s','now')) AND i.media_type IN ('image', 'gif', 'video')
                           AND i.folder = ''
                           AND i.id NOT IN (
                               SELECT it2.image_id FROM image_tags it2
@@ -572,7 +581,7 @@ class AITaggerEngine:
                     rev_sql = """
                         SELECT i.id, i.rel_path, i.filename, i.folder
                         FROM images i
-                        WHERE i.missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=i.id AND p.stage='ai' AND p.status='failed' AND p.retry_at>strftime('%s','now')) AND i.media_type IN ('image', 'gif')
+                        WHERE i.missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=i.id AND p.stage='ai' AND p.status='failed' AND p.retry_at>strftime('%s','now')) AND i.media_type IN ('image', 'gif', 'video')
                           AND i.folder = ''
                           AND i.id NOT IN (
                               SELECT it.image_id FROM image_tags it
@@ -588,7 +597,7 @@ class AITaggerEngine:
                     rev_sql = """
                         SELECT i.id, i.rel_path, i.filename, i.folder
                         FROM images i
-                        WHERE i.missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=i.id AND p.stage='ai' AND p.status='failed' AND p.retry_at>strftime('%s','now')) AND i.media_type IN ('image', 'gif') AND i.folder = ''
+                        WHERE i.missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM image_processing p WHERE p.image_id=i.id AND p.stage='ai' AND p.status='failed' AND p.retry_at>strftime('%s','now')) AND i.media_type IN ('image', 'gif', 'video') AND i.folder = ''
                           AND i.id NOT IN (
                               SELECT it.image_id FROM image_tags it
                               JOIN tags t ON it.tag_id = t.id

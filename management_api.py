@@ -44,10 +44,10 @@ def delete_image_files(request: DeleteImagesRequest):
     return _delete_result(delete_images, request.image_ids)
 
 
-@router.post("/api/images/deletions/{operation_id}/restore")
-def restore_image_files(operation_id: str):
-    from gallery_deletion import restore_deleted_images
-    return _delete_result(restore_deleted_images, operation_id)
+
+
+
+
 
 
 def library_health():

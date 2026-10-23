@@ -15,7 +15,7 @@ const templates = JSON.parse(fs.readFileSync(path.join(root, 'image_skill_templa
     let skills = structuredClone(templates), active = skills[1].id, failSave = false;
     const ai = { running: false, model_loaded: false, disk_cached: false, status_message: '待機中' };
     const schedule = { running_job: false, config: { enabled: false, schedule_times: [], source_dirs: [], history_logs: [] } };
-    const gguf = { models: [{ id: skills[1].model_id, filename: 'qwen-image-2.1-UC-Q6_K.gguf', profile: 'qwen21', valid: true, bytes: 1000 }],
+    const gguf = { models: [{ id: skills[1].model_id, filename: path.basename(skills[1].model_id), profile: 'qwen21', valid: true, bytes: 1000 }],
       directory: 'mock/models', selection: { model_id: skills[1].model_id, profile: 'qwen21' }, runtime: { phase: 'unloaded' }, download: {}, missing: [] };
     await context.route('**/*', async route => {
       const request = route.request(), endpoint = new URL(request.url()).pathname, method = request.method();

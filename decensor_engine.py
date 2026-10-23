@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-本機 ONNX DirectML 二次元專用去馬賽克引擎 (decensor_engine.py)
+本機 ONNX DirectML + GGUF Vulkan 二次元專用去馬賽克引擎 (decensor_engine.py)
 結合：
 1. YOLOv11-seg 二次元馬賽克/黑條像素級實例分割模型 (kitsumed/yolov11_seg-2d-censorship-detection: model_fp16_dynamic.onnx)
    — 多尺度 (640x640 + 960x960) 聯合推論，直接輸出精準貼合馬賽克與黑條的 Polygon 像素遮罩，絕不誤傷臉部、頭髮或背景。
 2. YOLOv8 二次元部位輔助召回模型 (deepghs/anime_censor_detection: censor_detect_v1.0_s/model.onnx)
    — 搭配「純馬賽克方格紋理 (Step-Edge + Flat-Cell) 與黑條像素驗證」，補捉極細微漏網馬賽克，且不對無碼部位誤觸發。
-3. 智慧邊緣擴展與分塊重繪 (Sub-window Tiling) + DeepCreamPy v2 ONNX 局部重繪模型 (vadik82/dcp-mosaic-onnx & vadik82/dcp-bar-onnx)
-4. 支援 AMD Radeon RX 9070 XT (DmlExecutionProvider) 硬體加速與一鍵釋放顯卡記憶體 (VRAM)
+3. 本機 GGUF 影像修復模型 (gguf_models.py / sd-server Vulkan + image_skills.py 主題技能，支援 FLUX.2 klein 4B 與 Qwen-Image-2.1)
+   — 512x512 局部重繪與羽化融合，自動對齊周圍膚色、光影與線條。
+4. 支援 AMD Radeon RX 9070 XT (DirectML + Vulkan) 硬體加速與一鍵釋放顯卡記憶體 (VRAM)
 """
 
 import base64
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+import requests
 from PIL import Image, ImageFilter, ImageFile
 
 from database import (
@@ -30,11 +32,26 @@ from database import (
     ensure_tag,
     refresh_tag_counts,
 )
+import gguf_models
+import image_skills
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 YOLO_LABELS = ["nipple_f", "penis", "pussy"]
 SEG_LABELS = ["bar_censor", "mosaic_censoring"]
+
+DEFAULT_DECENSOR_PROMPT = (
+    "Remove all mosaic pixelation, white borders, censor bars, and blur in the masked region. "
+    "Reconstruct and reinforce crisp continuous lineart, natural skin texture, subtle shading, "
+    "highlights, and fine anatomical or clothing details that seamlessly match the surrounding "
+    "colors, lighting, and anime illustration style. Eliminate any residual grid lines, white "
+    "fringes, or blurry patches while keeping all unmasked areas completely intact."
+)
+DEFAULT_NEGATIVE_PROMPT = (
+    "mosaic, censored, pixelation, pixelated, grid lines, white border, white bar, black bar, "
+    "white fringe, halo, blurry, out of focus, smudged, lowres, jpeg artifacts, watermark, "
+    "text, extra eyes, face on body, deformed"
+)
 
 
 def _nms_boxes(boxes: np.ndarray, scores: np.ndarray, iou_thresh: float = 0.45) -> List[int]:
@@ -111,25 +128,31 @@ def _detect_bar_pixels(roi_rgb: np.ndarray) -> np.ndarray:
     return dark_bar | white_bar
 
 
-def _build_region_mask_256(
-    crop_rgb_256: np.ndarray,
-    inner_box_256: Tuple[int, int, int, int],
-    mode: str = "auto",
-    seg_mask_256: Optional[np.ndarray] = None,
-) -> Tuple[np.ndarray, str]:
-    """
-    針對 256x256 局部區塊建立精準去碼遮罩 (1.0 = 保留原圖, 0.0 = 需去馬賽克/去黑條重繪區域)。
-    - 若提供 YOLOv11-seg 的像素級多邊形遮罩 (seg_mask_256)，直接使用該多邊形並自動向外吸收邊緣殘留的馬賽克方格，
-      100% 不傷及周圍臉部、頭髮與背景，且不裁切邊界！
-    - 若無 seg_mask_256 (如手動框選或輔助召回)，則僅針對真實馬賽克方格紋理與黑條建立遮罩，不再畫盲目大橢圓。
-    """
-    ix1, iy1, ix2, iy2 = inner_box_256
-    ix1 = max(0, min(252, ix1))
-    iy1 = max(0, min(252, iy1))
-    ix2 = max(ix1 + 4, min(256, ix2))
-    iy2 = max(iy1 + 4, min(256, iy2))
+def _pil_to_data_url(img: Image.Image) -> str:
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
-    roi = crop_rgb_256[iy1:iy2, ix1:ix2].astype(np.float32)
+
+def _build_region_mask_512(
+    crop_rgb_512: np.ndarray,
+    inner_box_512: Tuple[int, int, int, int],
+    mode: str = "auto",
+    seg_mask_512: Optional[np.ndarray] = None,
+) -> Tuple[Image.Image, str]:
+    """
+    針對 512x512 局部區塊建立 GGUF 擴散修復遮罩 (mode='L', 255 = 需去馬賽克/去黑條重繪區域, 0 = 保留原圖)。
+    - 若提供 YOLOv11-seg 的像素級多邊形遮罩 (seg_mask_512)，直接採用高信心多邊形邊界 (threshold > 0.45) 並僅做極小羽化，
+      絕不對周圍執行物理方格擴張 (_detect_mosaic_grid_pixels)，避免把手指賽璐璐平塗與線稿誤判為馬賽克而納入重繪！
+    - 若無 seg_mask_512 (如手動框選或輔助召回)，才針對真實馬賽克方格紋理與黑條建立遮罩。
+    """
+    ix1, iy1, ix2, iy2 = inner_box_512
+    ix1 = max(0, min(504, ix1))
+    iy1 = max(0, min(504, iy1))
+    ix2 = max(ix1 + 8, min(512, ix2))
+    iy2 = max(iy1 + 8, min(512, iy2))
+
+    roi = crop_rgb_512[iy1:iy2, ix1:ix2].astype(np.float32)
     bar_pixels = _detect_bar_pixels(roi)
     bar_ratio = float(bar_pixels.mean()) if bar_pixels.size > 0 else 0.0
 
@@ -137,71 +160,56 @@ def _build_region_mask_256(
     if actual_mode == "auto":
         actual_mode = "bar" if bar_ratio >= 0.22 else "mosaic"
 
-    if seg_mask_256 is not None and np.any(seg_mask_256 > 0.30):
-        # 1. 以 YOLOv11-seg 像素級多邊形遮罩為核心
-        base_bin = (seg_mask_256 > 0.32).astype(np.uint8) * 255
-        base_pil = Image.fromarray(base_bin, mode="L")
-        # 閉合內部小孔洞，並向外適度擴張以包覆最外圈的半格馬賽克
-        dilated_core = base_pil.filter(ImageFilter.MaxFilter(11)).filter(ImageFilter.MinFilter(3))
-
-        # 2. 在多邊形外圍 18px 環帶內，自動檢查是否還有殘留的馬賽克方格或黑條像素（解決邊緣漏掃問題）
-        fringe_band = np.asarray(base_pil.filter(ImageFilter.MaxFilter(21)), dtype=np.uint8) > 128
-        if actual_mode == "bar":
-            full_bar = _detect_bar_pixels(crop_rgb_256)
-            extra = fringe_band & full_bar
-        else:
-            full_mos = _detect_mosaic_grid_pixels(crop_rgb_256)
-            extra = fringe_band & full_mos
-
-        merged = ((np.asarray(dilated_core, dtype=np.uint8) > 128) | extra).astype(np.uint8) * 255
+    if seg_mask_512 is not None and np.any(seg_mask_512 > 0.42):
+        base_bin = (seg_mask_512 > 0.45).astype(np.uint8) * 255
         pil_m = (
-            Image.fromarray(merged, mode="L")
-            .filter(ImageFilter.MaxFilter(7))
-            .filter(ImageFilter.MinFilter(3))
+            Image.fromarray(base_bin, mode="L")
+            .filter(ImageFilter.MaxFilter(3))
+            .filter(ImageFilter.GaussianBlur(radius=1.5))
         )
     elif actual_mode == "bar" and bar_ratio >= 0.08:
-        mask_2d = np.zeros((256, 256), dtype=np.uint8)
+        mask_2d = np.zeros((512, 512), dtype=np.uint8)
         mask_2d[iy1:iy2, ix1:ix2] = bar_pixels.astype(np.uint8) * 255
-        pil_m = Image.fromarray(mask_2d, mode="L").filter(ImageFilter.MaxFilter(9))
+        pil_m = (
+            Image.fromarray(mask_2d, mode="L")
+            .filter(ImageFilter.MaxFilter(7))
+            .filter(ImageFilter.GaussianBlur(radius=2.5))
+        )
     else:
         actual_mode = "mosaic"
-        mask_2d = np.zeros((256, 256), dtype=np.uint8)
+        mask_2d = np.zeros((512, 512), dtype=np.uint8)
         mos_pixels = _detect_mosaic_grid_pixels(roi)
         if float(mos_pixels.mean()) >= 0.05:
             mask_2d[iy1:iy2, ix1:ix2] = mos_pixels.astype(np.uint8) * 255
             pil_m = (
                 Image.fromarray(mask_2d, mode="L")
-                .filter(ImageFilter.MaxFilter(9))
+                .filter(ImageFilter.MaxFilter(7))
                 .filter(ImageFilter.MinFilter(3))
+                .filter(ImageFilter.GaussianBlur(radius=2.5))
             )
         else:
             # 僅當使用者手動自訂框選 (custom_boxes) 時才對框內進行柔和遮罩
             mask_2d[iy1:iy2, ix1:ix2] = 255
-            pil_m = Image.fromarray(mask_2d, mode="L")
+            pil_m = Image.fromarray(mask_2d, mode="L").filter(ImageFilter.GaussianBlur(radius=3.0))
 
-    mask_arr = (np.asarray(pil_m, dtype=np.float32) > 96.0).astype(np.float32)
-    # DCP contract: 1.0 = keep original, 0.0 = reconstruct censored area
-    keep_mask = 1.0 - mask_arr
-    keep_mask_3c = np.repeat(keep_mask[:, :, None], 3, axis=2)
-    return keep_mask_3c, actual_mode
+    return pil_m, actual_mode
 
 
 class AnimeDecensorEngine:
     def __init__(self):
         self.seg_session = None
         self.yolo_session = None
-        self.mosaic_session = None
-        self.bar_session = None
         self.active_provider: str = "尚未載入"
         self.model_loaded: bool = False
         self._lock = threading.Lock()
 
     def ensure_models_loaded(self):
-        if self.model_loaded and self.seg_session is not None and self.mosaic_session is not None:
+        """載入第一階段 YOLOv11-seg + YOLOv8 遮罩偵測模型 (ONNX DirectML/CPU)"""
+        if self.model_loaded and self.seg_session is not None and self.yolo_session is not None:
             return
 
         with self._lock:
-            if self.model_loaded and self.seg_session is not None and self.mosaic_session is not None:
+            if self.model_loaded and self.seg_session is not None and self.yolo_session is not None:
                 return
 
             import onnxruntime as ort
@@ -209,7 +217,7 @@ class AnimeDecensorEngine:
 
             MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-            # 1. YOLOv11-seg 二次元馬賽克/黑條像素級實例分割模型 (主力模型)
+            # 1. YOLOv11-seg 二次元馬賽克/黑條像素級實例分割模型 (主力遮罩偵測)
             seg_local = MODEL_DIR / "yolov11_seg" / "model_fp16_dynamic.onnx"
             if seg_local.exists():
                 seg_path = str(seg_local)
@@ -231,27 +239,6 @@ class AnimeDecensorEngine:
                     local_dir=str(MODEL_DIR),
                 )
 
-            # 3. DeepCreamPy v2 ONNX 局部重繪模型
-            mosaic_local = MODEL_DIR / "decensor_mosaic.onnx"
-            if mosaic_local.exists():
-                mosaic_path = str(mosaic_local)
-            else:
-                mosaic_path = hf_hub_download(
-                    repo_id="vadik82/dcp-mosaic-onnx",
-                    filename="decensor_mosaic.onnx",
-                    local_dir=str(MODEL_DIR),
-                )
-
-            bar_local = MODEL_DIR / "decensor_bar.onnx"
-            if bar_local.exists():
-                bar_path = str(bar_local)
-            else:
-                bar_path = hf_hub_download(
-                    repo_id="vadik82/dcp-bar-onnx",
-                    filename="decensor_bar.onnx",
-                    local_dir=str(MODEL_DIR),
-                )
-
             avail = ort.get_available_providers()
             providers = []
             if "DmlExecutionProvider" in avail:
@@ -265,20 +252,210 @@ class AnimeDecensorEngine:
 
             self.seg_session = ort.InferenceSession(seg_path, sess_options=sess_opts, providers=providers)
             self.yolo_session = ort.InferenceSession(yolo_path, sess_options=sess_opts, providers=providers)
-            self.mosaic_session = ort.InferenceSession(mosaic_path, sess_options=sess_opts, providers=providers)
-            self.bar_session = ort.InferenceSession(bar_path, sess_options=sess_opts, providers=providers)
-            self.active_provider = self.seg_session.get_providers()[0]
+            onnx_prov = self.seg_session.get_providers()[0]
+            self.active_provider = f"{onnx_prov} + GGUF Vulkan"
             self.model_loaded = True
+
+    def _resolve_decensor_skill_and_runtime(self) -> Dict[str, Any]:
+        """確保第二階段 GGUF 擴散修復模型已啟動，並讀取模型設定與提示詞參數"""
+        skill_prompt = DEFAULT_DECENSOR_PROMPT
+        skill_seed = 42
+        skill_steps = None
+        skill_cfg = 6.0
+        skill_profile = None
+        preferred_model_id = None
+
+        try:
+            skills_state = image_skills.status()
+            active_id = skills_state.get("active_id")
+            skills_list = skills_state.get("skills") or []
+            active_skill = next((s for s in skills_list if s.get("id") == active_id), None)
+            if not active_skill and skills_list:
+                active_skill = skills_list[0]
+            if active_skill:
+                prompt_text = (active_skill.get("prompt") or "").strip()
+                if prompt_text:
+                    skill_prompt = prompt_text
+                model_cfg = active_skill.get("model") or active_skill
+                skill_seed = int(model_cfg.get("seed", 42))
+                skill_steps = int(model_cfg.get("steps", 0)) or None
+                skill_cfg = float(model_cfg.get("cfg_scale", 6.0))
+                skill_profile = model_cfg.get("profile")
+                cand_model = (model_cfg.get("model_id") or "").strip() or None
+                if cand_model and (gguf_models.model_root() / cand_model).is_file():
+                    preferred_model_id = cand_model
+        except Exception:
+            pass
+
+        # 優先尊重使用者在「模型管理 (selection.json)」中選取的模型
+        user_sel = gguf_models.manager.settings()
+        sel_model = (user_sel.get("model_id") or "").strip()
+        sel_profile = (user_sel.get("profile") or "").strip()
+        if sel_model and (gguf_models.model_root() / sel_model).is_file():
+            preferred_model_id = sel_model
+            skill_profile = sel_profile or gguf_models.profile_for(sel_model)
+
+        runtime = gguf_models.manager.ensure_loaded(model_id=preferred_model_id, profile=skill_profile)
+        port = int(runtime["port"])
+        loaded_model = runtime.get("loaded_model") or ""
+        loaded_profile = gguf_models.profile_for(loaded_model) or gguf_models.manager.settings().get("profile") or "wai_illustrious"
+        profile_spec = gguf_models.CATALOG["profiles"].get(loaded_profile) or {"steps": 20, "label": loaded_profile}
+
+        if skill_steps and skill_profile == loaded_profile:
+            steps = max(1, min(50, skill_steps))
+        else:
+            steps = int(profile_spec.get("steps", 20))
+
+        if loaded_profile == "wai_illustrious" and skill_cfg <= 2.0:
+            skill_cfg = 6.0
+        elif loaded_profile == "qwen21" and skill_cfg <= 2.0:
+            skill_cfg = 4.5
+
+        model_name = Path(loaded_model).name if loaded_model else profile_spec.get("label", "GGUF")
+        onnx_prov = self.seg_session.get_providers()[0] if self.seg_session else "ONNX"
+        self.active_provider = f"{onnx_prov} + {model_name} (Vulkan)"
+
+        return {
+            "port": port,
+            "loaded_model": loaded_model,
+            "profile": loaded_profile,
+            "prompt": skill_prompt,
+            "steps": steps,
+            "cfg_scale": max(1.0, min(10.0, skill_cfg)),
+            "seed": skill_seed,
+        }
+
+    def _inpaint_window_gguf(
+        self,
+        crop_pil: Image.Image,
+        mask_512: Image.Image,
+        used_mode: str,
+        runtime_cfg: Dict[str, Any],
+        anatomy: Optional[str] = None,
+    ) -> Image.Image:
+        """透過 GGUF sd-server (/sdcpp/v1/img_gen) 對 512x512 視窗執行局部重繪"""
+        cw, ch = crop_pil.size
+        crop_512 = crop_pil.resize((512, 512), Image.Resampling.LANCZOS)
+        profile = runtime_cfg.get("profile") or "wai_illustrious"
+        is_sdxl = profile == "wai_illustrious"
+
+        if used_mode == "bar":
+            crop_arr = np.asarray(crop_512, dtype=np.float32)
+            mask_arr = np.asarray(mask_512, dtype=np.float32) / 255.0
+            ring_pil = mask_512.filter(ImageFilter.MaxFilter(25))
+            ring_arr = (np.asarray(ring_pil, dtype=np.float32) / 255.0 > 0.2) & (mask_arr < 0.2)
+            if np.any(ring_arr):
+                mean_rgb = crop_arr[ring_arr].mean(axis=0)
+            else:
+                mean_rgb = np.array([235.0, 200.0, 190.0], dtype=np.float32)
+            filled_arr = crop_arr * (1.0 - mask_arr[:, :, None]) + mean_rgb[None, None, :] * mask_arr[:, :, None]
+            blurred_512 = Image.fromarray(np.clip(filled_arr, 0, 255).astype(np.uint8), mode="RGB").filter(
+                ImageFilter.GaussianBlur(radius=6)
+            )
+            init_512 = Image.composite(blurred_512, crop_512, mask_512)
+            strength = 0.72 if is_sdxl else 0.82
+        else:
+            # 消除馬賽克方格階梯邊緣 (Downscale 48x48 + Bicubic Upscale)，100% 保留原有立體光影與輪廓對比
+            degrid_512 = crop_512.resize((48, 48), Image.Resampling.BILINEAR).resize(
+                (512, 512), Image.Resampling.BICUBIC
+            )
+            init_512 = Image.composite(degrid_512, crop_512, mask_512)
+            strength = 0.56 if is_sdxl else 0.68
+
+        init_b64 = _pil_to_data_url(init_512)
+        mask_b64 = _pil_to_data_url(mask_512)
+
+        anat_tags = {
+            YOLO_LABELS[1]: f"{YOLO_LABELS[1]}, erect, glans, foreskin, urethral slit, veins, detailed shaft",
+            YOLO_LABELS[2]: f"{YOLO_LABELS[2]}, cleft of venus, labia, clitoris, detailed anatomy",
+            YOLO_LABELS[0]: "breasts, areolae, nipples, pink nipples",
+        }
+        extra_anat = anat_tags.get(anatomy or "", "detailed anatomy, natural skin texture")
+
+        if is_sdxl:
+            prompt = f"masterpiece, best quality, amazing quality, very aesthetic, absurdres, newest, uncensored, {extra_anat}, crisp lineart, anime coloring, smooth shading"
+            neg_prompt = "censored, mosaic censoring, bar censor, blurry, out of focus, bokeh, lowres, bad anatomy, worst quality, low quality, blocky, pixelated"
+            sample_params = {
+                "sample_steps": max(16, int(runtime_cfg.get("steps", 20))),
+                "sample_method": "euler_a",
+                "scheduler": "karras",
+                "guidance": {
+                    "txt_cfg": float(runtime_cfg.get("cfg_scale", 6.0)),
+                },
+            }
+            ref_imgs = []
+        else:
+            prompt = f"{runtime_cfg['prompt']}, uncensored, {extra_anat}, crisp anime lineart, cel shading"
+            neg_prompt = DEFAULT_NEGATIVE_PROMPT
+            nominal_steps = max(8, int(runtime_cfg.get("steps", 8))) if profile == "klein4b" else max(18, int(runtime_cfg.get("steps", 20)))
+            txt_cfg = 1.0 if profile == "klein4b" else max(4.0, float(runtime_cfg.get("cfg_scale", 4.5)))
+            sample_params = {
+                "sample_steps": nominal_steps,
+                "guidance": {
+                    "txt_cfg": txt_cfg,
+                    "distilled_guidance": 3.5,
+                },
+            }
+            ref_imgs = []
+
+        payload = {
+            "prompt": prompt,
+            "negative_prompt": neg_prompt,
+            "width": 512,
+            "height": 512,
+            "strength": strength,
+            "seed": runtime_cfg["seed"],
+            "init_image": init_b64,
+            "mask_image": mask_b64,
+            "ref_images": ref_imgs,
+            "sample_params": sample_params,
+            "output_format": "png",
+        }
+
+        port = runtime_cfg["port"]
+        with requests.Session() as session:
+            session.trust_env = False
+            resp = session.post(f"http://127.0.0.1:{port}/sdcpp/v1/img_gen", json=payload, timeout=15)
+            resp.raise_for_status()
+            job_id = resp.json().get("id")
+            if not job_id:
+                raise RuntimeError("GGUF 模型伺服器未回傳工作 ID")
+
+            deadline = time.monotonic() + 180
+            while time.monotonic() < deadline:
+                poll = session.get(f"http://127.0.0.1:{port}/sdcpp/v1/jobs/{job_id}", timeout=10)
+                poll.raise_for_status()
+                job_data = poll.json()
+                status = job_data.get("status")
+                if status == "completed":
+                    result_obj = job_data.get("result") or {}
+                    images = result_obj.get("images") or job_data.get("images") or []
+                    if not images or not images[0].get("b64_json"):
+                        raise RuntimeError("GGUF 模型重繪完成但未回傳影像資料")
+                    raw_bytes = base64.b64decode(images[0]["b64_json"])
+                    with Image.open(io.BytesIO(raw_bytes)) as gen_img:
+                        pred_512 = gen_img.convert("RGB")
+                    if pred_512.size != (512, 512):
+                        pred_512 = pred_512.resize((512, 512), Image.Resampling.LANCZOS)
+                    comp_512 = Image.composite(pred_512, crop_512, mask_512)
+                    return comp_512.resize((cw, ch), Image.Resampling.LANCZOS)
+                if status in ("failed", "cancelled", "error"):
+                    raise RuntimeError(job_data.get("error") or f"GGUF 局部重繪失敗 ({status})")
+                time.sleep(0.18)
+
+        raise RuntimeError("GGUF 模型局部重繪逾時")
 
     def unload_models(self) -> Dict[str, Any]:
         with self._lock:
             was_loaded = self.model_loaded
             self.seg_session = None
             self.yolo_session = None
-            self.mosaic_session = None
-            self.bar_session = None
             self.model_loaded = False
             self.active_provider = "已卸載 (已釋放 VRAM)"
+        try:
+            gguf_models.manager.unload()
+        except Exception:
+            pass
         gc.collect()
         return {
             "status": "unloaded",
@@ -446,6 +623,7 @@ class AnimeDecensorEngine:
         多尺度聯合偵測 (YOLOv11-seg 640 + 960 像素級遮罩 + YOLOv8 紋理驗證補充)：
         1. 合併 640x640 與 960x960 兩個尺度的 YOLOv11-seg 像素級多邊形遮罩，兼顧大範圍馬賽克與極小局部馬賽克。
         2. 對於 YOLOv8 偵測到但尚未被 YOLOv11-seg 覆蓋的候選框，僅在框內確實含有馬賽克方格紋理或黑條時才精準切出該紋理區域。
+        3. 自動合併包含或高度重疊的冗余子框，避免同一區域重複推論。
         """
         self.ensure_models_loaded()
         W, H = img_rgb.size
@@ -459,7 +637,8 @@ class AnimeDecensorEngine:
         seg_640 = self._run_yolo11_seg_single_scale(img_rgb, input_size=640, conf_thresh=conf_thresh)
         seg_960 = self._run_yolo11_seg_single_scale(img_rgb, input_size=960, conf_thresh=conf_thresh)
 
-        for det in seg_640 + seg_960:
+        # 優先寫入高解析度 960x960 的精準多邊形遮罩；640x640 僅補充 960 未偵測到的獨立區域，避免粗解析度遮罩溢入指縫
+        for det in seg_960:
             bx1, by1, bx2, by2 = det["bbox"]
             sm = det["sub_mask"]
             sc = det["score"]
@@ -467,92 +646,146 @@ class AnimeDecensorEngine:
                 full_bar_mask[by1:by2, bx1:bx2] = np.maximum(full_bar_mask[by1:by2, bx1:bx2], sm)
             else:
                 full_mos_mask[by1:by2, bx1:bx2] = np.maximum(full_mos_mask[by1:by2, bx1:bx2], sm)
-            score_map[by1:by2, bx1:bx2] = np.maximum(score_map[by1:by2, bx1:bx2], (sm > 0.32).astype(np.float32) * sc)
+            score_map[by1:by2, bx1:bx2] = np.maximum(score_map[by1:by2, bx1:bx2], (sm > 0.42).astype(np.float32) * sc)
 
-        # 輔助召回：檢查 YOLOv8 部位框內是否有被漏掉的真實馬賽克方格或黑條
-        union_seg = (full_mos_mask > 0.32) | (full_bar_mask > 0.32)
+        kept_seg_640 = []
+        for det in seg_640:
+            bx1, by1, bx2, by2 = det["bbox"]
+            area_640 = float(max(1, (bx2 - bx1) * (by2 - by1)))
+            overlaps_960 = False
+            for d9 in seg_960:
+                x9_1, y9_1, x9_2, y9_2 = d9["bbox"]
+                area_960 = float(max(1, (x9_2 - x9_1) * (y9_2 - y9_1)))
+                ix1, iy1 = max(bx1, x9_1), max(by1, y9_1)
+                ix2, iy2 = min(bx2, x9_2), min(by2, y9_2)
+                inter = float(max(0, ix2 - ix1) * max(0, iy2 - iy1))
+                if inter / min(area_640, area_960) >= 0.35:
+                    overlaps_960 = True
+                    break
+            if overlaps_960:
+                continue
+            kept_seg_640.append(det)
+            sm = det["sub_mask"]
+            sc = det["score"]
+            if det["label"] == "bar_censor":
+                full_bar_mask[by1:by2, bx1:bx2] = np.maximum(full_bar_mask[by1:by2, bx1:bx2], sm)
+            else:
+                full_mos_mask[by1:by2, bx1:bx2] = np.maximum(full_mos_mask[by1:by2, bx1:bx2], sm)
+            score_map[by1:by2, bx1:bx2] = np.maximum(score_map[by1:by2, bx1:bx2], (sm > 0.42).astype(np.float32) * sc)
+
+        # 輔助召回：僅在 YOLOv11-seg 完全未覆蓋的 YOLOv8 候選框內，檢查是否有漏掉的馬賽克或黑條
+        union_seg = (full_mos_mask > 0.42) | (full_bar_mask > 0.42)
         v8_dets = self._run_yolov8_anatomy_fallback(img_rgb, conf_thresh=max(0.20, conf_thresh))
+        v8_fallback_regions = []
         for vd in v8_dets:
             bx1, by1, bx2, by2 = vd["bbox"]
             existing_cov = float(union_seg[by1:by2, bx1:bx2].mean()) if (bx2 > bx1 and by2 > by1) else 0.0
-            if existing_cov >= 0.15:
-                # 已被 YOLOv11-seg 覆蓋的區域，微調補充框內緊鄰的真實馬賽克紋理即可
-                roi_rgb = img_arr[by1:by2, bx1:bx2]
-                mos_px = _detect_mosaic_grid_pixels(roi_rgb)
-                near_seg = np.asarray(
-                    Image.fromarray(union_seg[by1:by2, bx1:bx2].astype(np.uint8) * 255, mode="L").filter(ImageFilter.MaxFilter(25)),
-                    dtype=np.uint8,
-                ) > 128
-                add_px = (mos_px & near_seg).astype(np.float32) * 0.85
-                full_mos_mask[by1:by2, bx1:bx2] = np.maximum(full_mos_mask[by1:by2, bx1:bx2], add_px)
+            if existing_cov >= 0.10:
                 continue
 
-            # 若該部位完全未被 YOLOv11-seg 標記，嚴格檢查是否真有馬賽克方格或黑條（避免誤傷無碼乳頭/部位）
             roi_rgb = img_arr[by1:by2, bx1:bx2]
             bar_px = _detect_bar_pixels(roi_rgb)
             if float(bar_px.mean()) >= 0.14:
                 full_bar_mask[by1:by2, bx1:bx2] = np.maximum(full_bar_mask[by1:by2, bx1:bx2], bar_px.astype(np.float32))
                 score_map[by1:by2, bx1:bx2] = np.maximum(score_map[by1:by2, bx1:bx2], bar_px.astype(np.float32) * vd["score"])
+                v8_fallback_regions.append(vd)
                 continue
 
             mos_px = _detect_mosaic_grid_pixels(roi_rgb)
-            if float(mos_px.mean()) >= 0.16 and vd["label"] in ("penis", "pussy"):
+            if float(mos_px.mean()) >= 0.16 and vd["label"] in (YOLO_LABELS[1], YOLO_LABELS[2]):
                 full_mos_mask[by1:by2, bx1:bx2] = np.maximum(full_mos_mask[by1:by2, bx1:bx2], mos_px.astype(np.float32))
                 score_map[by1:by2, bx1:bx2] = np.maximum(score_map[by1:by2, bx1:bx2], mos_px.astype(np.float32) * vd["score"])
+                v8_fallback_regions.append(vd)
 
-        # 從全圖遮罩提取獨立的連通區塊或合併後的預覽/重繪區域
         combined_prob = np.maximum(full_mos_mask, full_bar_mask)
         if not np.any(combined_prob > 0.32):
             return []
 
-        # 收集所有高信心非重疊區域框，並附上各自的像素級遮罩
-        all_raw_boxes = []
-        all_raw_scores = []
-        all_raw_labels = []
-        for det in seg_960 + seg_640:
-            all_raw_boxes.append(det["bbox"])
-            all_raw_scores.append(det["score"])
-            all_raw_labels.append(det["label"])
-        for vd in v8_dets:
+        # 收集所有獨立實例區域，保留各自的實例遮罩與緊密邊界，避免相鄰不同部位被錯誤合併
+        all_candidates = []
+        for det in seg_960 + kept_seg_640:
+            all_candidates.append({
+                "bbox": list(det["bbox"]),
+                "score": float(det["score"]),
+                "label": det["label"],
+                "sub_mask": det.get("sub_mask"),
+            })
+        for vd in v8_fallback_regions:
             bx1, by1, bx2, by2 = vd["bbox"]
             if float((combined_prob[by1:by2, bx1:bx2] > 0.32).mean()) >= 0.12:
-                all_raw_boxes.append([bx1, by1, bx2, by2])
-                all_raw_scores.append(vd["score"])
-                all_raw_labels.append(vd["label"])
+                all_candidates.append({
+                    "bbox": [bx1, by1, bx2, by2],
+                    "score": float(vd["score"]),
+                    "label": vd["label"],
+                    "sub_mask": combined_prob[by1:by2, bx1:bx2].copy(),
+                })
 
-        if not all_raw_boxes:
+        if not all_candidates:
             return []
 
-        boxes_np = np.asarray(all_raw_boxes, dtype=np.float32)
-        scores_np = np.asarray(all_raw_scores, dtype=np.float32)
-        keep_final = _nms_boxes(boxes_np, scores_np, iou_thresh=0.38)
+        boxes_np = np.asarray([c["bbox"] for c in all_candidates], dtype=np.float32)
+        scores_np = np.asarray([c["score"] for c in all_candidates], dtype=np.float32)
+        keep_final = _nms_boxes(boxes_np, scores_np, iou_thresh=0.42)
 
-        final_regions = []
+        raw_regions = []
         for idx in keep_final:
-            bx1, by1, bx2, by2 = [int(round(v)) for v in boxes_np[idx]]
-            # 將兩個尺度在該區域附近的遮罩完整納入（稍微向外擴 16px 檢查是否有超出單一尺度框的遮罩）
-            ex1 = max(0, bx1 - 16)
-            ey1 = max(0, by1 - 16)
-            ex2 = min(W, bx2 + 16)
-            ey2 = min(H, by2 + 16)
-            sub_prob = combined_prob[ey1:ey2, ex1:ex2]
-            ys, xs = np.where(sub_prob > 0.32)
-            if ys.size == 0:
-                continue
-            rx1 = max(0, ex1 + int(xs.min()) - 4)
-            ry1 = max(0, ey1 + int(ys.min()) - 4)
-            rx2 = min(W, ex1 + int(xs.max()) + 5)
-            ry2 = min(H, ey1 + int(ys.max()) + 5)
+            cand = all_candidates[idx]
+            rx1, ry1, rx2, ry2 = [int(round(v)) for v in cand["bbox"]]
             if (rx2 - rx1) < 8 or (ry2 - ry1) < 8:
                 continue
-
-            item = {
+            raw_regions.append({
                 "bbox": [rx1, ry1, rx2, ry2],
-                "label": all_raw_labels[idx],
-                "score": round(float(scores_np[idx]), 4),
-            }
+                "label": cand["label"],
+                "score": round(float(cand["score"]), 4),
+                "instance_mask": cand.get("sub_mask"),
+            })
+
+        # 僅合併高度重疊 (>= 0.65) 的同部位子框，絕不把相鄰的不同部位合併成巨型框
+        merged_regions: List[Dict[str, Any]] = []
+        for reg in raw_regions:
+            rx1, ry1, rx2, ry2 = reg["bbox"]
+            r_area = float(max(1, (rx2 - rx1) * (ry2 - ry1)))
+            merged = False
+            for existing in merged_regions:
+                ex1, ey1, ex2, ey2 = existing["bbox"]
+                e_area = float(max(1, (ex2 - ex1) * (ey2 - ey1)))
+                ix1, iy1 = max(rx1, ex1), max(ry1, ey1)
+                ix2, iy2 = min(rx2, ex2), min(ry2, ey2)
+                inter = float(max(0, ix2 - ix1) * max(0, iy2 - iy1))
+                if inter / min(r_area, e_area) >= 0.65:
+                    existing["bbox"] = [min(rx1, ex1), min(ry1, ey1), max(rx2, ex2), max(ry2, ey2)]
+                    existing["instance_mask"] = None
+                    if reg["score"] > existing["score"]:
+                        existing["score"] = reg["score"]
+                        existing["label"] = reg["label"]
+                    merged = True
+                    break
+            if not merged:
+                merged_regions.append(dict(reg))
+
+        final_regions = []
+        for item in merged_regions:
+            rx1, ry1, rx2, ry2 = item["bbox"]
+            r_area = float(max(1, (rx2 - rx1) * (ry2 - ry1)))
+            best_anat = None
+            best_overlap = 0.0
+            for vd in v8_dets:
+                vx1, vy1, vx2, vy2 = vd["bbox"]
+                v_area = float(max(1, (vx2 - vx1) * (vy2 - vy1)))
+                ix1, iy1 = max(rx1, vx1), max(ry1, vy1)
+                ix2, iy2 = min(rx2, vx2), min(ry2, vy2)
+                inter = float(max(0, ix2 - ix1) * max(0, iy2 - iy1))
+                ov = inter / min(r_area, v_area)
+                if ov >= 0.25 and (ov * vd["score"]) > best_overlap:
+                    best_anat = vd["label"]
+                    best_overlap = ov * vd["score"]
+            item["anatomy"] = best_anat
+            inst_m = item.pop("instance_mask", None)
             if include_masks:
-                item["sub_mask"] = combined_prob[ry1:ry2, rx1:rx2].copy()
+                if inst_m is not None and inst_m.shape == (ry2 - ry1, rx2 - rx1):
+                    item["sub_mask"] = inst_m.copy()
+                else:
+                    item["sub_mask"] = combined_prob[ry1:ry2, rx1:rx2].copy()
                 item["is_bar"] = bool(
                     full_bar_mask[ry1:ry2, rx1:rx2].mean() > full_mos_mask[ry1:ry2, rx1:rx2].mean()
                 )
@@ -567,73 +800,40 @@ class AnimeDecensorEngine:
         H: int,
     ) -> List[Tuple[int, int, int, int, int, int, int, int]]:
         """
-        針對單一遮罩區域產生一個或多個正方形 Context 重繪視窗 (wx1, wy1, wx2, wy2, bx1, by1, bx2, by2)。
-        若馬賽克區域為大範圍長條/斜向區域 (例如長寬比 > 1.5 且長邊 > 280px)，自動切分為 2 個重疊的局部正方形視窗，
-        確保馬賽克尖端與邊緣不會因大視窗縮放而被遺漏或模糊！
+        針對單一遮罩區域產生正方形 Context 重繪視窗。
+        保持單一部位區域在同一個完整 512x512 視窗內一次重繪完成，避免將同一部位切成兩半造成結構斷裂。
         """
         bx1, by1, bx2, by2 = reg["bbox"]
-        bw = bx2 - bx1
-        bh = by2 - by1
-        sub_mask = reg.get("sub_mask")
+        sbw = bx2 - bx1
+        sbh = by2 - by1
+        cx = (bx1 + bx2) / 2.0
+        cy = (by1 + by2) / 2.0
 
-        sub_boxes = [(bx1, by1, bx2, by2)]
-        if sub_mask is not None and max(bw, bh) >= 260 and (max(bw, bh) / max(1.0, float(min(bw, bh)))) >= 1.42:
-            # 將長條形/斜向遮罩拆成兩段重疊 30% 的子框，分別根據各自非零遮罩收緊邊界
-            if bw >= bh:
-                mid1 = int(round(bw * 0.62))
-                mid2 = int(round(bw * 0.38))
-                slices = [(0, mid1, 0, bh), (mid2, bw, 0, bh)]
-            else:
-                mid1 = int(round(bh * 0.62))
-                mid2 = int(round(bh * 0.38))
-                slices = [(0, bw, 0, mid1), (0, bw, mid2, bh)]
+        side = int(round(max(sbw, sbh) * 1.42))
+        side = max(160, min(max(W, H), side))
+        half = side / 2.0
 
-            refined_subs = []
-            for sx1, sx2, sy1, sy2 in slices:
-                part = sub_mask[sy1:sy2, sx1:sx2]
-                ys, xs = np.where(part > 0.32)
-                if ys.size > 16:
-                    px1 = max(0, bx1 + sx1 + int(xs.min()) - 4)
-                    py1 = max(0, by1 + sy1 + int(ys.min()) - 4)
-                    px2 = min(W, bx1 + sx1 + int(xs.max()) + 5)
-                    py2 = min(H, by1 + sy1 + int(ys.max()) + 5)
-                    refined_subs.append((px1, py1, px2, py2))
-            if len(refined_subs) >= 2:
-                sub_boxes = refined_subs
+        wx1 = int(round(cx - half))
+        wy1 = int(round(cy - half))
+        wx2 = wx1 + side
+        wy2 = wy1 + side
 
-        windows = []
-        for sbx1, sby1, sbx2, sby2 in sub_boxes:
-            sbw = sbx2 - sbx1
-            sbh = sby2 - sby1
-            cx = (sbx1 + sbx2) / 2.0
-            cy = (sby1 + sby2) / 2.0
+        if wx1 < 0:
+            wx2 -= wx1
+            wx1 = 0
+        if wy1 < 0:
+            wy2 -= wy1
+            wy1 = 0
+        if wx2 > W:
+            wx1 = max(0, wx1 - (wx2 - W))
+            wx2 = W
+        if wy2 > H:
+            wy1 = max(0, wy1 - (wy2 - H))
+            wy2 = H
 
-            # 取約 1.45 倍的正方形 Context 視窗供 256x256 模型參考周圍膚色與線條
-            side = int(round(max(sbw, sbh) * 1.45))
-            side = max(64, min(max(W, H), side))
-            half = side / 2.0
-
-            wx1 = int(round(cx - half))
-            wy1 = int(round(cy - half))
-            wx2 = wx1 + side
-            wy2 = wy1 + side
-
-            if wx1 < 0:
-                wx2 -= wx1
-                wx1 = 0
-            if wy1 < 0:
-                wy2 -= wy1
-                wy1 = 0
-            if wx2 > W:
-                wx1 = max(0, wx1 - (wx2 - W))
-                wx2 = W
-            if wy2 > H:
-                wy1 = max(0, wy1 - (wy2 - H))
-                wy2 = H
-
-            if (wx2 - wx1) >= 16 and (wy2 - wy1) >= 16:
-                windows.append((wx1, wy1, wx2, wy2, sbx1, sby1, sbx2, sby2))
-        return windows
+        if (wx2 - wx1) >= 16 and (wy2 - wy1) >= 16:
+            return [(wx1, wy1, wx2, wy2, bx1, by1, bx2, by2)]
+        return []
 
     def decensor_pil_image(
         self,
@@ -643,7 +843,7 @@ class AnimeDecensorEngine:
         custom_boxes: Optional[List[List[float]]] = None,
     ) -> Tuple[Image.Image, List[Dict[str, Any]]]:
         """
-        對單張 PIL Image (RGB) 執行 YOLOv11-seg 多尺度像素級遮罩偵測 (或自訂框選) + DeepCreamPy v2 ONNX 局部重繪去碼。
+        對單張 PIL Image (RGB) 執行 YOLOv11-seg 多尺度像素級遮罩偵測 (或自訂框選) + 本機 GGUF 模型局部重繪去碼。
         回傳: (去碼後的 PIL.Image, 處理的區域清單)
         """
         self.ensure_models_loaded()
@@ -671,7 +871,9 @@ class AnimeDecensorEngine:
         if not regions:
             return img_rgb, []
 
-        # 建立全圖級別的像素遮罩以便任意子視窗直接裁切對應的 256x256 遮罩
+        runtime_cfg = self._resolve_decensor_skill_and_runtime()
+
+        # 建立全圖級別的像素遮罩以便任意子視窗直接裁切對應的 512x512 遮罩
         global_seg_mask = np.zeros((H, W), dtype=np.float32)
         has_global_seg = False
         for reg in regions:
@@ -694,63 +896,47 @@ class AnimeDecensorEngine:
             for wx1, wy1, wx2, wy2, sbx1, sby1, sbx2, sby2 in windows:
                 cw = wx2 - wx1
                 ch = wy2 - wy1
-                # 從原圖取未修改的底圖，確保重疊子視窗輸入穩定，再將結果融合至 work_arr
                 crop_pil = Image.fromarray(np.clip(work_arr[wy1:wy2, wx1:wx2], 0, 255).astype(np.uint8), mode="RGB")
-                crop_256_pil = crop_pil.resize((256, 256), Image.Resampling.BICUBIC)
-                crop_256_arr = np.asarray(crop_256_pil, dtype=np.float32)
+                crop_512_pil = crop_pil.resize((512, 512), Image.Resampling.BICUBIC)
+                crop_512_arr = np.asarray(crop_512_pil, dtype=np.float32)
 
-                ix1 = int(round((sbx1 - wx1) * 256.0 / cw))
-                iy1 = int(round((sby1 - wy1) * 256.0 / ch))
-                ix2 = int(round((sbx2 - wx1) * 256.0 / cw))
-                iy2 = int(round((sby2 - wy1) * 256.0 / ch))
+                ix1 = int(round((sbx1 - wx1) * 512.0 / cw))
+                iy1 = int(round((sby1 - wy1) * 512.0 / ch))
+                ix2 = int(round((sbx2 - wx1) * 512.0 / cw))
+                iy2 = int(round((sby2 - wy1) * 512.0 / ch))
 
-                seg_crop_256 = None
+                seg_crop_512 = None
                 if has_global_seg:
-                    # 僅保留當前子框 (sbx1..sbx2, sby1..sby2) 附近的像素遮罩
                     win_seg = np.zeros((ch, cw), dtype=np.float32)
                     lx1, ly1 = max(0, sbx1 - wx1 - 8), max(0, sby1 - wy1 - 8)
                     lx2, ly2 = min(cw, sbx2 - wx1 + 8), min(ch, sby2 - wy1 + 8)
                     win_seg[ly1:ly2, lx1:lx2] = global_seg_mask[wy1 + ly1 : wy1 + ly2, wx1 + lx1 : wx1 + lx2]
-                    seg_pil_256 = Image.fromarray((np.clip(win_seg, 0.0, 1.0) * 255.0).astype(np.uint8), mode="L").resize(
-                        (256, 256), Image.Resampling.BILINEAR
+                    seg_pil_512 = Image.fromarray((np.clip(win_seg, 0.0, 1.0) * 255.0).astype(np.uint8), mode="L").resize(
+                        (512, 512), Image.Resampling.BILINEAR
                     )
-                    seg_crop_256 = np.asarray(seg_pil_256, dtype=np.float32) / 255.0
+                    seg_crop_512 = np.asarray(seg_pil_512, dtype=np.float32) / 255.0
 
-                keep_mask_3c, used_mode = _build_region_mask_256(
-                    crop_256_arr,
+                mask_512_pil, used_mode = _build_region_mask_512(
+                    crop_512_arr,
                     (ix1, iy1, ix2, iy2),
                     mode=reg_mode,
-                    seg_mask_256=seg_crop_256,
+                    seg_mask_512=seg_crop_512,
                 )
                 used_mode_final = used_mode
 
-                norm_img = (crop_256_arr / 127.5) - 1.0
-                input_unused = norm_img[None, :, :, :].astype(np.float32)
-                input_mask = keep_mask_3c[None, :, :, :].astype(np.float32)
-
-                if used_mode == "bar":
-                    input_img = (norm_img * keep_mask_3c)[None, :, :, :].astype(np.float32)
-                    pred_256 = self.bar_session.run(
-                        None,
-                        {"input_image": input_img, "input_unused": input_unused, "input_mask": input_mask},
-                    )[0][0]
-                else:
-                    input_img = input_unused
-                    pred_256 = self.mosaic_session.run(
-                        None,
-                        {"input_image": input_img, "input_unused": input_unused, "input_mask": input_mask},
-                    )[0][0]
-
-                pred_rgb_256 = np.clip((pred_256 + 1.0) * 127.5, 0.0, 255.0).astype(np.uint8)
-                pred_crop_pil = Image.fromarray(pred_rgb_256, mode="RGB").resize((cw, ch), Image.Resampling.LANCZOS)
+                pred_crop_pil = self._inpaint_window_gguf(
+                    crop_pil,
+                    mask_512_pil,
+                    used_mode,
+                    runtime_cfg,
+                    anatomy=reg.get("anatomy"),
+                )
                 pred_crop_arr = np.asarray(pred_crop_pil, dtype=np.float32)
 
-                # 建立羽化融合遮罩 (Feather Alpha Blend)，僅融合多邊形遮罩內部，100% 不影響框外的臉部與背景
-                reconstruct_mask_256 = ((1.0 - keep_mask_3c[:, :, 0]) * 255.0).astype(np.uint8)
+                # 建立羽化融合遮罩 (Feather Alpha Blend)，僅融合多邊形遮罩內部，100% 不影響框外的五官、手指與背景
                 alpha_pil = (
-                    Image.fromarray(reconstruct_mask_256, mode="L")
-                    .resize((cw, ch), Image.Resampling.BILINEAR)
-                    .filter(ImageFilter.GaussianBlur(radius=max(2.0, min(cw, ch) * 0.02)))
+                    mask_512_pil.resize((cw, ch), Image.Resampling.BILINEAR)
+                    .filter(ImageFilter.GaussianBlur(radius=max(1.5, min(cw, ch) * 0.012)))
                 )
                 alpha = (np.asarray(alpha_pil, dtype=np.float32) / 255.0)[:, :, None]
 
@@ -792,16 +978,21 @@ class AnimeDecensorEngine:
         if not full_path.exists():
             return {"ok": False, "success": False, "message": "硬碟上找不到該圖片檔案", "error": "硬碟上找不到該圖片檔案"}
 
-        with Image.open(str(full_path)) as img:
-            img_rgb = img.convert("RGB")
-            W, H = img_rgb.size
+        try:
+            with Image.open(str(full_path)) as img:
+                img_rgb = img.convert("RGB")
+                W, H = img_rgb.size
 
-        out_pil, regions = self.decensor_pil_image(
-            img_rgb,
-            mode=mode,
-            conf_thresh=conf_thresh,
-            custom_boxes=custom_boxes,
-        )
+            out_pil, regions = self.decensor_pil_image(
+                img_rgb,
+                mode=mode,
+                conf_thresh=conf_thresh,
+                custom_boxes=custom_boxes,
+            )
+        except Exception as exc:
+            msg = str(exc) or "GGUF 模型局部重繪失敗"
+            return {"ok": False, "success": False, "image_id": image_id, "message": msg, "error": msg}
+
         if not regions:
             return {
                 "ok": False,
@@ -826,7 +1017,7 @@ class AnimeDecensorEngine:
             "regions": regions,
             "provider": self.active_provider,
             "elapsed_sec": elapsed,
-            "message": f"✨ 已在 {elapsed} 秒內透過 {self.active_provider} (YOLOv11-seg 像素級遮罩) 偵測並重繪 {len(regions)} 處馬賽克區域！",
+            "message": f"✨ 已在 {elapsed} 秒內透過 {self.active_provider} (YOLOv11-seg 像素級遮罩 + GGUF 局部重繪) 修復 {len(regions)} 處馬賽克區域！",
             "preview_data_url": f"data:image/jpeg;base64,{b64_str}",
         }
 
@@ -859,15 +1050,20 @@ class AnimeDecensorEngine:
         if not full_path.exists():
             return {"ok": False, "success": False, "message": "硬碟上找不到該圖片檔案", "error": "硬碟上找不到該圖片檔案"}
 
-        with Image.open(str(full_path)) as img:
-            img_rgb = img.convert("RGB")
+        try:
+            with Image.open(str(full_path)) as img:
+                img_rgb = img.convert("RGB")
 
-        out_pil, regions = self.decensor_pil_image(
-            img_rgb,
-            mode=mode,
-            conf_thresh=conf_thresh,
-            custom_boxes=custom_boxes,
-        )
+            out_pil, regions = self.decensor_pil_image(
+                img_rgb,
+                mode=mode,
+                conf_thresh=conf_thresh,
+                custom_boxes=custom_boxes,
+            )
+        except Exception as exc:
+            msg = str(exc) or "GGUF 模型局部重繪失敗"
+            return {"ok": False, "success": False, "image_id": image_id, "message": msg, "error": msg}
+
         if not regions:
             return {
                 "ok": False,
@@ -977,7 +1173,7 @@ class AnimeDecensorEngine:
             "regions_count": len(regions),
             "regions": regions,
             "elapsed_sec": round(time.time() - t0, 2),
-            "message": f"✅ 已成功透過 YOLOv11-seg 去除 {len(regions)} 處馬賽克/遮罩並{'覆蓋原圖' if save_mode == 'overwrite' else '另存新檔'}！",
+            "message": f"✅ 已成功透過 YOLOv11-seg + GGUF 模型去除 {len(regions)} 處馬賽克/遮罩並{'覆蓋原圖' if save_mode == 'overwrite' else '另存新檔'}！",
         }
 
 

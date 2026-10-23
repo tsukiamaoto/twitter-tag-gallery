@@ -77,7 +77,8 @@ RE_FANBOX_POST = re.compile(
 )
 RE_FANTIA_CLUB = re.compile(r"fantia\.jp/(?:fanclubs|posts)/(\d+)", re.IGNORECASE)
 RE_FILENAME_FANBOX_POST = re.compile(r"^(\d{6,9})_(\d{1,3})(?:\s*\(\d+\))?$")
-RE_FILENAME_TWITTER_STATUS = re.compile(r"(?:^|[^0-9])(1[3-9]\d{17}|20\d{17})(?:[^0-9]|$)")
+RE_FILENAME_TWITTER_STATUS = re.compile(r"(?:^|[^0-9])(1[3-9]\d{17}|2[0-9]\d{17})(?:[^0-9]|$)")
+RE_FILENAME_TWITTER_HANDLE_STATUS = re.compile(r"^([A-Za-z0-9_]{3,20})[-_](1[3-9]\d{17}|2[0-9]\d{17})(?:[-_].*)?$")
 RE_DANBOORU_POST = re.compile(r"danbooru\.donmai\.us/posts/(\d+)", re.IGNORECASE)
 RE_YANDERE_POST = re.compile(r"yande\.re/post/show/(\d+)", re.IGNORECASE)
 RE_IQDB_ALT = re.compile(r"Rating:\s*([gsqe])\s+Score:\s*\S+\s+Tags:\s*(.+)$", re.IGNORECASE)
@@ -201,20 +202,23 @@ def _get_cached_existing_folders(ttl_sec: float = 15.0) -> List[str]:
 
 def match_existing_folder_by_artist(artist_name: str, twitter_handle: str = "") -> Optional[str]:
     """檢查搜到的畫師名稱或 Twitter @handle 是否對應使用者現有的繪師資料夾（內建記憶體 TTL 快取，零重複打庫）"""
-    a_low = artist_name.lower().strip()
+    a_low = artist_name.lower().strip().lstrip("@")
     t_low = twitter_handle.lower().strip().lstrip("@")
 
-    if a_low in DANBOORU_ARTIST_TO_FOLDER:
-        return DANBOORU_ARTIST_TO_FOLDER[a_low]
-    if t_low and t_low in DANBOORU_ARTIST_TO_FOLDER:
-        return DANBOORU_ARTIST_TO_FOLDER[t_low]
+    for cand in (a_low, t_low, re.sub(r"_?\d+$", "", a_low), re.sub(r"_?\d+$", "", t_low)):
+        if cand and len(cand) >= 3 and cand in DANBOORU_ARTIST_TO_FOLDER:
+            return DANBOORU_ARTIST_TO_FOLDER[cand]
 
     folders = _get_cached_existing_folders()
     for f in folders:
         if f in NON_ARTIST_FOLDERS:
             continue
         f_low = f.lower()
-        if a_low == f_low or (t_low and t_low in f_low) or (len(a_low) >= 4 and a_low == f_low.replace(" ", "_")):
+        if (
+            a_low == f_low
+            or (t_low and (t_low in f_low or (len(f_low) >= 4 and re.sub(r"_?\d+$", "", t_low) == f_low)))
+            or (len(a_low) >= 4 and (a_low == f_low.replace(" ", "_") or (len(f_low) >= 4 and re.sub(r"_?\d+$", "", a_low) == f_low)))
+        ):
             return f
 
     return None
@@ -227,6 +231,9 @@ def make_search_thumbnail(image_path: str, max_dim: int = 360) -> Optional[bytes
 
 def _make_search_thumbnail(image_path: str, max_dim: int = 360) -> Optional[bytes]:
     try:
+        if str(image_path).lower().endswith(".mp4"):
+            from thumbnail_cache import _extract_video_thumbnail
+            return _extract_video_thumbnail(Path(image_path), max_size=max_dim)
         with Image.open(image_path) as img:
             if img.mode != "RGB":
                 img = img.convert("RGB")
@@ -682,8 +689,31 @@ def search_google_and_web_by_clues(
                     elif rt not in res["generals"]:
                         res["generals"].append(rt)
 
-    # 2. Check if filename contains a 18~19 digit Twitter Status ID
+    # 2. Check if filename contains a Twitter handle + status ID or a 18~19 digit Twitter Status ID
     if stem and not res["artists"] and not res["twitter_handles"]:
+        m_tw_hs = RE_FILENAME_TWITTER_HANDLE_STATUS.match(stem)
+        if m_tw_hs:
+            fn_handle = m_tw_hs.group(1)
+            fn_sid = m_tw_hs.group(2)
+            if not fn_handle.isdigit() and fn_handle.lower() not in ("twitter", "x", "video", "img", "image", "photo", "clip"):
+                res["hit"] = True
+                if fn_handle not in res["twitter_handles"]:
+                    res["twitter_handles"].append(fn_handle)
+                res["source_urls"].append(f"https://x.com/{fn_handle}/status/{fn_sid}")
+                res_folder = resolve_artist_folder_name(fn_handle)
+                if res_folder in FOLDER_TO_DANBOORU_ARTIST:
+                    db_art = FOLDER_TO_DANBOORU_ARTIST[res_folder]
+                    if db_art not in res["artists"]:
+                        res["artists"].append(db_art)
+                db_info = fetch_danbooru_artist_by_url(f"https://twitter.com/{fn_handle}")
+                if db_info.get("name") and db_info["name"] not in res["artists"]:
+                    res["artists"].append(db_info["name"])
+                    if db_info.get("cjk_name"):
+                        res["cjk_aliases"][db_info["name"]] = db_info["cjk_name"]
+                    for th in db_info.get("twitter_handles", []):
+                        if th not in res["twitter_handles"]:
+                            res["twitter_handles"].append(th)
+
         m_tw_sid = RE_FILENAME_TWITTER_STATUS.search(stem)
         if m_tw_sid:
             tw_info = fetch_fxtwitter_status(m_tw_sid.group(1))
@@ -697,7 +727,7 @@ def search_google_and_web_by_clues(
                 for th in tw_info.get("twitter_handles", []):
                     if th not in res["twitter_handles"]:
                         res["twitter_handles"].append(th)
-                if tw_info.get("source_url"):
+                if tw_info.get("source_url") and tw_info["source_url"] not in res["source_urls"]:
                     res["source_urls"].append(tw_info["source_url"])
 
     # 3. Check Kemono SHA256 exact file hash for Fanbox / Fantia original files
@@ -2062,7 +2092,7 @@ class BatchReverseSearchWorker:
     ):
         try:
             conn = get_db()
-            where = "WHERE media_type IN ('image', 'gif')"
+            where = "WHERE media_type IN ('image', 'gif', 'video')"
             verified_subquery = """
                 SELECT it.image_id FROM image_tags it
                 JOIN tags t ON t.id = it.tag_id

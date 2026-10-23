@@ -84,11 +84,11 @@
     card.innerHTML = `<h3>GGUF 影像模型</h3><p class="settings-note">選擇一般影像修補與編修所使用的模型。按載入後才會使用記憶體。</p>
       <label>模型存放位置<code class="gguf-path" id="gguf-directory">讀取中…</code></label>
       <div class="settings-actions"><button class="btn" id="gguf-copy-path">複製資料夾路徑</button><button class="btn" id="gguf-scan">重新掃描</button></div>
-      <div class="gguf-grid"><label>影像模型<select class="select-box" id="gguf-model-select"><option value="">讀取中…</option></select></label><label>模型系列<select class="select-box" id="gguf-profile-select"><option value="">自動辨識</option><option value="klein4b">FLUX.2 klein 4B</option><option value="qwen21">Qwen-Image-2.1</option></select></label></div>
+      <div class="gguf-grid"><label>影像模型<select class="select-box" id="gguf-model-select"><option value="">讀取中…</option></select></label><label>模型系列<select class="select-box" id="gguf-profile-select"><option value="">自動辨識</option><option value="wai_illustrious">WAI-NSFW-illustrious-SDXL v17.0</option></select></label></div>
       <div class="gguf-status"><span>Vulkan 執行狀態</span><strong id="gguf-runtime-state">讀取中…</strong></div><p class="settings-note" id="gguf-loaded-model"></p><p class="settings-note" id="gguf-requirements"></p>
       <div class="settings-actions"><button class="btn btn-primary" id="gguf-load" disabled>載入選取模型</button><button class="btn" id="gguf-unload" disabled>卸載 GGUF 模型</button><button class="btn" id="gguf-skills">管理修補技能與 prompt</button></div>
-      <div class="gguf-download"><p class="settings-note">預設方案：FLUX.2 klein 4B Q8_0、Qwen-Image-2.1 Q6_K。</p><progress id="gguf-download-progress" hidden aria-label="模型下載進度"></progress><p class="settings-note" id="gguf-download-state"></p><div class="settings-actions"><button class="btn" id="gguf-download">下載／續傳兩個方案</button><button class="btn" id="gguf-download-stop" hidden>停止下載</button></div></div>
-      <details><summary>如何放入自己的模型</summary><ul class="settings-note"><li>主模型放入 diffusion_models，或直接放在此 GGUF 資料夾。</li><li>文字／視覺編碼器放入 text_encoders，VAE 放入 vae。</li><li>按重新掃描後選擇模型系列；必要元件會在上方列出。</li><li>目前支援 FLUX.2 klein 4B 與 Qwen-Image-2.1 的 GGUF 影像模型。</li></ul></details><p class="settings-feedback" id="gguf-feedback" role="status" aria-live="polite"></p>`;
+      <div class="gguf-download"><p class="settings-note">預設方案：WAI-NSFW-illustrious-SDXL v17.0 Q4_K_M（含 CLIP-L、CLIP-G 與 SDXL VAE）。</p><progress id="gguf-download-progress" hidden aria-label="模型下載進度"></progress><p class="settings-note" id="gguf-download-state"></p><div class="settings-actions"><button class="btn" id="gguf-download">下載／續傳模型方案</button><button class="btn" id="gguf-download-stop" hidden>停止下載</button></div></div>
+      <details><summary>如何放入自己的模型</summary><ul class="settings-note"><li>主模型放入 diffusion_models，或直接放在此 GGUF 資料夾。</li><li>CLIP 編碼器放入 text_encoders，VAE 放入 vae。</li><li>按重新掃描後選擇模型系列；必要元件會在上方列出。</li><li>目前支援 WAI-NSFW-illustrious-SDXL v17.0 的 GGUF 影像模型。</li></ul></details><p class="settings-feedback" id="gguf-feedback" role="status" aria-live="polite"></p>`;
     panel.prepend(card);
     byId('gguf-scan').addEventListener('click', refresh);
     byId('settings-tab-model').addEventListener('click', refresh);
@@ -111,11 +111,16 @@
       byId('gguf-load').disabled = true;
       void refresh();
     });
-    byId('gguf-download').addEventListener('click', () => action('/api/models/gguf/download', { profiles: ['klein4b', 'qwen21'] }));
+    byId('gguf-download').addEventListener('click', () => action('/api/models/gguf/download', { profiles: ['wai_illustrious'] }));
     byId('gguf-download-stop').addEventListener('click', () => action('/api/models/gguf/download/stop'));
     app.on('runtime', () => { if (visible() && Date.now() - lastRead > 2000) void refresh(); });
     document.addEventListener('visibilitychange', () => { if (visible()) void refresh(); else clearTimeout(timer); });
-    void refresh();
+    app.use('switchSettingsTab', (next, section) => {
+      const result = next(section);
+      if (section === 'model') void refresh();
+      return result;
+    });
+    if (visible()) void refresh();
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initialize, { once: true }); else initialize();
 })();

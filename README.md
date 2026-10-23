@@ -81,8 +81,8 @@
 - **完整交易日誌**：每次重新命名操作均記錄於 JSON 日誌中，支援一鍵批次還原 (Undo)。
 
 ### 🎨 6. 二次元去馬賽克修復引擎 (Decensor Engine)
-- **YOLOv8 遮罩偵測**：自動鎖定二次元馬賽克部位。
-- **DeepCreamPy v2 ONNX 局部重繪**：透過本機神經網路進行細緻影像修復，支援 DirectML 顯卡記憶體一鍵釋放。
+- **YOLOv11-seg + YOLOv8 像素級遮罩偵測**：多尺度鎖定二次元馬賽克與黑條部位。
+- **本機 GGUF 模型局部重繪**：透過本機 GGUF 擴散修復模型 (FLUX.2 klein 4B / Qwen-Image-2.1) 與主題修復技能進行細緻影像修復，支援顯卡記憶體一鍵釋放。
 
 ### 🤖 7. Model Context Protocol (MCP) 伺服器
 - 內建標準 MCP 伺服器 (`mcp_server.py`)，可無縫連接 Claude Desktop、Gemini Flash 或 Antigravity Agent。
@@ -117,7 +117,7 @@ flowchart TD
         SemanticEng["語意檢索引擎<br/>(semantic_engine.py)<br/>• Jaccard 共現矩陣<br/>• 自然語言標籤展開"]
         ZhDict["繁中字典在地化<br/>(zh_dict.py)<br/>• 10,000+ 標籤對照<br/>• 畫師資料夾標準化"]
         Renamer["安全重命名系統<br/>(renamer.py)<br/>• Windows 自然排序<br/>• 交易日誌與 1 鍵還原"]
-        Decensor["去馬賽克修復引擎<br/>(decensor_engine.py)<br/>• YOLOv8 遮罩偵測<br/>• DeepCreamPy v2 重繪"]
+        Decensor["去馬賽克修復引擎<br/>(decensor_engine.py)<br/>• YOLOv11-seg 遮罩偵測<br/>• GGUF 模型局部重繪"]
     end
 
     %% AI & Reverse Search Layer
@@ -216,7 +216,7 @@ twitter-tag-gallery/
 ├── zh_dict.py                     # Danbooru 標籤繁體中文翻譯字典與資料夾映射
 ├── build_full_enrichments.py      # 標籤繁中字典與高階主題叢集建置腳本
 ├── renamer.py                     # 安全檔案批次重命名與 1 鍵還原系統
-├── decensor_engine.py             # YOLOv8 遮罩偵測 + DeepCreamPy v2 局部修復
+├── decensor_engine.py             # YOLOv11-seg 像素級遮罩偵測 + GGUF 模型局部修復
 ├── scheduler.py                   # 背景監控與增量掃描排程器
 ├── mcp_server.py                  # Model Context Protocol (MCP) 伺服器
 ├── requirements.txt               # Python 依賴清單

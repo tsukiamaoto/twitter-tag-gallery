@@ -106,7 +106,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       setupDetailActions();
       window.addEventListener('keydown', handleBrowseKeydown);
       document.querySelector('.settings-tabs').addEventListener('keydown', handleSettingsTabKeydown);
-      await Promise.all([loadStats(), loadFolders(), loadTags(), loadImages()]);
+      await Promise.all([loadTags(), loadImages(), loadStats(), loadFolders()]);
       startAiPolling();
 
     });
@@ -309,7 +309,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       const params = new URLSearchParams({ category: paging.category, q: paging.q,
         limit: TAG_BATCH_SIZE, offset: paging.offset, paged: true });
       try {
-        const r = await fetch(`/api/tags?${params}`, { signal: paging.signal });
+        const r = await fetch(`/api/tags?${params}`, { signal: paging.signal, priority: 'high' });
         if (!r.ok) throw new Error('標籤載入失敗');
         const data = await r.json();
         if (paging !== tagPaging) return;
@@ -613,7 +613,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
                 ${isSel ? '✓' : ''}
               </div>
               <div class="badge-top-right">${badges}</div>
-              <img src="/api/thumb/${item.id}" loading="lazy" draggable="false" alt="${escapeHtml(item.filename)}" />
+              <img src="/api/thumb/${item.id}" loading="lazy" decoding="async" fetchpriority="low" draggable="false" alt="${escapeHtml(item.filename)}" />
             </div>
             <div class="card-body">
               <div class="card-title" title="${escapeHtml(item.rel_path)}">
@@ -731,49 +731,31 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
     }
 
     /* Selection & Batch Operations */
-    const LAST_DELETION_KEY = 'twitter-tag-gallery.last-deletion';
-    const DISMISSED_DELETION_NOTICE_KEY = 'twitter-tag-gallery.last-deletion.dismissed';
-    let lastDeletedOperation = null;
-    let lastDeletedImageIds = [];
     let imageFileOperationBusy = false;
 
     function initializeDeleteNotice() {
-      let dismissedOperation = null;
+      document.getElementById('file-delete-notice').hidden = true;
       try {
-        const saved = localStorage.getItem(LAST_DELETION_KEY);
-        if (/^delete_[a-f0-9]{32}$/.test(saved || '')) lastDeletedOperation = saved;
-        dismissedOperation = localStorage.getItem(DISMISSED_DELETION_NOTICE_KEY);
+        localStorage.removeItem('twitter-tag-gallery.last-deletion');
+        localStorage.removeItem('twitter-tag-gallery.last-deletion.dismissed');
       } catch (_) {}
-      updateDeleteRestoreControls();
-      if (lastDeletedOperation && dismissedOperation !== lastDeletedOperation) {
-        showDeleteNotice('上次刪除的檔案仍可從圖庫回收區復原。');
-      }
-    }
-
-    function updateDeleteRestoreControls() {
-      for (const id of ['btn-restore-deleted', 'btn-restore-last-deleted']) {
-        document.getElementById(id).hidden = !lastDeletedOperation;
-      }
     }
 
     function dismissDeleteNotice() {
       if (imageFileOperationBusy) return;
       document.getElementById('file-delete-notice').hidden = true;
-      try {
-        if (lastDeletedOperation) localStorage.setItem(DISMISSED_DELETION_NOTICE_KEY, lastDeletedOperation);
-      } catch (_) {}
     }
 
     function showDeleteNotice(message) {
       document.getElementById('file-delete-notice').hidden = false;
       document.getElementById('file-delete-status').textContent = message;
-      updateDeleteRestoreControls();
     }
 
     function setImageFileBusy(busy) {
       imageFileOperationBusy = busy;
-      for (const id of ['btn-delete-selected', 'btn-delete-single', 'btn-restore-deleted', 'btn-restore-last-deleted', 'btn-dismiss-delete-notice']) {
-        document.getElementById(id).disabled = busy;
+      for (const id of ['btn-delete-selected', 'btn-delete-single', 'btn-dismiss-delete-notice']) {
+        const el = document.getElementById(id);
+        if (el) el.disabled = busy;
       }
     }
 
@@ -781,7 +763,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       if (window.GalleryApp) return window.GalleryApp.api(url, options);
       const response = await fetch(url, options);
       const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || data.message || '檔案操作失敗');
+      if (!response.ok) throw new Error(data.detail || data.message || '??????');
       return data;
     }
 
@@ -796,14 +778,10 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       if (imageFileOperationBusy || !imageIds.length) return;
       const ids = [...new Set(imageIds)];
       const visible = state.items.filter(item => ids.includes(item.id));
-      const detailTarget = ids.length === 1 && ids[0] === state.detailImageId;
-      const offPage = detailTarget ? 0 : ids.length - visible.length;
-      const names = ids.slice(0, 5).map(id => (currentDetailData?.id === id ? currentDetailData : state.items.find(item => item.id === id))?.filename || `圖片 ID ${id}`).join('\n');
-      const note = offPage ? `\n包含其他頁面選取的 ${offPage} 個檔案。` : '';
       hideHoverPreview();
-      if (!window.confirm(`刪除這 ${ids.length} 個檔案？${note}\n${names}\n\n檔案將移至圖庫回收區，可按「復原剛才刪除」還原。`)) return;
+      document.getElementById('file-delete-notice').hidden = true;
       setImageFileBusy(true);
-      showDeleteNotice(`正在刪除 ${ids.length} 個檔案…`);
+      let unlocked = false;
       try {
         const result = await imageFileRequest('/api/images/delete', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image_ids: ids })
@@ -816,21 +794,38 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
         const hasFollowingPage = state.page * state.pageSize < state.total;
         invalidateImageRequests();
         for (const id of removed) deletedImageIds.add(id);
-        if (result.restorable !== 0) {
-          lastDeletedOperation = result.operation_id;
-          lastDeletedImageIds = [...removed];
-          try { localStorage.setItem(LAST_DELETION_KEY, lastDeletedOperation); } catch (_) {}
-        }
         for (const id of removed) state.selectedIds.delete(id);
         state.items = state.items.filter(item => !removed.has(item.id));
         state.total = Math.max(0, state.total - visible.filter(item => removed.has(item.id)).length);
         state.page = Math.min(state.page, Math.max(1, Math.ceil(state.total / state.pageSize)));
-        updateSelectionUI(); renderPagination();
+        for (const id of removed) document.getElementById(`card-${id}`)?.remove?.();
+        if (!state.items.length) {
+          updateSelectionUI(true);
+        } else {
+          const cards = document.getElementById('image-grid').querySelectorAll?.('.card') || [];
+          if (cards.length === state.items.length) {
+            state.items.forEach((item, idx) => {
+              const thumb = document.getElementById(`card-${item.id}`)?.querySelector?.('.thumb-box');
+              if (thumb) {
+                thumb.dataset.index = String(idx);
+                thumb.setAttribute('onclick', `handleImageClick(event, ${idx})`);
+              }
+            });
+            updateSelectionUI(false);
+          } else {
+            updateSelectionUI(true);
+          }
+        }
+        renderPagination();
         let deferredDetail = null;
         let detailRequest = Promise.resolve();
         if (viewingRemoved) {
           const target = nextItem || (!hasFollowingPage && previousItem);
           if (target) {
+            state.detailImageId = target.id;
+            state.detailIndex = state.items.findIndex(item => item.id === target.id);
+            unlocked = true;
+            setImageFileBusy(false);
             detailRequest = refreshDetailView(target.id);
           } else if (state.total || state.items.length) {
             deferredDetail = { sequence: ++detailLoadSequence, index: hasFollowingPage ? Math.max(0, viewedIndex) : -1 };
@@ -838,52 +833,36 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
             state.detailImageId = null;
             state.detailIndex = -1;
             currentDetailData = null;
-            document.getElementById('dt-filename').textContent = '正在載入下一張圖片…';
-            document.getElementById('detail-media-container').textContent = '正在載入下一張圖片…';
+            document.getElementById('dt-filename').textContent = '??????????';
+          } else {
+            closeDetailModal();
+            unlocked = true;
+            setImageFileBusy(false);
+          }
+        } else {
+          unlocked = true;
+          setImageFileBusy(false);
+        }
+        const refreshed = await Promise.allSettled([loadImages({ preserveOnError: true }), loadStats(), loadFolders(), loadTags(), detailRequest]);
+        if (deferredDetail && deferredDetail.sequence === detailLoadSequence && document.getElementById('detail-modal').classList.contains('open')) {
+          const target = deferredDetail.index < 0 ? state.items.at(-1) : state.items[Math.min(deferredDetail.index, state.items.length - 1)];
+          if (target) {
+            state.detailImageId = target.id;
+            state.detailIndex = state.items.findIndex(item => item.id === target.id);
+            unlocked = true;
+            setImageFileBusy(false);
+            await refreshDetailView(target.id);
           } else {
             closeDetailModal();
           }
         }
-        const message = result.already_deleted ? '圖片紀錄已移除，已更新清單。' : result.missing_count
-          ? `已移除 ${result.deleted} 筆圖片紀錄與標籤連結；其中 ${result.missing_count} 個檔案原已不存在。`
-          : `已刪除 ${result.deleted} 個檔案，已移至圖庫回收區（尚未釋放磁碟空間）。`;
-        showDeleteNotice(message);
-        const refreshed = await Promise.allSettled([loadImages({ preserveOnError: true }), loadStats(), loadFolders(), loadTags(), detailRequest]);
-        if (deferredDetail && deferredDetail.sequence === detailLoadSequence && document.getElementById('detail-modal').classList.contains('open')) {
-          const target = deferredDetail.index < 0 ? state.items.at(-1) : state.items[Math.min(deferredDetail.index, state.items.length - 1)];
-          if (target) await refreshDetailView(target.id);
-          else closeDetailModal();
-        }
         if (refreshed[0].status === 'rejected' || refreshed[0].value === false) {
-          showDeleteNotice(`${message} 其餘圖片暫時無法補載，請稍後重試。`);
+          showDeleteNotice('???????????????????????????');
         }
       } catch (error) {
-        showDeleteNotice(`刪除失敗：${error.message}`);
+        showDeleteNotice(`?????${error.message}`);
       } finally {
-        setImageFileBusy(false);
-      }
-    }
-
-    async function restoreLastDeletedImages() {
-      if (imageFileOperationBusy || !lastDeletedOperation) return;
-      setImageFileBusy(true);
-      showDeleteNotice('正在復原檔案與標籤…');
-      try {
-        const result = await imageFileRequest(`/api/images/deletions/${lastDeletedOperation}/restore`, { method: 'POST' });
-        invalidateImageRequests();
-        for (const id of lastDeletedImageIds) deletedImageIds.delete(id);
-        lastDeletedImageIds = [];
-        lastDeletedOperation = null;
-        try {
-          localStorage.removeItem(LAST_DELETION_KEY);
-          localStorage.removeItem(DISMISSED_DELETION_NOTICE_KEY);
-        } catch (_) {}
-        await Promise.allSettled([loadImages(), loadStats(), loadFolders(), loadTags()]);
-        showDeleteNotice(`已復原 ${result.restored} 個檔案與原有標籤。`);
-      } catch (error) {
-        showDeleteNotice(`復原失敗：${error.message}`);
-      } finally {
-        setImageFileBusy(false);
+        if (!unlocked) setImageFileBusy(false);
       }
     }
 
@@ -1128,6 +1107,107 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       });
     }
 
+    const detailMediaCacheBust = new Map();
+    const detailPreloadCache = new Map();
+    const DETAIL_PRELOAD_LIMIT = 12;
+
+    function canDecodeDetailImages() {
+      return typeof Image === 'function' && typeof Image.prototype?.decode === 'function';
+    }
+
+    function getDetailMediaUrl(imageId) {
+      const bust = detailMediaCacheBust.get(imageId);
+      return bust ? `/api/raw/${imageId}?t=${bust}` : `/api/raw/${imageId}`;
+    }
+
+    function invalidateDetailMediaCache(imageId) {
+      const prevUrl = getDetailMediaUrl(imageId);
+      detailPreloadCache.delete(prevUrl);
+      detailMediaCacheBust.set(imageId, Date.now());
+    }
+
+    function rememberDetailPreload(src, entry) {
+      if (detailPreloadCache.has(src)) detailPreloadCache.delete(src);
+      detailPreloadCache.set(src, entry);
+      while (detailPreloadCache.size > DETAIL_PRELOAD_LIMIT) {
+        const oldestKey = detailPreloadCache.keys().next().value;
+        detailPreloadCache.delete(oldestKey);
+      }
+    }
+
+    function createDetailImagePreload(src) {
+      const loader = new Image();
+      loader.decoding = 'async';
+      const entry = { loader, promise: null, used: false, ok: null };
+      entry.promise = new Promise(resolve => {
+        let settled = false;
+        const finish = ok => {
+          if (settled) return;
+          settled = true;
+          loader.onload = null;
+          loader.onerror = null;
+          entry.ok = ok;
+          if (!ok && detailPreloadCache.get(src) === entry) {
+            detailPreloadCache.delete(src);
+          }
+          resolve({ ok, img: loader, entry });
+        };
+        loader.onload = () => {
+          if (typeof loader.decode === 'function') {
+            loader.decode().then(() => finish(true), () => finish(true));
+          } else {
+            finish(true);
+          }
+        };
+        loader.onerror = () => finish(false);
+        loader.src = src;
+        if (loader.complete && loader.naturalWidth > 0) {
+          if (typeof loader.decode === 'function') {
+            loader.decode().then(() => finish(true), () => finish(true));
+          } else {
+            finish(true);
+          }
+        }
+      });
+      rememberDetailPreload(src, entry);
+      return entry;
+    }
+
+    function warmDetailImage(src) {
+      if (!canDecodeDetailImages() || !src) return;
+      const existing = detailPreloadCache.get(src);
+      if (existing && !existing.used && existing.ok !== false) {
+        rememberDetailPreload(src, existing);
+        return;
+      }
+      createDetailImagePreload(src);
+    }
+
+    function preloadDetailImage(src) {
+      if (!canDecodeDetailImages()) {
+        return Promise.resolve({ ok: true, img: null, entry: null });
+      }
+      const existing = detailPreloadCache.get(src);
+      if (existing && !existing.used && existing.ok !== false) {
+        existing.used = true;
+        rememberDetailPreload(src, existing);
+        return existing.promise;
+      }
+      const entry = createDetailImagePreload(src);
+      entry.used = true;
+      return entry.promise;
+    }
+
+    function preloadAdjacentDetailImages(centerIndex) {
+      if (!canDecodeDetailImages() || centerIndex < 0 || !state.items.length) return;
+      for (const offset of [1, -1, 2, -2]) {
+        const neighbor = state.items[centerIndex + offset];
+        if (neighbor && neighbor.media_type !== 'video' && !neighbor.file_missing) {
+          warmDetailImage(getDetailMediaUrl(neighbor.id));
+        }
+      }
+    }
+
     async function openDetailModal(idx) {
       hideHoverPreview();
       const item = state.items[idx];
@@ -1142,25 +1222,52 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
     async function refreshDetailView(imageId) {
       closeDetailActions();
       const sequence = ++detailLoadSequence;
+      const displayedImageId = currentDetailData?.id ?? null;
       state.detailImageId = imageId;
       state.detailIndex = state.items.findIndex(item => item.id === imageId);
-      currentDetailData = null;
-      document.getElementById('dt-filename').textContent = '正在載入圖片…';
-      document.getElementById('dt-tags-container').textContent = '';
-      document.getElementById('detail-media-container').textContent = '正在載入圖片…';
+
+      const mediaBox = document.getElementById('detail-media-container');
+      const rawUrl = getDetailMediaUrl(imageId);
+      const existingImg = typeof mediaBox.querySelector === 'function' ? mediaBox.querySelector('#dt-main-img') : null;
+      const alreadyShowingRaw = Boolean(existingImg && existingImg.getAttribute('src') === rawUrl && !showingDecensoredPreview);
+      const previewItem = state.detailIndex >= 0 ? state.items[state.detailIndex] : null;
+      const earlyPreload = (!alreadyShowingRaw && canDecodeDetailImages() && (!previewItem || previewItem.media_type !== 'video'))
+        ? preloadDetailImage(rawUrl)
+        : null;
+
       const r = await fetch(`/api/image/${imageId}`);
       const d = await r.json();
-      if (sequence !== detailLoadSequence || !document.getElementById('detail-modal').classList.contains('open')) return;
+      if (sequence !== detailLoadSequence || !document.getElementById('detail-modal').classList.contains('open')) {
+        if (earlyPreload) earlyPreload.then(res => { if (res?.entry) res.entry.used = false; });
+        return;
+      }
       if (!r.ok) {
+        if (earlyPreload) earlyPreload.then(res => { if (res?.entry) res.entry.used = false; });
         closeDetailModal();
         showDeleteNotice(r.status === 404 ? '圖片紀錄已移除，正在更新圖庫清單。' : '圖片詳情載入失敗，請重試。');
         await Promise.allSettled([loadImages(), loadStats(), loadFolders(), loadTags()]);
         return;
       }
+
+      let preload = null;
+      if (!d.file_missing && d.media_type !== 'video' && !alreadyShowingRaw && canDecodeDetailImages()) {
+        preload = await (earlyPreload || preloadDetailImage(rawUrl));
+        if (sequence !== detailLoadSequence || !document.getElementById('detail-modal').classList.contains('open')) {
+          if (preload?.entry) preload.entry.used = false;
+          return;
+        }
+      } else if (earlyPreload) {
+        earlyPreload.then(res => { if (res?.entry) res.entry.used = false; });
+      }
+
       currentDetailData = d;
       currentDecensorPreviewUrl = null;
       showingDecensoredPreview = false;
 
+      if (displayedImageId !== d.id) {
+        const revBox = document.getElementById('dt-rev-links');
+        if (revBox) revBox.style.display = 'none';
+      }
       const decBox = document.getElementById('dt-decensor-box');
       if (decBox) decBox.style.display = 'none';
       const cmpBtn = document.getElementById('btn-decensor-compare');
@@ -1168,13 +1275,25 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       const saveRow = document.getElementById('dt-decensor-save-row');
       if (saveRow) saveRow.style.display = 'none';
 
-      const mediaBox = document.getElementById('detail-media-container');
       if (d.file_missing) {
         showMissingDetailMedia(d.id);
       } else if (d.media_type === 'video') {
-        mediaBox.innerHTML = `<video src="/api/raw/${d.id}?t=${Date.now()}" controls autoplay loop onerror="showMissingDetailMedia(${d.id})"></video>`;
+        mediaBox.innerHTML = `<video src="${rawUrl}" controls autoplay loop onerror="showMissingDetailMedia(${d.id})"></video>`;
+      } else if (canDecodeDetailImages() && preload && !preload.ok) {
+        showMissingDetailMedia(d.id);
       } else {
-        mediaBox.innerHTML = `<img id="dt-main-img" src="/api/raw/${d.id}?t=${Date.now()}" alt="${escapeHtml(d.filename)}" onerror="showMissingDetailMedia(${d.id})" />`;
+        const currentImg = typeof mediaBox.querySelector === 'function' ? mediaBox.querySelector('#dt-main-img') : null;
+        if (currentImg && currentImg.getAttribute('src') === rawUrl) {
+          currentImg.alt = d.filename;
+        } else if (typeof mediaBox.replaceChildren === 'function' && preload?.img && typeof Node !== 'undefined' && preload.img instanceof Node) {
+          preload.img.id = 'dt-main-img';
+          preload.img.alt = d.filename;
+          preload.img.draggable = false;
+          preload.img.onerror = () => showMissingDetailMedia(d.id);
+          mediaBox.replaceChildren(preload.img);
+        } else {
+          mediaBox.innerHTML = `<img id="dt-main-img" src="${rawUrl}" alt="${escapeHtml(d.filename)}" onerror="showMissingDetailMedia(${d.id})" />`;
+        }
       }
 
       document.getElementById('dt-filename').textContent = d.filename;
@@ -1190,6 +1309,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       }
 
       renderDetailTags(d.tags);
+      preloadAdjacentDetailImages(state.detailIndex);
     }
 
     function showMissingDetailMedia(imageId) {
@@ -1219,7 +1339,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
 
       if (btn) { btn.disabled = true; btn.textContent = '⏳ GPU 重繪中...'; }
       if (mainBtn) { mainBtn.disabled = true; mainLabel.textContent = '去馬賽克中…'; }
-      if (statusEl) statusEl.innerHTML = '⏳ 正在透過 AMD RX 9070 XT (DirectML) 載入 YOLO 遮罩偵測與 DeepCreamPy v2 進行局部重繪...';
+      if (statusEl) statusEl.innerHTML = '⏳ 正在透過 YOLO 遮罩偵測與本機 GGUF 影像修復模型進行局部重繪...';
 
       try {
         const r = await fetch(`/api/decensor/preview/${currentDetailData.id}`, {
@@ -1254,7 +1374,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
         if (statusEl) statusEl.innerHTML = `<span style="color:#fca5a5;">❌ 預覽失敗：${escapeHtml(e.message)}</span>`;
       } finally {
         if (btn) { btn.disabled = false; btn.textContent = '🔍 重新偵測並預覽'; }
-        if (mainBtn) { mainBtn.disabled = false; mainLabel.textContent = 'AI 去馬賽克'; }
+        if (mainBtn) { mainBtn.disabled = false; mainLabel.textContent = '去馬賽克'; }
       }
     }
 
@@ -1268,7 +1388,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
         imgEl.src = currentDecensorPreviewUrl;
         if (cmpBtn) cmpBtn.textContent = '👁️ 切換對比：目前顯示【去碼後】';
       } else {
-        imgEl.src = `/api/raw/${currentDetailData.id}?t=${Date.now()}`;
+        imgEl.src = getDetailMediaUrl(currentDetailData.id);
         if (cmpBtn) cmpBtn.textContent = '👁️ 切換對比：目前顯示【原始有碼圖】';
       }
     }
@@ -1294,6 +1414,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
           return;
         }
         const targetId = res.image_id || currentDetailData.id;
+        invalidateDetailMediaCache(targetId);
         await refreshDetailView(targetId);
         await loadStats();
         await loadTags();
@@ -1354,6 +1475,8 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       detailLoadSequence++;
       document.getElementById('detail-modal').classList.remove('open');
       document.getElementById('detail-media-container').innerHTML = '';
+      document.getElementById('dt-filename').textContent = '';
+      document.getElementById('dt-tags-container').textContent = '';
       currentDetailData = null;
       state.detailImageId = null;
       state.detailIndex = -1;

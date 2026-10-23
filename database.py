@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, ContextManager
 
 from sqlite_pool import SQLiteConnectionPool
-from zh_dict import get_tag_zh, FOLDER_TO_DANBOORU_ARTIST, DANBOORU_ARTIST_TO_FOLDER
+from zh_dict import get_tag_zh, FOLDER_TO_DANBOORU_ARTIST, DANBOORU_ARTIST_TO_FOLDER, resolve_artist_folder_name
 from background_work import exclusive_job, background_checkpoint, update_job
 
 GALLERY_ROOT = Path(os.environ.get("TWITTER_GALLERY_ROOT",r"D:\圖檔\twitter"))
@@ -27,15 +27,68 @@ RE_DATE_SEQ = re.compile(r"^((?:19|20)\d{2})(\d{2})(\d{2})_\d+")
 RE_PIXIV = re.compile(r"^(?:\d+[_：:])?(\d{7,10})_p\d+", re.IGNORECASE)
 RE_AI_SEED = re.compile(r"^\d{5}-\d{6,}")
 RE_TWITTER_RAW = re.compile(r"^[A-Za-z0-9_-]{15}$")
+RE_TWITTER_HANDLE_STATUS = re.compile(r"^([A-Za-z0-9_]{3,20})[-_](1[3-9]\d{17}|2[0-9]\d{17})(?:[-_].*)?$")
+RE_TWITTERVID = re.compile(r"^twittervid\.com_[A-Za-z0-9_]+$", re.IGNORECASE)
 RE_KONACHAN = re.compile(r"^Konachan\.com\s*-\s*(\d+)\s+(.*)$", re.IGNORECASE)
 _retry_context = threading.local()
+_DEFAULT_DB_PATH = DB_PATH
+_db_pool_lock = threading.Lock()
+_db_pool_idle: List["_PooledConnection"] = []
+_DB_POOL_MAX_IDLE = 8
 
 
-def get_db() -> sqlite3.Connection:
+class _PooledConnection(sqlite3.Connection):
+    _pool_path: Optional[Path] = None
+    _in_pool: bool = False
+
+    def real_close(self) -> None:
+        super().close()
+
+    def close(self) -> None:
+        if self._pool_path is None or self._pool_path != DB_PATH:
+            super().close()
+            return
+        try:
+            if self.in_transaction:
+                self.rollback()
+            self.set_trace_callback(None)
+        except sqlite3.Error:
+            super().close()
+            return
+        with _db_pool_lock:
+            if self._in_pool or len(_db_pool_idle) >= _DB_POOL_MAX_IDLE or self._pool_path != DB_PATH:
+                should_close = not self._in_pool
+            else:
+                self._in_pool = True
+                _db_pool_idle.append(self)
+                should_close = False
+        if should_close:
+            super().close()
+
+
+def close_db_pool() -> None:
+    with _db_pool_lock:
+        idle = list(_db_pool_idle)
+        _db_pool_idle.clear()
+    for conn in idle:
+        try:
+            conn.real_close()
+        except sqlite3.Error:
+            pass
+
+
+atexit.register(close_db_pool)
+
+
+def _open_raw_db(pooled: bool = False) -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     THUMB_DIR.mkdir(parents=True, exist_ok=True)
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH), timeout=60.0, check_same_thread=False)
+    if pooled:
+        conn = sqlite3.connect(str(DB_PATH), timeout=60.0, check_same_thread=False, factory=_PooledConnection)
+        conn._pool_path = DB_PATH
+    else:
+        conn = sqlite3.connect(str(DB_PATH), timeout=60.0, check_same_thread=False)
     try:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL;")
@@ -45,13 +98,32 @@ def get_db() -> sqlite3.Connection:
         conn.execute("PRAGMA cache_size=-64000;")
         conn.execute("PRAGMA foreign_keys=ON;")
     except BaseException:
-        conn.close()
+        if isinstance(conn, _PooledConnection):
+            conn.real_close()
+        else:
+            conn.close()
         raise
     return conn
 
 
+def get_db() -> sqlite3.Connection:
+    if DB_PATH == _DEFAULT_DB_PATH:
+        with _db_pool_lock:
+            while _db_pool_idle:
+                conn = _db_pool_idle.pop()
+                conn._in_pool = False
+                if conn._pool_path == DB_PATH:
+                    return conn
+                try:
+                    conn.real_close()
+                except sqlite3.Error:
+                    pass
+        return _open_raw_db(pooled=True)
+    return _open_raw_db(pooled=False)
+
+
 def _open_preview_db() -> sqlite3.Connection:
-    conn = get_db()
+    conn = _open_raw_db(pooled=False)
     try:
         conn.execute("PRAGMA query_only=ON;")
     except BaseException:
@@ -131,6 +203,7 @@ def _init_db():
             );
 
             CREATE INDEX IF NOT EXISTS idx_images_folder ON images(folder);
+            CREATE INDEX IF NOT EXISTS idx_images_folder_mtime ON images(folder, mtime);
             CREATE INDEX IF NOT EXISTS idx_images_ai_tagged ON images(ai_tagged);
             CREATE INDEX IF NOT EXISTS idx_images_media_type ON images(media_type);
             CREATE INDEX IF NOT EXISTS idx_images_mtime ON images(mtime DESC);
@@ -157,8 +230,8 @@ def _init_db():
                 FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
             );
 
-            CREATE INDEX IF NOT EXISTS idx_image_tags_tag ON image_tags(tag_id);
-            CREATE INDEX IF NOT EXISTS idx_image_tags_img ON image_tags(image_id);
+            CREATE INDEX IF NOT EXISTS idx_image_tags_tag ON image_tags(tag_id, image_id);
+
             CREATE INDEX IF NOT EXISTS idx_image_tags_source_tag ON image_tags(source, tag_id);
             CREATE INDEX IF NOT EXISTS idx_image_tags_img_source ON image_tags(image_id, source);
 
@@ -394,6 +467,7 @@ def _scan_library(conn, t0):
                 path_to_id[row["rel_path"]] = row
 
             tag_links = []
+            sug_folder_updates = []
             for item in new_images:
                 rel_path_norm = item[0]
                 row = path_to_id.get(rel_path_norm)
@@ -415,26 +489,49 @@ def _scan_library(conn, t0):
                             tid2 = ensure_tag(conn, tag_cache, db_artist, "artist")
                             tag_links.append((img_id, tid2, 1.0, "folder"))
 
-                # 2. Filename-based Date / Source / Konachan tags
+                # 2. Filename-based Date / Source / Twitter / Konachan tags
                 if row["pixiv_id"]:
                     tid_p = ensure_tag(conn, tag_cache, "Pixiv來源", "source")
                     tag_links.append((img_id, tid_p, 1.0, "filename"))
                 elif RE_AI_SEED.match(base):
                     tid_ai = ensure_tag(conn, tag_cache, "AI生成(檔名特徵)", "source")
                     tag_links.append((img_id, tid_ai, 1.0, "filename"))
-                elif RE_TWITTER_RAW.match(base):
+                elif RE_TWITTER_RAW.match(base) or RE_TWITTERVID.match(base):
                     tid_tw = ensure_tag(conn, tag_cache, "Twitter原始檔名", "source")
                     tag_links.append((img_id, tid_tw, 1.0, "filename"))
                 else:
-                    m_kona = RE_KONACHAN.match(base)
-                    if m_kona:
-                        tid_k = ensure_tag(conn, tag_cache, "Konachan圖站", "source")
-                        tag_links.append((img_id, tid_k, 1.0, "filename"))
+                    m_tw_hs = RE_TWITTER_HANDLE_STATUS.match(base)
+                    if m_tw_hs:
+                        tid_tw = ensure_tag(conn, tag_cache, "Twitter原始檔名", "source")
+                        tag_links.append((img_id, tid_tw, 1.0, "filename"))
+                        tw_handle = m_tw_hs.group(1)
+                        if not tw_handle.isdigit() and tw_handle.lower() not in ("twitter", "x", "video", "img", "image", "photo", "clip"):
+                            tid_h = ensure_tag(conn, tag_cache, f"@{tw_handle}", "artist", source="twitter")
+                            if tid_h > 0:
+                                tag_links.append((img_id, tid_h, 1.0, "twitter"))
+                            res_folder = resolve_artist_folder_name(tw_handle)
+                            if res_folder in FOLDER_TO_DANBOORU_ARTIST:
+                                db_artist = FOLDER_TO_DANBOORU_ARTIST[res_folder]
+                                tid_db = ensure_tag(conn, tag_cache, db_artist, "artist", source="twitter")
+                                if tid_db > 0:
+                                    tag_links.append((img_id, tid_db, 1.0, "twitter"))
+                            if not folder and res_folder:
+                                sug_folder_updates.append((res_folder, img_id))
+                    else:
+                        m_kona = RE_KONACHAN.match(base)
+                        if m_kona:
+                            tid_k = ensure_tag(conn, tag_cache, "Konachan圖站", "source")
+                            tag_links.append((img_id, tid_k, 1.0, "filename"))
 
             if tag_links:
                 conn.executemany(
                     "INSERT OR IGNORE INTO image_tags (image_id, tag_id, confidence, source) VALUES (?, ?, ?, ?)",
                     tag_links
+                )
+            if sug_folder_updates:
+                conn.executemany(
+                    "UPDATE images SET suggested_folder = COALESCE(?, suggested_folder) WHERE id = ?",
+                    sug_folder_updates
                 )
 
         for path, info in details.items():

@@ -18,7 +18,7 @@ class SkillInput(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     name: str = Field(min_length=1, max_length=100)
     description: str = Field(default="", max_length=1000)
-    profile: Literal["klein4b", "qwen21"]
+    profile: Literal["wai_illustrious", "klein4b", "qwen21"] = "wai_illustrious"
     model_id: str = Field(min_length=1, max_length=500)
     prompt: str = Field(min_length=1, max_length=12000)
     steps: int = Field(ge=1, le=100)

@@ -49,7 +49,7 @@
       <button class="btn" onclick="openOrganizeModal()">📂 資料夾歸檔精靈</button>
       <button class="btn" onclick="rescanLibrary()" title="重新掃描 D:\圖檔\twitter 檔案變動">🔄 重新掃描</button>
       <button class="btn" onclick="openSettings('history')" title="檢視全系統操作日誌與執行紀錄">📋 操作日誌</button>
-      <button class="btn" id="btn-restore-last-deleted" onclick="restoreLastDeletedImages()" title="復原最後一批刪除的檔案與標籤" hidden>復原上次刪除</button>
+
       <button class="btn" id="btn-settings" onclick="openSettings()" title="瀏覽偏好、匯入排程與執行紀錄">⚙ 設定</button>
     </div>
   </header>
@@ -146,8 +146,8 @@
 
       <div id="file-delete-notice" class="file-delete-notice" hidden>
         <span id="file-delete-status" role="status" aria-live="polite"></span>
-        <button class="btn" id="btn-restore-deleted" onclick="restoreLastDeletedImages()" hidden>復原剛才刪除</button>
-        <button class="btn btn-text file-delete-dismiss" id="btn-dismiss-delete-notice" onclick="dismissDeleteNotice()" aria-label="關閉刪除提示" title="關閉提示，保留復原功能">✕ 關閉提示</button>
+
+        <button class="btn btn-text file-delete-dismiss" id="btn-dismiss-delete-notice" onclick="dismissDeleteNotice()" aria-label="關閉刪除提示" title="關閉提示">✕ 關閉提示</button>
       </div>
 
       <!-- Image Grid -->
@@ -208,6 +208,10 @@
               <svg class="detail-action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7Z"/></svg>
               開啟資料夾
             </button>
+            <button class="btn detail-direct-action" id="btn-single-decensor" onclick="closeDetailActions(); openOrRunSingleDecensor()" title="使用本機 GPU 偵測並去除馬賽克/黑條">
+              <svg class="detail-action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m16 3 5 5-11 11H5l-3-3L16 3ZM9 10l5 5M10 19h11"/></svg>
+              <span id="dt-decensor-label">去馬賽克</span>
+            </button>
             <button class="btn detail-direct-action detail-delete-action" id="btn-delete-single" onclick="closeDetailActions(); deleteCurrentImage()" title="刪除檔案 (Del)" aria-keyshortcuts="Delete">
               <svg class="detail-action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg>
               刪除檔案
@@ -222,10 +226,6 @@
                   <svg class="detail-action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.7 6.3L21 12l-6.3 2.7L12 21l-2.7-6.3L3 12l6.3-2.7Z"/><path d="m20 2 .6 1.4L22 4l-1.4.6L20 6l-.6-1.4L18 4l1.4-.6Z"/></svg>
                   <span id="dt-unified-label">智慧標籤</span>
                 </button>
-                <button class="btn" id="btn-single-decensor" onclick="closeDetailActions(true); openOrRunSingleDecensor()">
-                  <svg class="detail-action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m16 3 5 5-11 11H5l-3-3L16 3ZM9 10l5 5M10 19h11"/></svg>
-                  <span id="dt-decensor-label">AI 去馬賽克</span>
-                </button>
               </div>
             </details>
           </div>
@@ -235,7 +235,7 @@
         <!-- 本機 GPU 二次元去馬賽克預覽與儲存控制面板 -->
         <div id="dt-decensor-box" style="display:none; background:rgba(219,39,119,0.12); border:1px solid #ec4899; border-radius:8px; padding:10px; flex-direction:column; gap:8px;">
           <div style="display:flex; justify-content:space-between; align-items:center; gap:6px;">
-            <b style="font-size:12px; color:#f9a8d4;">✨ 本機 GPU 二次元去馬賽克 (YOLO 遮罩偵測 + DeepCreamPy v2)</b>
+            <b style="font-size:12px; color:#f9a8d4;">✨ 本機 GPU 二次元去馬賽克 (YOLO 遮罩偵測 + GGUF 模型局部重繪)</b>
             <button class="btn" style="padding:2px 6px; font-size:11px;" onclick="document.getElementById('dt-decensor-box').style.display='none'">✖</button>
           </div>
           <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap; font-size:12px;">
@@ -384,7 +384,7 @@
           <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
             <label style="font-size:13px; font-weight:700; color:#f9a8d4; display:flex; align-items:center; gap:8px; cursor:pointer;">
               <input type="checkbox" id="ai-step-decensor" style="width:16px; height:16px;" />
-              <span>✨ 第四階段 (選用)：對偵測到含馬賽克/黑條遮罩的圖片自動執行 GPU 去馬賽克 (YOLO + DeepCreamPy v2)</span>
+              <span>✨ 第四階段 (選用)：對偵測到含馬賽克/黑條遮罩的圖片自動執行 GPU 去馬賽克 (YOLO + GGUF 模型)</span>
             </label>
             <select id="ai-decensor-save-mode" class="select-box" style="padding:4px 8px; font-size:12px;">
               <option value="new_copy" selected>📄 另存無碼新檔 (_decensored.png 保留原圖)</option>

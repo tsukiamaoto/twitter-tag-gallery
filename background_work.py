@@ -138,15 +138,22 @@ class JobLease:
         self._info_lock = threading.Lock()
         self._heartbeat_stop = threading.Event()
         try:
+            now = time.time()
+            self.info["updated_at"] = now
             conn = _jobs_db()
             try:
                 with conn:
-                    conn.execute("UPDATE jobs SET status='interrupted',updated_at=? WHERE status='running'", (time.time(),))
+                    conn.execute("UPDATE jobs SET status='interrupted',updated_at=? WHERE status='running'", (now,))
+                    conn.execute(
+                        "INSERT INTO jobs(id,status,updated_at,payload) VALUES(?,?,?,?) "
+                        "ON CONFLICT(id) DO UPDATE SET status=excluded.status,updated_at=excluded.updated_at,payload=excluded.payload",
+                        (self.info["id"], self.info["status"], now, json.dumps(self.info, ensure_ascii=False)),
+                    )
                     conn.execute("DELETE FROM jobs WHERE id NOT IN (SELECT id FROM jobs ORDER BY updated_at DESC LIMIT 1000)")
             finally:
                 conn.close()
-            self.publish(force=True)
             atomic_json(data_dir() / "background-job.json", self.info)
+            self._last_publish = time.monotonic()
         except BaseException:
             lock.release()
             raise

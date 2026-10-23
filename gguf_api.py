@@ -14,7 +14,7 @@ class Selection(BaseModel):
 
 class Download(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    profiles: list[str] = Field(default_factory=lambda: ["klein4b", "qwen21"], min_length=1, max_length=2)
+    profiles: list[str] = Field(default_factory=lambda: ["wai_illustrious"], min_length=1, max_length=3)
 
 
 def action(function, *arguments):

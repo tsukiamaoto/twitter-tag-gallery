@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import BaseModel,Field
 from file_safety import UnsafePath,validate_source,gallery_path
+from native_explorer import reveal_file
 from gallery_artist_service import sidebar_tag_rows, recent_sidebar_tag_rows
 from background_work import BackgroundBusy, mark_interactive, exclusive_job, background_checkpoint
 from thumbnail_cache import ThumbnailCache, ThumbnailQueueFull
@@ -200,7 +201,9 @@ def on_startup():
 
 @app.on_event("shutdown")
 def on_shutdown():
+    from database import close_db_pool
     thumbnail_cache.close()
+    close_db_pool()
 
 
 
@@ -291,67 +294,69 @@ def api_tags(
                 "has_more": len(items) > offset + page_limit}
 
     conn = get_db()
-    total_all = conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]
-
-    now_ts = _time.time()
-    recent_special_items = []
-    if category in ("all", "recent"):
-        q_lower = q.strip().lower()
-        if not q_lower or "最近" in q_lower or "recent" in q_lower or "最新" in q_lower:
-            recent_special_items.append({
-                "id": -1,
-                "name": "最近",
-                "category": "recent",
-                "zh_name": "🕒 最近 (全部圖片：編輯時間 最新➔最舊)",
-                "count": total_all,
-            })
-        if category == "recent":
-            buckets = [
-                ("最近:24小時內", "🕒 最近 24 小時內編輯", now_ts - 86400),
-                ("最近:7天內", "🕒 最近 7 天內編輯", now_ts - 86400 * 7),
-                ("最近:30天內", "🕒 最近 30 天內編輯", now_ts - 86400 * 30),
-                ("最近:90天內", "🕒 最近 90 天內編輯", now_ts - 86400 * 90),
-                ("最近:1年內", "🕒 最近 1 年內編輯", now_ts - 86400 * 365),
-            ]
-            for b_name, b_zh, since_ts in buckets:
-                cnt_b = conn.execute("SELECT COUNT(*) FROM images WHERE mtime >= ?", (since_ts,)).fetchone()[0]
-                if cnt_b > 0:
-                    recent_special_items.append({
-                        "id": -2,
-                        "name": b_name,
-                        "category": "recent",
-                        "zh_name": b_zh,
-                        "count": cnt_b,
-                    })
-
-            # 同時列出最近編輯圖片中最常出現的畫師與標籤（依圖片最新 mtime 排序）
-            recent_tag_rows = recent_sidebar_tag_rows(conn, q, limit)
-            conn.close()
-            for r in recent_tag_rows:
-                zh = get_tag_display_name(r["name"], r["category"], r["zh_name"])
+    try:
+        recent_special_items = []
+        if category in ("all", "recent"):
+            now_ts = _time.time()
+            q_lower = q.strip().lower()
+            if not q_lower or "最近" in q_lower or "recent" in q_lower or "最新" in q_lower:
+                total_all = conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]
                 recent_special_items.append({
-                    "id": r["id"],
-                    "name": r["name"],
-                    "category": r["category"],
-                    "zh_name": zh,
-                    "count": r["post_count"],
-                    "aliases": r.get("aliases", [r["name"]]) if isinstance(r, dict) else [r["name"]],
+                    "id": -1,
+                    "name": "最近",
+                    "category": "recent",
+                    "zh_name": "🕒 最近 (全部圖片：編輯時間 最新➔最舊)",
+                    "count": total_all,
                 })
-            return response(recent_special_items)
+            if category == "recent":
+                buckets = [
+                    ("最近:24小時內", "🕒 最近 24 小時內編輯", now_ts - 86400),
+                    ("最近:7天內", "🕒 最近 7 天內編輯", now_ts - 86400 * 7),
+                    ("最近:30天內", "🕒 最近 30 天內編輯", now_ts - 86400 * 30),
+                    ("最近:90天內", "🕒 最近 90 天內編輯", now_ts - 86400 * 90),
+                    ("最近:1年內", "🕒 最近 1 年內編輯", now_ts - 86400 * 365),
+                ]
+                for b_name, b_zh, since_ts in buckets:
+                    cnt_b = conn.execute("SELECT COUNT(*) FROM images WHERE mtime >= ?", (since_ts,)).fetchone()[0]
+                    if cnt_b > 0:
+                        recent_special_items.append({
+                            "id": -2,
+                            "name": b_name,
+                            "category": "recent",
+                            "zh_name": b_zh,
+                            "count": cnt_b,
+                        })
 
-    rows = sidebar_tag_rows(conn, category, q, limit)
-    conn.close()
+                # 同時列出最近編輯圖片中最常出現的畫師與標籤（依圖片最新 mtime 排序）
+                recent_tag_rows = recent_sidebar_tag_rows(conn, q, limit)
+                for r in recent_tag_rows:
+                    is_dict = isinstance(r, dict)
+                    zh = r["zh_name"] if is_dict and r["category"] == "artist" else get_tag_display_name(r["name"], r["category"], r["zh_name"])
+                    recent_special_items.append({
+                        "id": r["id"],
+                        "name": r["name"],
+                        "category": r["category"],
+                        "zh_name": zh,
+                        "count": r["post_count"],
+                        "aliases": r.get("aliases", [r["name"]]) if is_dict else [r["name"]],
+                    })
+                return response(recent_special_items)
+
+        rows = sidebar_tag_rows(conn, category, q, limit)
+    finally:
+        conn.close()
 
     result = list(recent_special_items)
     for r in rows:
-        zh = get_tag_display_name(r["name"], r["category"], r["zh_name"])
+        is_dict = isinstance(r, dict)
+        zh = r["zh_name"] if is_dict and r["category"] == "artist" else get_tag_display_name(r["name"], r["category"], r["zh_name"])
         result.append({
             "id": r["id"],
             "name": r["name"],
             "category": r["category"],
             "zh_name": zh,
             "count": r["post_count"],
-            "aliases": r.get("aliases", [r["name"]]) if isinstance(r, dict) else [r["name"]],
+            "aliases": r.get("aliases", [r["name"]]) if is_dict else [r["name"]],
         })
     return response(result)
 
@@ -448,7 +453,7 @@ async def api_thumb(image_id: int, request: Request):
     except (OSError, ValueError, SyntaxError):
         raise HTTPException(status_code=422, detail="Unable to generate thumbnail")
 
-    headers = {"ETag": result.etag, "Cache-Control": "public, max-age=0, must-revalidate"}
+    headers = {"ETag": result.etag, "Cache-Control": "public, max-age=600, stale-while-revalidate=86400"}
     if request.headers.get("if-none-match") == result.etag:
         return Response(status_code=304, headers=headers)
     if result.video:
@@ -926,8 +931,7 @@ def api_open_explorer(image_id: int):
         raise HTTPException(status_code=404, detail="圖片檔案不存在，可能已移動或刪除，請重新掃描圖庫")
     full_path = str(path)
     try:
-        # Keep /select, separate so Windows quotes only the path when it has spaces.
-        subprocess.Popen(["explorer.exe", "/select,", full_path])
+        reveal_file(path)
     except OSError as error:
         raise HTTPException(status_code=503, detail=f"無法開啟檔案總管：{error}") from error
     return {"status": "opened", "path": full_path}

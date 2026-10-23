@@ -27,16 +27,32 @@ def artist_filter_names(conn, name):
 
 def artist_rows(conn):
     def load():
+        groups = artist_index(conn)["rows"]
+        pairs = [
+            (i, int(tid))
+            for i, group in enumerate(groups)
+            if group["post_count"] > 0 and len(group["tag_ids"]) > 1
+            for tid in group["tag_ids"]
+        ]
+        counts = {}
+        if pairs:
+            values_sql = ",".join(f"({i},{tid})" for i, tid in pairs)
+            counts = dict(conn.execute(f"""
+                WITH alias_map(group_idx, tag_id) AS (VALUES {values_sql}),
+                     missing_ids AS MATERIALIZED (SELECT id FROM images WHERE missing_since IS NOT NULL)
+                SELECT m.group_idx, COUNT(DISTINCT it.image_id)
+                FROM alias_map m
+                JOIN image_tags it ON it.tag_id = m.tag_id
+                WHERE it.image_id NOT IN (SELECT id FROM missing_ids)
+                GROUP BY m.group_idx
+            """).fetchall())
         result = []
-        for group in artist_index(conn)["rows"]:
+        for i, group in enumerate(groups):
             if group["post_count"] <= 0:
                 continue
             row = {key: value for key, value in group.items() if key != "tag_ids"}
             if len(group["tag_ids"]) > 1:
-                placeholders = ",".join("?" for _ in group["tag_ids"])
-                row["post_count"] = conn.execute(f"""SELECT COUNT(DISTINCT it.image_id)
-                    FROM image_tags it JOIN images i ON i.id=it.image_id
-                    WHERE it.tag_id IN ({placeholders}) AND i.missing_since IS NULL""", group["tag_ids"]).fetchone()[0]
+                row["post_count"] = counts.get(i, 0)
             if row["post_count"] > 0:
                 result.append(row)
         return result

@@ -86,6 +86,8 @@ def ensure_directories():
 
 def profile_for(relative):
     filename = Path(relative).name.lower()
+    if "illustrious" in filename or "wai-" in filename or "wainsfw" in filename:
+        return "wai_illustrious"
     if "klein" in filename and "4b" in filename:
         return "klein4b"
     if "qwen" in filename and ("2.1" in filename or "image21" in filename):
@@ -146,6 +148,44 @@ class GGUFManager:
         self.epoch = 0
         self.state = {"phase": "unloaded", "loaded_model": None, "error": "", "device": "", "port": None}
 
+    def _runtime_state_path(self):
+        return model_root() / "runtime_state.json"
+
+    def _save_runtime_state(self, pid=None, profile=None):
+        try:
+            ensure_directories()
+            payload = {
+                **self.state,
+                "pid": pid if pid is not None else (self.process.pid if self.process else None),
+                "profile": profile or self.state.get("profile") or self.settings().get("profile"),
+                "updated_at": time.time(),
+            }
+            atomic_json(self._runtime_state_path(), payload)
+        except OSError:
+            pass
+
+    def _adopt_persisted_runtime(self):
+        persisted = read_json(self._runtime_state_path())
+        port = persisted.get("port")
+        if not port:
+            return False
+        try:
+            capabilities = backend_capabilities(int(port))
+            if isinstance(capabilities, dict) and isinstance(capabilities.get("model"), dict):
+                selection = self.settings()
+                loaded_model = persisted.get("loaded_model") or selection.get("model_id")
+                self.state.update(
+                    phase="loaded",
+                    loaded_model=loaded_model,
+                    error="",
+                    device=persisted.get("device") or "Vulkan",
+                    port=int(port),
+                )
+                return True
+        except (requests.RequestException, ValueError, TypeError):
+            pass
+        return False
+
     def settings(self):
         return read_json(model_root() / "selection.json")
 
@@ -159,7 +199,7 @@ class GGUFManager:
         gguf_metadata(path)
         profile = profile or profile_for(model_id)
         if profile not in CATALOG["profiles"]:
-            raise ValueError("請指定相容的模型系列（FLUX.2 klein 4B 或 Qwen-Image-2.1）")
+            raise ValueError("請指定相容的模型系列（WAI-NSFW-illustrious-SDXL v17.0）")
         selection = {"model_id": path.relative_to(root).as_posix(), "profile": profile}
         atomic_json(root / "selection.json", selection)
         return selection
@@ -176,6 +216,13 @@ class GGUFManager:
                 path = inside(model_root(), selection["model_id"])
                 if not path.is_file():
                     missing.append(path.name)
+            elif kind == "text_encoder" and selection.get("profile") == "klein4b":
+                path = inside(model_root(), asset["path"])
+                # 若去審查版文字編碼器尚未下載完成，但已有官方 Qwen3-4B-Q8_0.gguf，可作為暫時替代執行
+                if not (path.is_file() and path.stat().st_size == asset["bytes"]):
+                    fallback = model_root() / "text_encoders" / "Qwen3-4B-Q8_0.gguf"
+                    if not (fallback.is_file() and fallback.stat().st_size == 4280404704):
+                        missing.append(path.name)
             else:
                 path = inside(model_root(), asset["path"])
                 if not path.is_file() or path.stat().st_size != asset["bytes"]:
@@ -190,6 +237,15 @@ class GGUFManager:
                 if self.lease:
                     self.lease.release()
                     self.lease = None
+                self._save_runtime_state(pid=None)
+            elif self.process is None:
+                if self.state["phase"] == "loaded" and self.state.get("port"):
+                    try:
+                        backend_capabilities(int(self.state["port"]))
+                    except (requests.RequestException, ValueError, TypeError):
+                        self.state.update(phase="unloaded", loaded_model=None, error="", device="", port=None)
+                if self.state["phase"] in ("unloaded", "failed"):
+                    self._adopt_persisted_runtime()
             selection = self.settings()
             return {"directory": str(model_root()), "models": scan(), "selection": selection,
                     "missing": self.requirements(selection), "runtime_installed": bool(runtime_executable()),
@@ -203,12 +259,23 @@ class GGUFManager:
         root = model_root()
         profile = CATALOG["profiles"][selection["profile"]]
         assets = profile["assets"]
-        command = [str(runtime_executable()), "--diffusion-model", str(inside(root, selection["model_id"])),
-                   "--llm", str(inside(root, assets["text_encoder"]["path"])),
-                   "--vae", str(inside(root, assets["vae"]["path"])),
-                   "--listen-ip", "127.0.0.1", "--listen-port", str(port), "--backend", "vulkan0",
-                   "--offload-to-cpu", "--mmap", "--vae-tiling", "--flash-attn", "off,diffusion=on", "--rng", "cpu",
-                   "--steps", str(profile["steps"]), "--cfg-scale", "1.0"]
+        command = [str(runtime_executable()), "--diffusion-model", str(inside(root, selection["model_id"]))]
+        if "clip_l" in assets and "clip_g" in assets:
+            command += ["--clip_l", str(inside(root, assets["clip_l"]["path"])),
+                        "--clip_g", str(inside(root, assets["clip_g"]["path"]))]
+            default_cfg = "6.0"
+        else:
+            te_path = inside(root, assets["text_encoder"]["path"])
+            if not te_path.is_file() and selection.get("profile") == "klein4b":
+                fallback = root / "text_encoders" / "Qwen3-4B-Q8_0.gguf"
+                if fallback.is_file():
+                    te_path = fallback
+            command += ["--llm", str(te_path)]
+            default_cfg = "1.0"
+        command += ["--vae", str(inside(root, assets["vae"]["path"])),
+                    "--listen-ip", "127.0.0.1", "--listen-port", str(port), "--backend", "vulkan0",
+                    "--offload-to-cpu", "--mmap", "--vae-tiling", "--flash-attn", "off,diffusion=on", "--rng", "cpu",
+                    "--steps", str(profile["steps"]), "--cfg-scale", default_cfg]
         if "vision_encoder" in assets:
             command += ["--llm_vision", str(inside(root, assets["vision_encoder"]["path"]))]
         return command
@@ -224,6 +291,8 @@ class GGUFManager:
             self.unload()
             lease = FileLock(model_root() / ".runtime.lock")
             if not lease.acquire():
+                if self._adopt_persisted_runtime():
+                    return {"message": "已連線至運作中的 GGUF 模型", "runtime": dict(self.state)}
                 raise RuntimeError("另一個圖庫程序正在使用 GGUF 模型")
             self.lease = lease
             with socket.socket() as sock:
@@ -242,6 +311,7 @@ class GGUFManager:
             self.epoch += 1
             epoch = self.epoch
             self.state.update(phase="loading", loaded_model=None, error="", port=port, device="Vulkan", log=str(log_path))
+            self._save_runtime_state(pid=self.process.pid, profile=selection["profile"])
             threading.Thread(target=self._await_ready, args=(epoch, selection, port, log_path), daemon=True).start()
             return {"message": "正在載入選取的 GGUF 模型", "runtime": dict(self.state)}
 
@@ -254,6 +324,7 @@ class GGUFManager:
                 if self.process.poll() is not None:
                     text = log_path.read_text(encoding="utf-8", errors="replace")[-1600:]
                     self.state.update(phase="failed", loaded_model=None, port=None, error=text or "模型載入失敗")
+                    self._save_runtime_state(pid=None, profile=selection["profile"])
                     self.lease.release()
                     self.lease = None
                     return
@@ -263,6 +334,7 @@ class GGUFManager:
                     with self.lock:
                         if epoch == self.epoch:
                             self.state.update(phase="loaded", loaded_model=selection["model_id"], error="")
+                            self._save_runtime_state(pid=self.process.pid if self.process else None, profile=selection["profile"])
                     return
             except (requests.RequestException, ValueError):
                 pass
@@ -271,6 +343,35 @@ class GGUFManager:
             if epoch == self.epoch:
                 self.unload()
                 self.state.update(phase="failed", error="模型載入逾時（10 分鐘），已停止程序")
+                self._save_runtime_state(pid=None, profile=selection["profile"])
+
+    def ensure_loaded(self, model_id=None, profile=None, timeout=600):
+        status_info = self.status()
+        runtime = status_info.get("runtime") or {}
+        if runtime.get("phase") == "loaded" and runtime.get("port"):
+            if not model_id or runtime.get("loaded_model") == model_id:
+                return dict(self.state)
+        selection = status_info.get("selection") or {}
+        target_model = model_id or selection.get("model_id")
+        target_profile = profile or selection.get("profile")
+        if not target_model:
+            scanned = [m for m in status_info.get("models", []) if m.get("valid") and m.get("profile")]
+            if scanned:
+                target_model = scanned[0]["id"]
+                target_profile = scanned[0]["profile"]
+        if not target_model:
+            raise ValueError("尚未選擇或下載 GGUF 影像修復模型，請先至「整合設定 → 模型管理」下載並載入 FLUX.2 klein 4B 或 Qwen-Image-2.1")
+        if runtime.get("phase") != "loading":
+            self.load(target_model, target_profile)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            current = self.status().get("runtime") or {}
+            if current.get("phase") == "loaded" and current.get("port"):
+                return dict(self.state)
+            if current.get("phase") == "failed":
+                raise RuntimeError(current.get("error") or "GGUF 模型載入失敗")
+            time.sleep(0.4)
+        raise RuntimeError("等待 GGUF 模型載入逾時")
 
     def unload(self):
         with self.lock:
@@ -284,15 +385,30 @@ class GGUFManager:
                         self.process.kill()
                         self.process.wait(timeout=5)
                 self.process = None
+            else:
+                persisted = read_json(self._runtime_state_path())
+                pid = persisted.get("pid")
+                port = persisted.get("port")
+                if pid and port:
+                    try:
+                        backend_capabilities(int(port))
+                        if os.name == "nt":
+                            subprocess.run(["taskkill", "/PID", str(int(pid)), "/T", "/F"],
+                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                        else:
+                            os.kill(int(pid), 15)
+                    except Exception:
+                        pass
             if self.lease:
                 self.lease.release()
                 self.lease = None
             self.state.update(phase="unloaded", loaded_model=None, error="", device="", port=None)
+            self._save_runtime_state(pid=None)
             return {"message": "GGUF 模型已卸載", "runtime": dict(self.state)}
 
 
 manager = GGUFManager()
-atexit.register(manager.unload)
+atexit.register(lambda: manager.unload() if manager.process is not None else None)
 
 
 def start_download(profiles):

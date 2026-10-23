@@ -24,16 +24,19 @@ const media = '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="800">
   const browser = await chromium.launch({ headless: true, channel: process.env.PLAYWRIGHT_CHANNEL || 'msedge' });
   try {
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
-    const errors = [], writes = [];
-    let releaseAi, releaseReverse;
+    const errors = [], writes = [], rawRequests = [];
+    let releaseAi, releaseReverse, holdDetail2 = false, releaseDetail2;
     await context.route('**/*', async route => {
-      const request = route.request(), endpoint = new URL(request.url()).pathname;
+      const request = route.request(), url = new URL(request.url()), endpoint = url.pathname;
       if (endpoint === '/') return route.fulfill({ contentType: 'text/html', body: html });
       if (endpoint.startsWith('/static/')) return route.fulfill({
         contentType: endpoint.endsWith('.css') ? 'text/css' : 'text/javascript',
         body: fs.readFileSync(path.join(root, endpoint), 'utf8'),
       });
-      if (/^\/api\/(raw|thumb)\//.test(endpoint)) return route.fulfill({ contentType: 'image/svg+xml', body: media });
+      if (/^\/api\/(raw|thumb)\//.test(endpoint)) {
+        if (endpoint.startsWith('/api/raw/')) rawRequests.push(url.pathname + url.search);
+        return route.fulfill({ contentType: 'image/svg+xml', body: media });
+      }
       let data = {};
       const ai = { running: false, model_loaded: false, processed_count: 0, status_message: '待機中' };
       if (request.method() === 'POST') {
@@ -45,7 +48,10 @@ const media = '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="800">
         } else if (endpoint === '/api/decensor/preview/1') data = { ok: false, message: '此圖未偵測到馬賽克' };
         else if (endpoint !== '/api/open_explorer/1') throw Error(`Unexpected write: ${endpoint}`);
       } else if (endpoint === '/api/images') data = { items, total: items.length };
-      else if (endpoint.startsWith('/api/image/')) data = items.find(item => item.id === Number(endpoint.split('/').pop()));
+      else if (endpoint.startsWith('/api/image/')) {
+        if (endpoint === '/api/image/2' && holdDetail2) await new Promise(resolve => { releaseDetail2 = resolve; });
+        data = items.find(item => item.id === Number(endpoint.split('/').pop()));
+      }
       else if (endpoint === '/api/stats') data = { total_images: 2, root_unorganized: 0, folder_organized: 2, ai_tagged: 2, suggested_folder_count: 0, ai_status: ai };
       else if (endpoint === '/api/folders') data = [{ name: '青井', count: 2 }];
       else if (endpoint === '/api/tags') data = {items:tags.map(tag => ({ ...tag, count: 2 })), next_offset:tags.length, has_more:false};
@@ -59,17 +65,20 @@ const media = '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="800">
     await page.locator('#card-1 .thumb-box').click();
     await page.waitForFunction(() => document.querySelector('#dt-filename').textContent === '風景習作_1.jpg');
     assert.equal(await page.locator('#dt-add-input').count(), 0);
-    assert.equal(await page.locator('#btn-single-decensor').isVisible(), false);
+    assert.equal(await page.locator('#btn-single-decensor').isVisible(), true);
     assert.equal(await page.locator('#btn-single-unified').isVisible(), false);
     assert.equal(await page.locator('#btn-detail-explorer').isVisible(), true);
     assert.equal(await page.locator('#btn-delete-single').isVisible(), true);
     assert.equal(await page.locator('#dt-unified-hint').isVisible(), false);
     assert.equal(await page.locator('#btn-single-unified svg').count(), 1);
     const primary = await page.locator('#btn-detail-explorer').boundingBox();
+    const decensor = await page.locator('#btn-single-decensor').boundingBox();
     const deletion = await page.locator('#btn-delete-single').boundingBox();
     const more = await page.locator('#btn-detail-more').boundingBox();
     assert.equal(primary.y, more.y);
     assert.equal(primary.height, more.height);
+    assert.equal(decensor.y, primary.y);
+    assert.equal(decensor.height, primary.height);
     assert.equal(deletion.y, primary.y);
     assert.equal(deletion.height, primary.height);
     await page.screenshot({ path: path.join(artifacts, 'detail-actions-desktop.png') });
@@ -79,9 +88,9 @@ const media = '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="800">
     await page.keyboard.press('ArrowDown');
     assert.equal(await page.evaluate(() => document.activeElement.id), 'btn-single-unified');
     await page.keyboard.press('ArrowDown');
-    assert.equal(await page.evaluate(() => document.activeElement.id), 'btn-single-decensor');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'btn-single-unified');
     await page.keyboard.press('End');
-    assert.equal(await page.evaluate(() => document.activeElement.id), 'btn-single-decensor');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'btn-single-unified');
     await page.keyboard.press('Escape');
     assert.equal(await page.locator('#detail-more-actions').getAttribute('open'), null);
     assert.equal(await page.locator('#detail-modal').isVisible(), true);
@@ -96,11 +105,10 @@ const media = '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="800">
     await page.locator('#btn-detail-explorer').click();
     await page.waitForFunction(() => !document.querySelector('#detail-more-actions').open);
     assert.deepEqual(writes, ['/api/open_explorer/1']);
-    await page.locator('#btn-detail-more').click();
     await page.locator('#btn-single-decensor').click();
     await page.waitForFunction(() => document.querySelector('#dt-decensor-status').textContent.includes('未偵測到'));
     assert.equal(await page.locator('#dt-decensor-box').isVisible(), true);
-    assert.equal(await page.locator('#dt-decensor-label').textContent(), 'AI 去馬賽克');
+    assert.equal(await page.locator('#dt-decensor-label').textContent(), '去馬賽克');
     assert.equal(await page.locator('#btn-single-decensor svg').count(), 1);
     await page.locator('#dt-decensor-box button').first().click();
     await page.locator('#btn-detail-more').click();
@@ -126,11 +134,28 @@ const media = '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="800">
     assert.equal(await page.locator('#btn-single-unified svg').count(), 1);
     assert.equal(await page.locator('#dt-unified-hint').isVisible(), false);
 
-    // Switching images resets the disclosure, and small screens keep controls reachable.
+    // Switching images resets the disclosure, keeps current media visible without flashing black, and preloads neighbors.
+    assert.ok(rawRequests.includes('/api/raw/1'));
+    assert.ok(rawRequests.includes('/api/raw/2'), 'Adjacent image is preloaded in background');
+    assert.ok(rawRequests.every(req => !req.includes('?t=')), 'Normal detail loads use stable cacheable URLs');
+    holdDetail2 = true;
     await page.locator('#btn-detail-more').click();
     await page.locator('.nav-arrow.next').click();
-    await page.waitForFunction(() => document.querySelector('#dt-filename').textContent === '風景習作_2.jpg');
+    await page.waitForFunction(() => typeof state !== 'undefined' && state.detailImageId === 2);
     assert.equal(await page.locator('#detail-more-actions').getAttribute('open'), null);
+    assert.equal(await page.locator('#dt-main-img').getAttribute('src'), '/api/raw/1', 'Previous image stays visible while next image loads');
+    assert.equal(await page.evaluate(() => {
+      const img = document.getElementById('dt-main-img');
+      return Boolean(img && img.complete && img.naturalWidth > 0);
+    }), true);
+    releaseDetail2();
+    holdDetail2 = false;
+    await page.waitForFunction(() => document.querySelector('#dt-filename').textContent === '風景習作_2.jpg');
+    assert.equal(await page.locator('#dt-main-img').getAttribute('src'), '/api/raw/2');
+    assert.equal(await page.evaluate(() => {
+      const img = document.getElementById('dt-main-img');
+      return Boolean(img && img.complete && img.naturalWidth > 0);
+    }), true);
     await page.setViewportSize({ width: 390, height: 844 });
     await page.locator('#btn-detail-more').click();
     const card = await page.locator('#detail-modal .modal-card').boundingBox();
@@ -142,7 +167,7 @@ const media = '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="800">
     await page.keyboard.press('Escape');
     await page.setViewportSize({ width: 320, height: 740 });
     const smallActions = await page.locator('.detail-actions').boundingBox();
-    for (const id of ['btn-detail-explorer', 'btn-delete-single', 'btn-detail-more']) {
+    for (const id of ['btn-detail-explorer', 'btn-single-decensor', 'btn-delete-single', 'btn-detail-more']) {
       const box = await page.locator(`#${id}`).boundingBox();
       assert.equal(box.y, smallActions.y);
       assert.ok(box.x + box.width <= smallActions.x + smallActions.width + 1);
