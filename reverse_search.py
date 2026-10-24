@@ -133,6 +133,7 @@ def _ensure_artist_cache_loaded():
                     if isinstance(v, dict):
                         norm_name = v.get("name") or v.get("db_name") or ""
                         _DANBOORU_ARTIST_CACHE[k] = {
+                            "id": v.get("id"),
                             "name": norm_name,
                             "other_names": v.get("other_names") or [],
                             "cjk_name": v.get("cjk_name"),
@@ -233,8 +234,12 @@ def _make_search_thumbnail(image_path: str, max_dim: int = 360) -> Optional[byte
     try:
         if str(image_path).lower().endswith(".mp4"):
             from thumbnail_cache import _extract_video_thumbnail
-            return _extract_video_thumbnail(Path(image_path), max_size=max_dim)
-        with Image.open(image_path) as img:
+            img_ctx = _extract_video_thumbnail(Path(image_path), max_size=max_dim)
+            if img_ctx is None:
+                return None
+        else:
+            img_ctx = Image.open(image_path)
+        with img_ctx as img:
             if img.mode != "RGB":
                 img = img.convert("RGB")
             img.thumbnail((max_dim, max_dim), Image.Resampling.BILINEAR)
@@ -268,6 +273,7 @@ def generate_google_lens_url(thumb_bytes: bytes) -> Optional[str]:
 
 def _parse_danbooru_artist_entry(item: Dict[str, Any], fallback_name: str = "") -> Dict[str, Any]:
     info: Dict[str, Any] = {
+        "id": item.get("id"),
         "name": item.get("name") or fallback_name,
         "other_names": item.get("other_names") or [],
         "cjk_name": None,
@@ -689,31 +695,8 @@ def search_google_and_web_by_clues(
                     elif rt not in res["generals"]:
                         res["generals"].append(rt)
 
-    # 2. Check if filename contains a Twitter handle + status ID or a 18~19 digit Twitter Status ID
+    # 2. Check if filename contains a 18~19 digit Twitter Status ID
     if stem and not res["artists"] and not res["twitter_handles"]:
-        m_tw_hs = RE_FILENAME_TWITTER_HANDLE_STATUS.match(stem)
-        if m_tw_hs:
-            fn_handle = m_tw_hs.group(1)
-            fn_sid = m_tw_hs.group(2)
-            if not fn_handle.isdigit() and fn_handle.lower() not in ("twitter", "x", "video", "img", "image", "photo", "clip"):
-                res["hit"] = True
-                if fn_handle not in res["twitter_handles"]:
-                    res["twitter_handles"].append(fn_handle)
-                res["source_urls"].append(f"https://x.com/{fn_handle}/status/{fn_sid}")
-                res_folder = resolve_artist_folder_name(fn_handle)
-                if res_folder in FOLDER_TO_DANBOORU_ARTIST:
-                    db_art = FOLDER_TO_DANBOORU_ARTIST[res_folder]
-                    if db_art not in res["artists"]:
-                        res["artists"].append(db_art)
-                db_info = fetch_danbooru_artist_by_url(f"https://twitter.com/{fn_handle}")
-                if db_info.get("name") and db_info["name"] not in res["artists"]:
-                    res["artists"].append(db_info["name"])
-                    if db_info.get("cjk_name"):
-                        res["cjk_aliases"][db_info["name"]] = db_info["cjk_name"]
-                    for th in db_info.get("twitter_handles", []):
-                        if th not in res["twitter_handles"]:
-                            res["twitter_handles"].append(th)
-
         m_tw_sid = RE_FILENAME_TWITTER_STATUS.search(stem)
         if m_tw_sid:
             tw_info = fetch_fxtwitter_status(m_tw_sid.group(1))
@@ -931,6 +914,9 @@ def search_danbooru_by_md5_batch(
     md5_to_img_ids: Dict[str, List[int]] = {}
     for iid, fp in id_to_path.items():
         try:
+            if str(fp).lower().endswith(".mp4"):
+                # 影片統一使用單一畫面截圖進行視覺搜圖追蹤畫師，不對整支影片計算 MD5
+                continue
             if os.path.exists(fp):
                 h = _file_md5(fp)
                 md5_to_img_ids.setdefault(h, []).append(iid)
@@ -1316,7 +1302,7 @@ def calibrate_image_tags_in_db(
     標籤校正器：
     - 當圖片已透過以圖搜圖 / Danbooru / Pixiv / Gemini Flash 3.8 MCP 確認真實畫師時，
       自動清除該圖片上所有由本機 AI (`source='ai'`) 猜測的畫師標籤！
-    - 當已確認真實角色/作品時，清除本機 AI 低信心度 (< 0.55) 猜測的角色/作品標籤。
+    - 當已確認真實角色/作品時，清除本機 AI 低信心度 (< 0.70) 猜測的角色/作品標籤。
     - 支援透過 `remove_tag_names` 精準刪除特定錯誤標籤。
     """
     removed = 0
@@ -1412,13 +1398,19 @@ def apply_danbooru_posts_batch_to_db(
         has_copy = False
 
         for ainfo in db_post.get("artist_details", []):
+            if ainfo.get("id") and ainfo.get("name"):
+                from artist_identity import remember
+                remember(ainfo["name"], ainfo.get("other_names", []), ainfo.get("urls", []),
+                         source="danbooru", evidence={"artist_url": f"https://danbooru.donmai.us/artists/{ainfo['id']}"},
+                         danbooru_id=int(ainfo["id"]))
             if ainfo.get("cjk_name") and ainfo.get("name"):
                 cjk_aliases[ainfo["name"]] = ainfo["cjk_name"]
 
         for art in db_post.get("artists", []):
             t_list.append((art, "artist", 1.0, eff_src))
             has_art = True
-            matched_f = match_existing_folder_by_artist(art)
+            from artist_identity import resolve as resolve_identity
+            matched_f = resolve_identity(art).get("folder_name")
             if matched_f and not sug_f:
                 sug_f = matched_f
 
@@ -1429,10 +1421,9 @@ def apply_danbooru_posts_batch_to_db(
             if not sug_f:
                 sug_f = match_existing_folder_by_artist(th, th)
 
-        if not sug_f and db_post.get("artists"):
-            sug_f = resolve_artist_folder_name(db_post["artists"][0])
-        elif not sug_f and db_post.get("twitter_handles"):
-            sug_f = resolve_artist_folder_name(db_post["twitter_handles"][0])
+        if not sug_f and db_post.get("twitter_handles"):
+            from artist_identity import resolve as resolve_identity
+            sug_f = resolve_identity("@" + db_post["twitter_handles"][0]).get("folder_name")
 
         for ch in db_post.get("characters", []):
             t_list.append((ch, "character", 1.0, eff_src))
@@ -1547,11 +1538,12 @@ def reverse_search_and_tag_image(
     include_google_lens_url: bool = True,
     precomputed_db_post: Optional[Dict[str, Any]] = None,
     run_refresh_counts: bool = True,
+    screenshot_bytes: Optional[bytes] = None,
 ) -> Dict[str, Any]:
     """
-    針對單張圖片執行「多引擎深度以圖搜圖 + Danbooru/Pixiv/Twitter/Google 結構化認證 + 標籤校正」：
+    針對單張圖片（或影片之單一畫面截圖）執行「多引擎深度以圖搜圖 + Danbooru/Pixiv/Twitter/Google 結構化認證 + 標籤校正」：
     1. 讀取圖片路徑後立即釋放資料庫連線（網路請求期間 0 鎖庫！）。
-    2. 先檢查 Danbooru MD5 直查與 Pixiv ID 反查（100% 準確）。
+    2. 若為影片 (.mp4)，統一擷取單一畫面截圖 (.jpg) 進行視覺以圖搜圖追蹤畫師（不對整支影片雜湊或猜測檔名）。
     3. 執行 IQDB 與 SauceNAO 以圖搜圖。
     4. 若仍未找到且含 Pixiv ID 或啟用 Google 以圖搜圖，自動執行 Google Lens 上傳與 Yande.re/Web 搜尋救援。
     5. 所有標籤在記憶體組裝完畢後，以單一毫秒級短事務寫入 SQLite。
@@ -1560,7 +1552,7 @@ def reverse_search_and_tag_image(
 
     conn = get_db()
     row = conn.execute(
-        "SELECT id, rel_path, filename, folder, pixiv_id FROM images WHERE id = ?",
+        "SELECT id, rel_path, filename, folder, pixiv_id, media_type FROM images WHERE id = ?",
         (image_id,),
     ).fetchone()
     conn.close()
@@ -1572,14 +1564,32 @@ def reverse_search_and_tag_image(
     if not os.path.exists(full_path):
         return {"found": False, "error": "File not found on disk"}
 
-    thumb_bytes = make_search_thumbnail(full_path, max_dim=360)
+    is_video = row_dict.get("media_type") == "video" or full_path.lower().endswith(".mp4")
+    screenshot_path: Optional[Path] = None
+    if is_video:
+        from thumbnail_cache import ensure_video_screenshot
+        screenshot_path = ensure_video_screenshot(
+            image_id=image_id,
+            source=Path(full_path),
+            max_size=720,
+            override_bytes=screenshot_bytes,
+        )
+        if screenshot_bytes:
+            thumb_bytes = screenshot_bytes
+        elif screenshot_path and screenshot_path.is_file():
+            thumb_bytes = screenshot_path.read_bytes()
+        else:
+            thumb_bytes = make_search_thumbnail(full_path, max_dim=720)
+    else:
+        thumb_bytes = screenshot_bytes or make_search_thumbnail(full_path, max_dim=360)
+
     if not thumb_bytes:
         return {"found": False, "error": "Failed to read image"}
 
     google_lens_url = None
 
-    # Step 1: Try Danbooru MD5 or Pixiv ID exact match first (fast & free)
-    db_post = precomputed_db_post or search_danbooru_by_md5(full_path)
+    # Step 1: Try Danbooru MD5 or Pixiv ID exact match first (for static images/GIFs; videos use single-frame screenshot visual search)
+    db_post = precomputed_db_post or (None if is_video else search_danbooru_by_md5(full_path))
     if not db_post and row_dict.get("pixiv_id"):
         px_map = search_danbooru_by_pixiv_ids_batch([str(row_dict["pixiv_id"])])
         db_post = px_map.get(str(row_dict["pixiv_id"]))
@@ -1618,8 +1628,8 @@ def reverse_search_and_tag_image(
         "google_lens_url": None,
     }
 
-    # Step 1b: Fast-path check for Fanbox Post ID or Twitter Status ID in filename (0.2s, saves SauceNAO quota!)
-    if not db_post:
+    # Step 1b: Fast-path check for Fanbox Post ID or Twitter Status ID in filename (only for static images; videos always use single-frame screenshot)
+    if not db_post and not is_video:
         stem = os.path.splitext(row_dict["filename"])[0]
         if RE_FILENAME_FANBOX_POST.match(stem) or RE_FILENAME_TWITTER_STATUS.search(stem):
             web_res = search_google_and_web_by_clues(
@@ -1629,7 +1639,7 @@ def reverse_search_and_tag_image(
                 image_path=None,
             )
 
-    # Step 2: Only run IQDB & SauceNAO if Danbooru or fast-path filename clue didn't already give a verified match
+    # Step 2: Run IQDB & SauceNAO visual reverse search on the image / video single-frame screenshot
     if not db_post and not web_res["hit"]:
         from concurrent.futures import ThreadPoolExecutor
         ex = ThreadPoolExecutor(max_workers=2)
@@ -1664,16 +1674,20 @@ def reverse_search_and_tag_image(
     if not db_post and iq_res.get("yandere_post_ids"):
         yd_post = fetch_yandere_post_details(iq_res["yandere_post_ids"][0])
 
-    # Step 5: If still no artist found (e.g. deleted Pixiv 404, Fanbox/Kemono or obscure Twitter work), run full clues + Kemono SHA256 + Google Lens fallback!
+    # Step 5: If still no artist found, upload single-frame screenshot to Google Lens (for non-videos also check clues/Kemono)
     if not db_post and not sn_res["hit"] and not iq_res["hit"] and not web_res["hit"]:
-        web_res = search_google_and_web_by_clues(
-            pixiv_id=row_dict.get("pixiv_id"),
-            filename=row_dict["filename"],
-            thumb_bytes=thumb_bytes if include_google_lens_url else None,
-            image_path=full_path,
-        )
-        if web_res.get("google_lens_url"):
-            google_lens_url = web_res["google_lens_url"]
+        if is_video:
+            if include_google_lens_url:
+                google_lens_url = generate_google_lens_url(thumb_bytes)
+        else:
+            web_res = search_google_and_web_by_clues(
+                pixiv_id=row_dict.get("pixiv_id"),
+                filename=row_dict["filename"],
+                thumb_bytes=thumb_bytes if include_google_lens_url else None,
+                image_path=full_path,
+            )
+            if web_res.get("google_lens_url"):
+                google_lens_url = web_res["google_lens_url"]
 
     if include_google_lens_url and not google_lens_url:
         google_lens_url = generate_google_lens_url(thumb_bytes)
@@ -1851,11 +1865,14 @@ def reverse_search_and_tag_image(
                 if matched_f and not suggested_folder:
                     suggested_folder = matched_f
 
-    # --- F. Resolve Best Artist Folder Name ---
-    if not suggested_folder and detected_artists:
+    # --- F. Confirm a cross-platform identity before suggesting any folder ---
+    identity_result = None
+    if detected_artists:
         non_handle_artists = [a for a in detected_artists if not a.startswith("@")]
         primary_artist = non_handle_artists[0] if non_handle_artists else detected_artists[0].lstrip("@")
-        suggested_folder = resolve_artist_folder_name(primary_artist)
+        from artist_identity import resolve as resolve_identity
+        identity_result = resolve_identity(primary_artist, all_sources)
+        suggested_folder = identity_result.get("folder_name")
 
     new_pixiv_id = (
         (db_post.get("pixiv_id") if db_post else None)
@@ -1940,17 +1957,20 @@ def reverse_search_and_tag_image(
             "characters": detected_characters,
             "copyrights": detected_copyrights,
             "suggested_folder": suggested_folder,
+            "artist_identity": identity_result,
             "tags_added": links_count_box[0],
             "purged_wrong_ai_tags": purged_box[0],
             "source_urls": all_sources[:6],
             "google_lens_url": google_lens_url,
+            "screenshot_path": str(screenshot_path) if screenshot_path else None,
         }
 
     # Optional Fallback to Local GPU AI Tagger ONLY for general content tags (never pollute artist with low-conf AI guesses)
     if fallback_to_ai:
         from ai_tagger import tagger_engine, preprocess_image_fast
         tagger_engine.ensure_model_loaded()
-        tensor = preprocess_image_fast(full_path, 512)
+        target_for_ai = str(screenshot_path) if (screenshot_path and screenshot_path.is_file()) else full_path
+        tensor = preprocess_image_fast(target_for_ai, 512)
         if tensor is not None:
             preds, ai_sug_folder = tagger_engine.predict_single(tensor, artist_thresh=0.75)
             conn2 = get_db()
@@ -1992,6 +2012,7 @@ def reverse_search_and_tag_image(
                 "suggested_folder": ai_sug_folder,
                 "tags_added": ai_links_count[0],
                 "google_lens_url": google_lens_url,
+                "screenshot_path": str(screenshot_path) if screenshot_path else None,
             }
 
     return {
@@ -1999,6 +2020,7 @@ def reverse_search_and_tag_image(
         "method": "none",
         "rate_limited": sn_res.get("rate_limited", False),
         "google_lens_url": google_lens_url,
+        "screenshot_path": str(screenshot_path) if screenshot_path else None,
     }
 
 
@@ -2176,7 +2198,7 @@ class BatchReverseSearchWorker:
                     time.sleep(max(0.6, delay_sec))
 
             if auto_move_to_artist_folder and pending_moves and not self.stop_requested:
-                from gallery_service import move_images_to_folder
+                from gallery_service import move_images_to_artist_folder as move_images_to_folder
                 for target_f, iids in pending_moves.items():
                     m_res = move_images_to_folder(iids, target_f, auto_rename=True, refresh_counts=False)
                     self.moved_count += m_res.get("moved", 0)

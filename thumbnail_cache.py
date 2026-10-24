@@ -227,6 +227,48 @@ def _extract_video_thumbnail(source: Path, max_size: int = 380) -> Image.Image |
     return _extract_ffmpeg_video_thumbnail(source, max_size=max_size)
 
 
+def ensure_video_screenshot(
+    image_id: int,
+    source: Path,
+    cache_dir: Path | None = None,
+    max_size: int = 720,
+    override_bytes: bytes | None = None,
+) -> Path | None:
+    """為影片擷取或更新單一畫面截圖 (.jpg) 供畫師追蹤與 AI 辨識使用。"""
+    import io
+    from database import THUMB_DIR
+    target_dir = Path(cache_dir) if cache_dir is not None else THUMB_DIR
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        existing = next(target_dir.glob(f"{image_id}-*.jpg"), None)
+        if override_bytes:
+            out_path = existing or (target_dir / f"{image_id}-screenshot.jpg")
+            with Image.open(io.BytesIO(override_bytes)) as img:
+                rgb = img.convert("RGB")
+                rgb.thumbnail((max_size, max_size), Image.Resampling.BILINEAR)
+                rgb.save(out_path, format="JPEG", quality=90, optimize=True)
+            return out_path
+        if existing and existing.is_file():
+            return existing
+        if not source.is_file():
+            return None
+        stat = source.stat()
+        digest = hashlib.blake2b(
+            f"{VIDEO_PIPELINE_VERSION}:{source}:{stat.st_size}:{stat.st_mtime_ns}".encode("utf-8"),
+            digest_size=12,
+        ).hexdigest()
+        out_path = target_dir / f"{image_id}-{digest}.jpg"
+        img = _extract_video_thumbnail(source, max_size=max_size)
+        if img is None:
+            return None
+        with img:
+            img.save(out_path, format="JPEG", quality=88, optimize=True)
+        return out_path
+    except Exception:
+        log.debug("Failed to ensure video screenshot for %s", source, exc_info=True)
+        return None
+
+
 @dataclass
 class Thumbnail:
     path: Path | None

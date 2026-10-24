@@ -24,6 +24,8 @@ def artist_directory(root, target_folder):
 def plan_image_moves(image_ids, target_folder, auto_rename=True):
     from renamer import get_folder_sequence_state, win_natural_key
     root = database.GALLERY_ROOT
+    from artist_identity import known_folder
+    target_folder = known_folder(target_folder) or target_folder
     target, folder = artist_directory(root, target_folder)
     conn = database.get_db()
     try:
@@ -34,12 +36,15 @@ def plan_image_moves(image_ids, target_folder, auto_rename=True):
             rows.extend(dict(r) for r in conn.execute("SELECT id,rel_path,filename,folder,ext FROM images WHERE id IN ("+",".join("?" for _ in chunk)+")",chunk))
         if len(rows) != len(ids):
             raise ValueError("包含不存在的圖片 ID；尚未搬移任何檔案")
-        numbered = auto_rename and folder and folder not in database.NON_ARTIST_FOLDERS
+        from publication_dates import settings as publication_settings
+        numbered = auto_rename and folder and folder not in database.NON_ARTIST_FOLDERS and not publication_settings()["enabled"]
         base, sequence, label = get_folder_sequence_state(folder,conn=conn) if numbered else ("",0,"")
     finally:
         conn.close()
     entries, reserved = [], set()
     for row in sorted(rows,key=lambda r:win_natural_key(r["rel_path"])):
+        if row["folder"].casefold() == folder.casefold():
+            continue
         source = gallery_path(root,row["rel_path"])
         if not source.is_file():
             raise FileNotFoundError(f"圖片不存在：{row['filename']}")
@@ -77,7 +82,45 @@ def move_images_to_folder(image_ids, target_folder, auto_rename=True, refresh_co
         if refresh_counts:
             database.refresh_tag_counts(conn)
     result = execute(database.GALLERY_ROOT,database.DATA_DIR,database.get_db,entries,kind="move",after_write=tags)
-    return {"moved":len(entries),"target_folder":folder,"operation_id":result["operation_id"]}
+    from publication_dates import settings as publication_settings, rename_folder
+    publication = publication_settings()
+    publication_errors = []
+    if auto_rename and publication["enabled"]:
+        # New unknown images keep their original names; verified images retain their dates.
+        affected = {folder, *(Path(e["old_rel_path"]).parts[0] if len(Path(e["old_rel_path"]).parts) > 1 else "" for e in entries)}
+        for affected_folder in affected:
+            try:
+                rename_folder(affected_folder, publication["pad_digits"])
+            except (OSError, ValueError, RuntimeError) as exc:
+                publication_errors.append({"folder": affected_folder, "error": str(exc)})
+    old_folders = {Path(e["old_rel_path"]).parts[0] for e in entries if len(Path(e["old_rel_path"]).parts) > 1}
+    for old_f in old_folders:
+        if old_f and old_f.casefold() != (folder or "").casefold():
+            old_dir = database.GALLERY_ROOT / old_f
+            if old_dir.exists() and old_dir.is_dir():
+                try:
+                    if not any(old_dir.iterdir()):
+                        old_dir.rmdir()
+                except Exception:
+                    pass
+    return {"moved":len(entries),"target_folder":folder,"operation_id":result["operation_id"], "publication_rename_errors": publication_errors}
+
+
+def move_images_to_artist_folder(image_ids, target_folder=None, auto_rename=True, refresh_counts=True):
+    """Automatic filing requires confirmed identity, including for an existing folder."""
+    from artist_identity import resolve_image_folders
+    result = resolve_image_folders(image_ids)
+    groups = {}
+    for iid, folder in result["folders"].items():
+        groups.setdefault(folder, []).append(iid)
+    moved, operations = 0, []
+    for folder, ids in groups.items():
+        value = move_images_to_folder(ids, folder, auto_rename, refresh_counts)
+        moved += value["moved"]
+        if value.get("operation_id"):
+            operations.append(value["operation_id"])
+    return {"moved": moved, "pending_identity": len(result["pending_image_ids"]),
+            "target_folder": next(iter(groups)) if len(groups) == 1 else None, "operation_ids": operations}
 
 
 @exclusive_job("按年月歸檔")

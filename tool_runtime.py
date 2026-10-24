@@ -9,7 +9,7 @@ import time
 import uuid
 
 from background_work import FileLock, JobCancelled, acquire_job, data_dir
-from tool_registry import get_tool
+from tool_registry import AgentJob, get_tool
 
 _read_slots = threading.BoundedSemaphore(2)
 RESULT_BYTES = 128 * 1024
@@ -193,7 +193,15 @@ def start(name, arguments, source="settings"):
         if slot:
             _read_slots.release()
         raise
-    return {"id": run_id, "run_id": run_id, "status": "running", "job_id": lease.info["id"] if lease else None,
+    agent_job_id = prepared[1].get("job_id") if issubclass(prepared[0].arguments, AgentJob) else None
+    job_id = lease.info["id"] if lease else None
+    cancel_tool, cancel_arguments = None, None
+    if agent_job_id:
+        cancel_tool, cancel_arguments = "gallery_cancel_agent_job", {"agent_job_id": agent_job_id}
+    elif job_id:
+        cancel_tool, cancel_arguments = "gallery_cancel_job", {"job_id": job_id}
+    return {"id": run_id, "run_id": run_id, "status": "running", "job_id": job_id,
+            "agent_job_id": agent_job_id, "cancel_tool": cancel_tool, "cancel_arguments": cancel_arguments,
             "message": "已啟動；可用 gallery_get_tool_run 查詢 run_id 的結果"}
 
 

@@ -30,6 +30,8 @@ class GalleryCase(unittest.TestCase):
             self.stack.enter_context(patch.object(database,name,value))
         self.stack.enter_context(patch.object(database,"log_operation",return_value=0))
         self.stack.enter_context(patch.object(database,"background_checkpoint"))
+        # All gallery fixtures are offline; identity behavior has its own API fakes.
+        self.stack.enter_context(patch("artist_identity._danbooru", return_value=None))
         database.init_db()
 
     def image(self,name="image.png"):
@@ -260,7 +262,7 @@ class IntegrationTests(GalleryCase):
         integrations.save({"mcp_read_only":True})
         self.assertFalse(integrations.allowed("gallery_batch_tag_or_move"));self.assertTrue(integrations.allowed("gallery_get_overview"))
         config=integrations.client_config()["mcpServers"]["gallery"]
-        self.assertFalse(config["trust"]);self.assertNotIn("gallery_batch_tag_or_move",config["includeTools"])
+        self.assertFalse(config["disabled"]);self.assertIn("gallery_batch_tag_or_move",config["disabledTools"])
         with patch.dict(os.environ,{"GEMINI_API_KEY":"not-for-public-output"}):
             self.assertNotIn("not-for-public-output",json.dumps(integrations.public_config()))
         integrations.save({"mcp_enabled":False})
@@ -281,17 +283,52 @@ class IntegrationTests(GalleryCase):
         self.assertIn("gallery_scan_library",config["disabledTools"])
         self.assertNotIn("gallery_get_overview",config["disabledTools"])
         self.assertNotIn("trust",config);self.assertNotIn("includeTools",config)
-        for client in ("antigravity","gemini_cli"):
-            exported=integrations.client_config(client)["mcpServers"]
-            for server_name in exported:
-                self.assertLessEqual(max(len(f"mcp_{server_name}_{name}") for name in integrations.TOOLS),64)
+        exported=integrations.client_config()["mcpServers"]
+        for server_name in exported:
+            self.assertLessEqual(max(len(f"mcp_{server_name}_{name}") for name in integrations.TOOLS),64)
+        with self.assertRaises(ValueError):
+            integrations.client_config("removed_client")
         integrations.save({"mcp_enabled":False})
         self.assertTrue(integrations.client_config("antigravity")["mcpServers"]["gallery"]["disabled"])
 
     def test_mcp_handshake_respects_policy(self):
         integrations.save({"mcp_read_only":True})
         result=integrations.diagnose_mcp();self.assertTrue(result["ok"],result)
-        self.assertEqual(result["tool_count"],10)
+        self.assertEqual(result["tool_count"],sum(integrations.allowed(name) for name in integrations.TOOLS))
+
+    def test_multi_server_mcp_registry_and_ai_tools(self):
+        from tool_runtime import invoke as execute_tool
+        listed=execute_tool("gallery_list_mcp_servers",{})
+        ids=[s["id"] for s in listed["servers"]]
+        self.assertIn("gallery",ids);self.assertIn("gallerypub",ids)
+        created=execute_tool("gallery_save_mcp_server",{
+            "server_id":"comfyui-mcp",
+            "name":"ComfyUI 工作流 MCP",
+            "category":"外部影像工作流",
+            "description":"串接外部 ComfyUI 節點",
+            "transport":"http",
+            "url":"http://127.0.0.1:8188/mcp",
+            "headers":{"X-Token":"demo"},
+            "enabled":True,
+            "read_only":False,
+            "disabled_tools":["external_delete"],
+            "custom_config":{"workflow":"inpaint"}
+        })
+        self.assertEqual(created["server"]["id"],"comfyui-mcp")
+        self.assertEqual(created["server"]["custom_config"]["workflow"],"inpaint")
+        all_exported=integrations.client_config("antigravity",include_all=True)["mcpServers"]
+        self.assertIn("gallery",all_exported)
+        self.assertIn("comfyui-mcp",all_exported)
+        self.assertEqual(all_exported["comfyui-mcp"]["url"],"http://127.0.0.1:8188/mcp")
+        sync_res=integrations.sync_client_config(config_root=self.data/"mock-client")
+        target_cfg=Path(sync_res["path"])
+        self.assertTrue(sync_res["ok"]);self.assertTrue(target_cfg.exists())
+        self.assertIn("comfyui-mcp",json.loads(target_cfg.read_text(encoding="utf-8"))["mcpServers"])
+        with self.assertRaises(ValueError):
+            execute_tool("gallery_delete_mcp_server",{"server_id":"gallery"})
+        deleted=execute_tool("gallery_delete_mcp_server",{"server_id":"comfyui-mcp"})
+        self.assertEqual(deleted["deleted_id"],"comfyui-mcp")
+        self.assertNotIn("comfyui-mcp",[s["id"] for s in integrations.list_servers()])
 
     def test_backup_can_be_read_and_has_original_manual_tags(self):
         self.image();database.scan_library();self.manual(1)

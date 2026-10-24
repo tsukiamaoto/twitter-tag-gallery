@@ -496,42 +496,19 @@ def _scan_library(conn, t0):
                 elif RE_AI_SEED.match(base):
                     tid_ai = ensure_tag(conn, tag_cache, "AI生成(檔名特徵)", "source")
                     tag_links.append((img_id, tid_ai, 1.0, "filename"))
-                elif RE_TWITTER_RAW.match(base) or RE_TWITTERVID.match(base):
+                elif RE_TWITTER_RAW.match(base) or RE_TWITTERVID.match(base) or RE_TWITTER_HANDLE_STATUS.match(base):
                     tid_tw = ensure_tag(conn, tag_cache, "Twitter原始檔名", "source")
                     tag_links.append((img_id, tid_tw, 1.0, "filename"))
                 else:
-                    m_tw_hs = RE_TWITTER_HANDLE_STATUS.match(base)
-                    if m_tw_hs:
-                        tid_tw = ensure_tag(conn, tag_cache, "Twitter原始檔名", "source")
-                        tag_links.append((img_id, tid_tw, 1.0, "filename"))
-                        tw_handle = m_tw_hs.group(1)
-                        if not tw_handle.isdigit() and tw_handle.lower() not in ("twitter", "x", "video", "img", "image", "photo", "clip"):
-                            tid_h = ensure_tag(conn, tag_cache, f"@{tw_handle}", "artist", source="twitter")
-                            if tid_h > 0:
-                                tag_links.append((img_id, tid_h, 1.0, "twitter"))
-                            res_folder = resolve_artist_folder_name(tw_handle)
-                            if res_folder in FOLDER_TO_DANBOORU_ARTIST:
-                                db_artist = FOLDER_TO_DANBOORU_ARTIST[res_folder]
-                                tid_db = ensure_tag(conn, tag_cache, db_artist, "artist", source="twitter")
-                                if tid_db > 0:
-                                    tag_links.append((img_id, tid_db, 1.0, "twitter"))
-                            if not folder and res_folder:
-                                sug_folder_updates.append((res_folder, img_id))
-                    else:
-                        m_kona = RE_KONACHAN.match(base)
-                        if m_kona:
-                            tid_k = ensure_tag(conn, tag_cache, "Konachan圖站", "source")
-                            tag_links.append((img_id, tid_k, 1.0, "filename"))
+                    m_kona = RE_KONACHAN.match(base)
+                    if m_kona:
+                        tid_k = ensure_tag(conn, tag_cache, "Konachan圖站", "source")
+                        tag_links.append((img_id, tid_k, 1.0, "filename"))
 
             if tag_links:
                 conn.executemany(
                     "INSERT OR IGNORE INTO image_tags (image_id, tag_id, confidence, source) VALUES (?, ?, ?, ?)",
                     tag_links
-                )
-            if sug_folder_updates:
-                conn.executemany(
-                    "UPDATE images SET suggested_folder = COALESCE(?, suggested_folder) WHERE id = ?",
-                    sug_folder_updates
                 )
 
         for path, info in details.items():

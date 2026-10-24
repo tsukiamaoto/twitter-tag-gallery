@@ -1,0 +1,28 @@
+.agent-management { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.agent-management-header { display: grid; gap: 6px; }
+.agent-tool-toolbar { display: grid; gap: 8px; }
+.agent-tool-catalog { display: grid; gap: 10px; min-width: 0; }
+.agent-tool-row { display: grid; gap: 8px; text-align: left; width: 100%; white-space: normal; padding: 14px 16px; border-radius: 10px; background: var(--bg-card); border: 1px solid var(--border); align-items: start; }
+.agent-tool-row:hover { background: var(--bg-hover); border-color: #51456e; }
+.agent-tool-row-header { display: flex; align-items: baseline; justify-content: space-between; gap: 6px 14px; flex-wrap: wrap; width: 100%; min-width: 0; }
+.agent-tool-row-title { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.agent-tool-row strong { font-size: 14px; font-weight: 600; color: var(--text-main); }
+.agent-tool-row code { font-size: 12px; color: #a5b4fc; font-family: Consolas, monospace; overflow-wrap: anywhere; }
+.agent-tool-row-meta { font-size: 12px; color: var(--text-muted); }
+.agent-tool-row-content { font-size: 13px; line-height: 1.65; color: #d4d3e4; overflow-wrap: anywhere; margin: 0; }
+#agent-tool-modal { z-index: 120; }
+.agent-tool-dialog { max-width: 720px; width: 100%; max-height: min(88dvh, 820px); padding: 0; gap: 0; overflow: hidden; display: flex; flex-direction: column; }
+.agent-tool-dialog-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 18px 22px; border-bottom: 1px solid var(--border); flex-shrink: 0; background: var(--bg-panel); }
+.agent-tool-dialog-heading { display: grid; gap: 4px; min-width: 0; flex: 1; }
+.agent-tool-dialog-eyebrow { font-size: 11px; color: var(--text-muted); margin: 0; }
+.agent-tool-dialog-heading h3 { font-size: 16px; font-weight: 650; overflow-wrap: anywhere; margin: 0; }
+.agent-tool-dialog-body { padding: 20px 22px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; min-height: 0; flex: 1; }
+.agent-tool-dialog-body label { display: grid; gap: 7px; font-size: 13px; font-weight: 600; color: var(--text-main); }
+.agent-tool-dialog-body textarea { width: 100%; resize: vertical; font: 12px/1.65 Consolas, monospace; font-weight: 400; }
+.agent-tool-dialog-footer { padding: 14px 22px; border-top: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; background: #17181f; flex-shrink: 0; }
+@media (max-width: 600px) {
+  #agent-tool-modal { padding: 10px; }
+  .agent-tool-row { padding: 12px; }
+  .agent-tool-dialog { max-height: calc(100dvh - 20px); }
+  .agent-tool-dialog-header, .agent-tool-dialog-body, .agent-tool-dialog-footer { padding: 14px; }
+}

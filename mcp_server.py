@@ -7,10 +7,11 @@ from tool_registry import CATALOG, sdk_functions
 
 
 def protocol_tools():
-    from integration_settings import allowed, record_session
+    from integration_settings import allowed, load, record_session
     if not os.environ.get("TWITTER_GALLERY_MCP_DIAGNOSTIC"):
         record_session("tools/list")
-    return [tool.protocol() for tool in CATALOG.values() if allowed(tool.name)]
+    config = load()
+    return [tool.protocol() for tool in CATALOG.values() if allowed(tool.name, config)]
 
 
 def build_server():
@@ -99,9 +100,12 @@ if __name__ == "__main__":
     if not os.environ.get("TWITTER_GALLERY_MCP_DIAGNOSTIC"):
         from database import init_db
         init_db()
-    try:
-        server = build_server()
-    except ImportError:
+    if os.environ.get("TWITTER_GALLERY_MCP_DIAGNOSTIC"):
         run_stdio_loop()
     else:
-        server.run()
+        try:
+            server = build_server()
+        except ImportError:
+            run_stdio_loop()
+        else:
+            server.run()

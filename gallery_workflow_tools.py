@@ -44,7 +44,13 @@ def tool_gallery_get_image_details(image_id, tag_limit=100):
     finally:
         conn.close()
     path = gallery_path(database.GALLERY_ROOT, row["rel_path"])
-    return {"image": dict(row), "full_path": str(path), "tags": tags, "total_tags": total_tags,
+    screenshot_path = None
+    if row["media_type"] == "video" or str(path).lower().endswith(".mp4"):
+        from thumbnail_cache import ensure_video_screenshot
+        ss_p = ensure_video_screenshot(image_id, path, max_size=720)
+        if ss_p is not None:
+            screenshot_path = str(ss_p)
+    return {"image": dict(row), "full_path": str(path), "screenshot_path": screenshot_path, "tags": tags, "total_tags": total_tags,
             "tags_truncated": total_tags > len(tags), "processing": stages}
 
 
@@ -112,6 +118,30 @@ def tool_gallery_undo_rename(batch_id):
     return undo_rename_batch(batch_id)
 
 
+def tool_gallery_clean_duplicates(
+    mode="both",
+    scope="same_folder",
+    folder="__ALL__",
+    execute_delete=False,
+    max_mae=6.5,
+    min_ssim=0.95,
+    max_diff_frac=0.005,
+    max_groups=200,
+):
+    from deduplicator import clean_duplicates
+    return clean_duplicates(
+        mode=mode,
+        scope=scope,
+        folder=folder,
+        execute_delete=execute_delete,
+        max_mae=max_mae,
+        min_ssim=min_ssim,
+        max_diff_frac=max_diff_frac,
+        max_groups=max_groups,
+    )
+
+
+
 def tool_gallery_get_jobs(limit=10):
     return {"active": background_status(), "jobs": job_history(limit)}
 
@@ -123,3 +153,100 @@ def tool_gallery_get_tool_run(run_id):
 
 def tool_gallery_cancel_job(job_id):
     return request_cancel(job_id)
+
+
+def tool_gallery_cancel_agent_job(agent_job_id):
+    import agent_jobs
+    job = agent_jobs.control(agent_job_id, "stop")
+    return {"status": "succeeded", "agent_job_id": job["id"], "agent_job": job,
+            "message": "已處理桌面查證工作的停止要求；請查看 agent_job.status"}
+
+
+def tool_gallery_resolve_artist_identity(artist_name="", profile_urls=None, force_refresh=False):
+    from artist_identity import resolve
+    return resolve(artist_name, profile_urls or [], force_refresh=force_refresh)
+
+
+def tool_gallery_get_artist_identity_status(limit=20):
+    from artist_identity import status
+    return status(limit)
+
+
+def tool_gallery_confirm_artist_identity(request_key, canonical_name, aliases, profile_urls, evidence):
+    from artist_identity import confirm_request
+    return confirm_request(request_key, canonical_name, aliases, profile_urls, evidence)
+
+
+def tool_gallery_get_agent_job(job_id):
+    import agent_jobs
+    job = agent_jobs.batch(job_id)
+    job["images"] = [dict(row) for row in _images(job["image_ids"], present=True)]
+    from publication_dates import sources
+    for image in job["images"]:
+        image["full_path"] = str(gallery_path(database.GALLERY_ROOT, image["rel_path"]))
+        image["publication_sources"] = sources(image["id"])
+        conn = database.get_db()
+        try:
+            original = conn.execute("SELECT original_filename FROM publication_files WHERE image_id=?", (image["id"],)).fetchone()
+            image["original_filename"] = original[0] if original else image["filename"]
+        finally:
+            conn.close()
+    return job
+
+
+def tool_gallery_trace_publication_dates(job_id, image_ids):
+    from publication_dates import trace
+    return trace(job_id, image_ids)
+
+
+def tool_gallery_submit_publication_sources(**arguments):
+    from publication_dates import submit
+    return submit(**arguments)
+
+
+def tool_gallery_complete_agent_batch(job_id, image_ids):
+    from publication_dates import complete_batch
+    return complete_batch(job_id, image_ids)
+
+
+def tool_gallery_submit_artist_identity(job_id, confirmed, canonical_name="", aliases=None, profile_urls=None, evidence=None):
+    import agent_jobs
+    from artist_identity import confirm_model
+    job = agent_jobs.require_running(job_id, "artist_identity")
+    context = job["context"]
+    found = confirm_model(canonical_name, aliases or [], profile_urls or [], evidence or [],
+                          query_name=context["artist_name"], query_urls=context["profile_urls"], source="antigravity") if confirmed else None
+    conn = database.get_db()
+    try:
+        import hashlib, json, time
+        from artist_identity import name_key, _keys
+        key = hashlib.sha256(json.dumps([name_key(context["artist_name"]), sorted(_keys("", context["profile_urls"]))]).encode()).hexdigest()
+        with conn:
+            conn.execute("UPDATE artist_identity_requests SET status=?,last_error='',retry_at=?,updated_at=? WHERE request_key=?", ("resolved" if found else "unresolved", time.time() + 86400, time.time(), key))
+    finally:
+        conn.close()
+    return agent_jobs.finish(job_id, {"confirmed": bool(found), "identity": found})
+
+
+def tool_gallery_list_mcp_servers():
+    import integration_settings as integrations
+    return {
+        "servers": integrations.list_servers(),
+        "client_config_path": str(integrations.antigravity_mcp_config_path()),
+    }
+
+
+def tool_gallery_save_mcp_server(server_id, sync_client=False, **fields):
+    import integration_settings as integrations
+    payload = {key: value for key, value in fields.items() if value is not None}
+    return integrations.save_server(server_id, payload, sync_client=bool(sync_client))
+
+
+def tool_gallery_delete_mcp_server(server_id, sync_client=False):
+    import integration_settings as integrations
+    return integrations.delete_server(server_id, sync_client=bool(sync_client))
+
+
+def tool_gallery_test_mcp_server(server_id):
+    import integration_settings as integrations
+    return integrations.diagnose_server(server_id)

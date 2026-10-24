@@ -2,7 +2,7 @@
 
 狀態：完成，已於 2026-10-21 取得使用者明確授權，完成正式資料庫備份、服務重啟與資料庫遷移；Antigravity 真實客戶端回報 READY 並載入 24 個工具。
 
-使用者核准範圍：掃描防誤刪、可復原檔案操作、路徑防護、交易快取回滾、分開 AI 與來源查驗狀態、模型生命週期、查詢快取、跨程序任務、檔案變更／去重／快取清理、前端模組化，以及設定中的圖庫 MCP 管理。使用者於 2026-10-21 取消 Gemini API 直連，改由 Antigravity 或 Gemini CLI 作為 MCP 客戶端。
+使用者核准範圍：掃描防誤刪、可復原檔案操作、路徑防護、交易快取回滾、分開 AI 與來源查驗狀態、模型生命週期、查詢快取、跨程序任務、檔案變更／去重／快取清理、前端模組化，以及設定中的圖庫 MCP 管理。使用者於 2026-10-21 取消 Gemini API 直連，改由 Antigravity 作為 MCP 客戶端。
 
 效能原則：改名使用一次計畫快照與追加式日誌；重試只撤銷本次快取變動；雜湊以新檔與變動檔為主；查詢快取有容量上限及跨程序失效；進度寫入節流。
 
@@ -15,7 +15,7 @@
 - [x] GPU 推論、載入與卸載共用生命週期鎖。
 - [x] 搜尋與快取保持結果一致並量測效能。
 - [x] UI 顯示跨程序任務進度與失敗，閒置輪詢降頻。
-- [x] MCP 設定、權限、診斷與 Antigravity／Gemini CLI 匯出可用；模型登入由客戶端管理。
+- [x] MCP 設定、權限、診斷與 Antigravity 匯出可用；模型登入由客戶端管理。
 - [x] Settings 工具參數、執行、停止及結果紀錄與 MCP 共用驗證及作業鎖。
 - [x] 隔離故障測試與既有測試通過；正式圖片不作測試素材。
 
@@ -41,7 +41,7 @@
 - Python：95 項通過（既有 42 項、可靠性 26 項、工具管理 13 項及圖庫流程 14 項）。
 - Node：15 項通過。
 - Playwright：gallery-shell、smart-tag-ui、integration-settings 三組通過；涵蓋 320–2507 px，瀏覽器錯誤為 0。
-- 新設定測試涵蓋唯讀工具、儲存、移除 Gemini API 分頁、診斷成功／失敗、Antigravity 與 Gemini CLI 分別匯出、跨程序工作與失敗顯示。
+- 新設定測試涵蓋唯讀工具、儲存、移除 Gemini API 分頁、診斷成功／失敗、Antigravity 匯出、跨程序工作與失敗顯示。
 - 工具管理測試涵蓋 Settings API 的 403／404／409／410／422、schema 與型別驗證、結果與失敗、背景執行、取消、作業鎖、完成時序、唯讀併發上限、紀錄容量及中斷。SDK 1.x、2.x 均實際透過 stdio 握手、tools/list、呼叫臨時圖庫總覽並驗證非法參數的錯誤回報。新增圖庫工具的 12 項管理與 14 項流程測試已驗證兩個 SDK；目前工具管理為 13 項，另包含退役 Gemini API 不連線的測試。瀏覽器亦驗證 JSON 錯誤不送出、停用寫入工具、掃描背景作業／停止要求、結果與失敗顯示及 320 px 操作區。
 - 圖庫、GPU、付費生成及正式檔案搬移未作測試素材；資料庫效能使用一致備份。
 
@@ -90,6 +90,7 @@
 | `gallery_get_jobs` | 跨程序作業、階段、進度與最近結果 | 任務清單，不新增輪詢紀錄 |
 | `gallery_get_tool_run` | 依 run_id 讀取結果、錯誤、job_id | 執行詳情，不新增輪詢紀錄 |
 | `gallery_cancel_job` | 依 job_id 合作式停止目前作業 | 停止要求已送出 |
+| `gallery_cancel_agent_job` | 依 agent_job_id 停止桌面查證工作 | 已停止工作狀態，後續提交拒絕 |
 
 建議順序：
 
@@ -97,7 +98,9 @@
 2. `gallery_search_images` 傳 `{"q":"風景","page_size":20}`，或 `{"include_tags":["landscape"],"folder":"__ROOT__"}`。`include_tags` 使用原始標籤名稱；中文關鍵字使用 `q`。
 3. `gallery_update_image_tags` 傳 `{"image_ids":[實際圖片ID],"add_tags":[{"name":"artist_name","category":"artist"}]}`；或使用 `gallery_analyze_images` 讓本機 AI 分析。模型目前只可新增畫師、角色、作品、來源，不能覆蓋或移除人工標籤，詳見 [018 分類限制](018-core-generated-tags.md)。相同模型與檔案版本已完成時預設略過；`skip_completed=false` 可重新分析。
 4. `gallery_move_images` 先傳 `{"image_ids":[實際圖片ID],"target_folder":"畫師名稱","execute_move":false}`；查看結果內 `entries`，確認後以相同條件傳 `execute_move=true`。執行會重新建立計畫並再次檢查檔案衝突。
-5. 需要停止時，用啟動回應或 `gallery_get_jobs` 中的 `job_id` 呼叫 `gallery_cancel_job`。`run_id` 用於工具結果，`job_id` 用於作業控制，兩者用途不同。
+5. 需要停止時，使用啟動回應的 `cancel_tool` 與 `cancel_arguments`。共用圖庫作業的非空 `job_id`（亦即 `gallery_get_jobs` 的 `active.id`）傳給 `gallery_cancel_job`；桌面查證工作的 `agent_job_id` 傳給 `gallery_cancel_agent_job`。兩者不可混用，`run_id` 僅用於讀取工具結果。`job_id=null` 的背景工具可能屬於桌面查證工作，不能因此推定沒有停止入口。
+
+操作預設值與限制：`gallery_batch_tag_or_move.include_tags` 至少一個標籤，指定資料夾即實際搬移，需要預覽改用 `gallery_move_images`。批次反查的 `auto_move_verified`、畫師校正的 `move_to_artist_folder` 與 `purge_ai_artist_tags`、清理畫師的 `revert_unverified_ai_folders` 均預設 `false`。畫師查證證據使用具名的 `source_url`、`linked_url`；`confirmed=true` 必須附非空標準名稱、至少兩個平台帳號與證據。背景工具說明會附上共用執行契約，即使使用者自訂用途說明，仍會保留輪詢與停止方式。
 
 長任務在啟動它的 MCP 程序中執行，客戶端應保持連線到任務結束；中途關閉客戶端造成程序中止時，已提交的資料與檔案日誌會保留，可在重新連線後查詢 interrupted 紀錄及執行復原。復原中斷操作與還原已完成改名是不同工具；目前沒有任意撤銷已完成搬移的工具。
 
@@ -107,11 +110,11 @@
 
 ## 客戶端模型與登入（2026-10-21）
 
-使用者確認透過 Antigravity／Gemini CLI 操作，因此移除 Gemini API 設定分頁、金鑰儲存與圖庫直接請求 Gemini 的程式。舊 `/api/settings/gemini/test`、`/api/semantic/gemini_flash` 回傳 410 並指引使用 MCP，不送出網路請求；設定 API 拒收舊金鑰／模型欄位。舊設定檔中的 Gemini 欄位不會讀取或公開，下次儲存 MCP 設定時只保留有效 MCP 欄位；環境變數不作修改。
+使用者確認透過 Antigravity 操作，因此移除 Gemini API 設定分頁、金鑰儲存與圖庫直接請求 Gemini 的程式。舊 `/api/settings/gemini/test`、`/api/semantic/gemini_flash` 回傳 410 並指引使用 MCP，不送出網路請求；設定 API 拒收舊金鑰／模型欄位。舊設定檔中的 Gemini 欄位不會讀取或公開，下次儲存 MCP 設定時只保留有效 MCP 欄位；環境變數不作修改。
 
-流程為「Antigravity 的代理（或 Gemini CLI）→ 本專案 MCP → 圖庫」。登入、訂閱與雲端模型選擇在客戶端管理，本頁的「AI 模型」仍用於圖庫本機視覺模型。圖庫不會自動啟動客戶端；本次工作提供並驗證 MCP 工具，沒有另啟動 Gemini 執行正式分析。
+流程為「Antigravity 的代理→ 本專案 MCP → 圖庫」。登入、訂閱與雲端模型選擇在客戶端管理，本頁的「AI 模型」仍用於圖庫本機視覺模型。圖庫不會自動啟動客戶端；本次工作提供並驗證 MCP 工具，沒有另啟動 Gemini 執行正式分析。
 
-MCP 管理新增連線客戶端選擇，預設 Antigravity。Antigravity 匯出標準 command／args／cwd／env 及 disabled／disabledTools；Gemini CLI 匯出 timeout／trust=false／includeTools。兩者皆使用圖庫實際的權限設定，仍需由使用者合併到客戶端設定並重新整理工具。格式依 [Antigravity MCP 文件](https://antigravity.google/docs/mcp) 與 [Gemini CLI MCP 文件](https://geminicli.com/docs/tools/mcp-server/)；未自動改寫外部設定檔。
+MCP 管理提供 Antigravity 連線設定匯出，包含標準 command／args／cwd／env 及 disabled／disabledTools，使用圖庫實際的權限設定。依 [Antigravity MCP 文件](https://antigravity.google/docs/mcp) 產生設定，需合併至客戶端設定並重新整理工具。已移除其他 CLI 的設定匯出與畫師背景呼叫程式。
 
 ## 正式套用與 Antigravity 驗收（2026-10-21）
 

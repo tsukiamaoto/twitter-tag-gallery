@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "test": "node --test tests/*.test.cjs",
-    "test:browser": "node tests/gallery-shell.spec.cjs && node tests/smart-tag-ui.spec.cjs && node tests/integration-settings.spec.cjs && node tests/image-deletion.spec.cjs && node tests/detail-actions.spec.cjs && node tests/selection-gestures.spec.cjs && node tests/sidebar-tags.spec.cjs && node tests/tag-filter-persistence.spec.cjs && node tests/image-skills.spec.cjs"
+    "test:browser": "node tests/agent-settings.spec.cjs && node tests/artist-identity-settings.spec.cjs && node tests/gallery-shell.spec.cjs && node tests/workspace-navigation.spec.cjs && node tests/smart-tag-ui.spec.cjs && node tests/integration-settings.spec.cjs && node tests/image-deletion.spec.cjs && node tests/detail-actions.spec.cjs && node tests/selection-gestures.spec.cjs && node tests/sidebar-tags.spec.cjs && node tests/tag-filter-persistence.spec.cjs && node tests/image-skills.spec.cjs"
   },
   "devDependencies": {
     "playwright": "^1.56.0"

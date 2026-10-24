@@ -5,23 +5,40 @@ from zh_dict import get_tag_display_name
 
 def artist_index(conn):
     def load():
+        from artist_identity import identity_index, name_key
+        identities, identity_keys = identity_index(conn)
         groups = {}
         for row in conn.execute("SELECT id,name,category,zh_name,post_count FROM tags WHERE category='artist' ORDER BY id"):
-            label = get_tag_display_name(row["name"], "artist", row["zh_name"])
-            key = label.casefold()
+            matches = identity_keys.get(("name", name_key(row["name"])), set())
+            identity_id = next(iter(matches)) if len(matches) == 1 else None
+            label = identities[identity_id]["folder_name"] if identity_id else get_tag_display_name(row["name"], "artist", row["zh_name"])
+            key = ("identity", identity_id) if identity_id else ("label", label.casefold())
             if key not in groups:
                 groups[key] = {**dict(row), "zh_name": label, "aliases": [], "tag_ids": []}
             group = groups[key]
             group["aliases"].append(row["name"])
             group["tag_ids"].append(row["id"])
             group["post_count"] = max(group["post_count"], row["post_count"])
+        for (kind, value), matched in identity_keys.items():
+            if len(matched) != 1 or kind not in ("name", "twitter", "fanbox"):
+                continue
+            group = groups.get(("identity", next(iter(matched))))
+            alias = "@" + value if kind == "twitter" else value
+            if group and alias not in group["aliases"]:
+                group["aliases"].append(alias)
         return {"rows": list(groups.values()),
-                "by_name": {name: group for group in groups.values() for name in group["aliases"]}}
+                "by_name": {name: group for group in groups.values() for name in group["aliases"]},
+                "by_normalized_name": {name_key(name): group for group in groups.values() for name in group["aliases"]}}
     return artist_tags.get("identities", load)
 
 
 def artist_filter_names(conn, name):
-    group = artist_index(conn)["by_name"].get(name)
+    from artist_identity import name_key
+    stored = conn.execute("SELECT category FROM tags WHERE name=?", (name,)).fetchone()
+    if stored and stored["category"] != "artist":
+        return [name]
+    index = artist_index(conn)
+    group = index["by_name"].get(name) or index["by_normalized_name"].get(name_key(name))
     return group["aliases"] if group else [name]
 
 

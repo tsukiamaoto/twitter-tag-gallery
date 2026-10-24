@@ -123,6 +123,8 @@ def tool_gallery_batch_tag_or_move(
     only_root_files: bool = True,
 ) -> Dict[str, Any]:
     reject_generated_details(add_general_tags)
+    if not include_tags or any(not tag.strip() for tag in include_tags):
+        raise ValueError("批次標籤與搬移至少需要一個非空白 include_tags；不可使用空篩選修改全庫")
     conn = get_db()
     where = ["1=1"]
     params: List[Any] = []
@@ -287,10 +289,17 @@ def tool_gallery_list_candidates_for_artist_calibration(
         chars = [tr["name"] for tr in t_rows if tr["category"] == "character"]
         copys = [tr["name"] for tr in t_rows if tr["category"] == "copyright"]
         gens = [tr["name"] for tr in t_rows if tr["category"] == "general"][:15]
+        full_p = GALLERY_ROOT / r["rel_path"]
+        screenshot_p = None
+        if full_p.suffix.lower() == ".mp4":
+            from thumbnail_cache import ensure_video_screenshot
+            screenshot_p = ensure_video_screenshot(r["id"], full_p, max_size=720)
         results.append({
             "image_id": r["id"],
             "rel_path": r["rel_path"],
-            "full_path": str(GALLERY_ROOT / r["rel_path"]),
+            "full_path": str(screenshot_p) if screenshot_p else str(full_p),
+            "screenshot_path": str(screenshot_p) if screenshot_p else None,
+            "video_path": str(full_p) if screenshot_p else None,
             "filename": r["filename"],
             "folder": r["folder"],
             "pixiv_id": r["pixiv_id"],
@@ -310,7 +319,7 @@ def tool_gallery_deep_reverse_search_batch(
     limit: int = 15,
     min_similarity: float = 72.0,
     include_google_lens_url: bool = True,
-    auto_move_verified: bool = True,
+    auto_move_verified: bool = False,
 ) -> Dict[str, Any]:
     """
     對指定圖片執行「Google Lens 以圖搜圖網址生成 + Danbooru MD5/Post/Artist API + IQDB + SauceNAO 深度反查與自動校正」：
@@ -352,7 +361,8 @@ def tool_gallery_deep_reverse_search_batch(
         moved_to = None
         if is_verified and auto_move_verified and sug_folder:
             if old_folder != sug_folder:
-                m_res = move_images_to_folder([iid], sug_folder, auto_rename=True)
+                from gallery_service import move_images_to_artist_folder
+                m_res = move_images_to_artist_folder([iid], sug_folder, auto_rename=True)
                 if m_res.get("moved", 0) > 0:
                     moved_count += 1
                     moved_to = sug_folder
@@ -422,11 +432,21 @@ def tool_gallery_calibrate_image_artist_and_tags(
     - add_general_tags: 已停用；僅接受空陣列
     - zh_translations (dict[str, str], 選填): 標籤繁體中文翻譯對照
     - remove_tags (list[str], 選填): 欲移除的錯誤標籤名稱清單
-    - purge_ai_artist_tags (bool, 預設 True): 是否清除該圖片上所有本機 AI 猜測的畫師標籤
-    - move_to_artist_folder (bool, 預設 True): 若有 verified_artist，是否自動建立/搬移至該繪師資料夾並清除舊空資料夾
+    - purge_ai_artist_tags (bool, 預設 False): 明確啟用才清除該圖片上所有本機 AI 猜測的畫師標籤
+    - move_to_artist_folder (bool, 預設 False): 明確啟用才搬移至已確認身分的繪師資料夾
     """
     # Validate the entire model batch before any calibration can remove tags.
     reject_generated_details(*(item.get("add_general_tags") for item in calibrations))
+    from artist_identity import resolve as resolve_identity
+    identity_folders = {}
+    for item in calibrations:
+        artist_name = (item.get("verified_artist") or "").strip()
+        handle = (item.get("twitter_handle") or "").strip().lstrip("@")
+        if artist_name or handle:
+            key = (artist_name, handle)
+            if key not in identity_folders:
+                identity_folders[key] = resolve_identity(artist_name or "@" + handle,
+                    [f"https://x.com/{handle}"] if handle else []).get("folder_name")
     conn = get_db()
     tag_cache: Dict[str, int] = {}
     for r in conn.execute("SELECT id, name FROM tags"):
@@ -451,13 +471,13 @@ def tool_gallery_calibrate_image_artist_and_tags(
             copys = item.get("copyrights") or []
             zh_map = item.get("zh_translations") or {}
             rem_tags = item.get("remove_tags") or []
-            purge_ai = item.get("purge_ai_artist_tags", True)
-            do_move = item.get("move_to_artist_folder", True)
+            purge_ai = item.get("purge_ai_artist_tags", False)
+            do_move = item.get("move_to_artist_folder", False)
 
             purged_total += calibrate_image_tags_in_db(
                 conn,
                 image_id=iid,
-                has_verified_artist=bool(purge_ai or v_artist or tw_handle),
+                has_verified_artist=bool(purge_ai),
                 has_verified_character=bool(chars),
                 has_verified_copyright=bool(copys),
                 remove_tag_names=rem_tags,
@@ -503,11 +523,7 @@ def tool_gallery_calibrate_image_artist_and_tags(
                     links,
                 )
 
-            target_folder = None
-            if v_artist:
-                target_folder = resolve_artist_folder_name(v_artist)
-            elif tw_handle:
-                target_folder = resolve_artist_folder_name(tw_handle)
+            target_folder = identity_folders.get((v_artist, tw_handle))
 
             if target_folder:
                 conn.execute(
@@ -523,7 +539,8 @@ def tool_gallery_calibrate_image_artist_and_tags(
     conn.close()
 
     for iid, old_folder, target_folder in folders_to_move:
-        m_res = move_images_to_folder([iid], target_folder, auto_rename=True)
+        from gallery_service import move_images_to_artist_folder
+        m_res = move_images_to_artist_folder([iid], target_folder, auto_rename=True)
         if m_res.get("moved", 0) > 0:
             moved_total += 1
             if old_folder:
@@ -543,13 +560,12 @@ def tool_gallery_calibrate_image_artist_and_tags(
 
 
 def tool_gallery_purge_all_low_conf_ai_artists(
-    max_ai_conf_to_purge: float = 0.75,
-    revert_unverified_ai_folders: bool = True,
+    max_ai_conf_to_purge: float = 0.65,
+    revert_unverified_ai_folders: bool = False,
 ) -> Dict[str, Any]:
     """
-    清理圖庫中所有由本機 AI (`source='ai'`) 低信心度 (< 0.75) 亂猜的畫師標籤，
-    並將先前僅因低信心度 AI 猜測而誤搬入資料夾（`ai_tagged = 1` 且未經 Pixiv/Danbooru/SauceNAO/IQDB/Gemini 認證）的圖片移回根目錄、刪除空的誤建資料夾。
-    注意：使用者原有的 18,163 張已整理資料夾圖片 (`ai_tagged = 0`) 與已認證畫師圖片完全不會受影響。
+    清除低於指定門檻（預設 0.65）的 AI 畫師，以及已有認證畫師的冗餘 AI 畫師標籤。
+    僅在 revert_unverified_ai_folders=True 時將未認證的 AI 資料夾圖片移回根目錄。
     """
     conn = get_db()
 

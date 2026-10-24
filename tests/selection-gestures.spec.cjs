@@ -11,7 +11,8 @@ const original = Array.from({length:24}, (_, i) => ({id:i+1, filename:`image_${i
 (async () => {
   const browser = await chromium.launch({headless:true, channel:process.env.PLAYWRIGHT_CHANNEL || 'msedge'});
   try {
-    const context = await browser.newContext({viewport:{width:1440,height:1000}});
+    // Keep five columns for the horizontal paint scenarios, including the workspace rail.
+    const context = await browser.newContext({viewport:{width:1536,height:1000}, reducedMotion:'reduce'});
     await context.addInitScript(() => localStorage.setItem('twitter-tag-gallery.browse.v1', '{"pageSize":10}'));
     let items = [...original];
     const writes = [], errors = [];
@@ -144,9 +145,9 @@ const original = Array.from({length:24}, (_, i) => ({id:i+1, filename:`image_${i
     await page.locator('#card-11 .card-check').click();
     await page.locator('#card-16 .thumb-box').click({modifiers:['Shift']});
     assert.deepEqual(await selected(), [11,12,13,14,15,16]);
-    page.once('dialog', dialog => dialog.accept());
     await page.locator('#btn-delete-selected').click();
-    await page.waitForFunction(() => document.querySelector('#file-delete-status').textContent.startsWith('已刪除 6'));
+    await page.waitForFunction(() => !document.querySelector('#card-11'));
+    assert.equal(await page.locator('#file-delete-notice').isHidden(), true);
     assert.deepEqual(writes, [{image_ids:[11,12,13,14,15,16]}]);
     assert.equal(await page.locator('#card-11').count(), 0);
     assert.deepEqual(errors, []);

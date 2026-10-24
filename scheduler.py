@@ -473,7 +473,7 @@ class AutoIngestScheduler:
                                 tensor,
                                 general_thresh=gen_t,
                                 character_thresh=gen_t,
-                                copyright_thresh=gen_t,
+                                copyright_thresh=max(0.85, gen_t),
                                 artist_thresh=art_t,
                             )
                             for tname, cat, conf in preds:
@@ -525,11 +525,19 @@ class AutoIngestScheduler:
             self.processed_count = 90
             update_job(processed_count=self.processed_count,total_target=self.total_target,stage=self.status_message)
             if cfg.get("auto_create_artist_folders", True):
-                from app import move_images_to_folder, sync_root_suggested_folders
+                from app import sync_root_suggested_folders
+                from gallery_service import move_images_to_artist_folder as move_images_to_folder
+                from artist_identity import resolve_image_folders
                 min_conf = max(0.70, float(cfg.get("min_artist_confidence", 0.70)))
                 auto_rn = bool(cfg.get("auto_rename_in_artist_folder", True))
                 also_all_root = bool(cfg.get("also_organize_all_root", False))
 
+                identity_conn = get_db()
+                try:
+                    identity_ids = [r[0] for r in identity_conn.execute("SELECT id FROM images WHERE folder='' AND missing_since IS NULL")]
+                finally:
+                    identity_conn.close()
+                resolve_image_folders(identity_ids)
                 sync_root_suggested_folders(min_confidence=min_conf)
 
                 conn = get_db()

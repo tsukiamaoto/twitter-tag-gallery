@@ -2,8 +2,8 @@
 name: twitter-tag-correlation
 description: >-
   透過 twitter-tag-gallery MCP 分析本機圖庫的標籤相關性、語意搜尋、翻譯既有標籤，
-  或由模型校正畫師、角色、作品及來源並協助畫師歸檔。適用於 Gemini CLI、Antigravity
-  等模型操作圖庫的需求；一般程式碼維護不需要執行此流程。
+  或由模型校正畫師、角色、作品及來源並協助畫師歸檔。適用於 Antigravity
+  等模型操作圖庫的需求；去重請使用 gallery-deduplication，一般程式碼維護不需要執行此流程。
 ---
 
 # 本機圖庫標籤搜尋與模型校正
@@ -33,10 +33,14 @@ description: >-
 - `gallery_list_untranslated_tags` 列出待翻譯標籤；`gallery_apply_gemini_enrichments`
   僅更新既有翻譯。省略 `semantic_theme_groups` 及 `auto_cluster_builtin_themes`，不要求主題聚合。
 - `gallery_calibrate_image_artist_and_tags` 提交有依據的畫師、角色、作品及繁中名稱。
-  `add_general_tags` 已停用，請省略。只做標籤時明確傳 `move_to_artist_folder=false`。
+  `add_general_tags` 已停用，請省略。預設不搬移、不清除 AI 畫師標籤；只有使用者授權對應操作時，
+  才傳 `move_to_artist_folder=true` 或 `purge_ai_artist_tags=true`。
+  提交角色或作品會清除對應分類信心度低於 0.70 的 AI 標籤，人工標籤保留。
 - `gallery_update_image_tags` 只接受上述四種核心分類，必須明確指定 `category`。
-- `gallery_batch_tag_or_move` 可依既有標籤篩選並新增畫師；`add_general_tags` 已停用。
-  搬移僅在使用者要求歸檔時使用。
+- `gallery_batch_tag_or_move` 依至少一個既有標籤篩選並新增畫師；禁止空的 `include_tags`。
+  指定 `move_to_folder` 即實際搬移並自動改名，只在使用者要求歸檔時使用；需要預覽則用 `gallery_move_images`。
+- `gallery_deep_reverse_search_batch` 預設只反查及校正標籤；明確傳 `auto_move_verified=true` 才搬移。
+- 去重工作讀取 [gallery-deduplication](../gallery-deduplication/SKILL.md)，由該技能定義比對限制與刪除流程。
 
 ## 工作方式
 
@@ -44,8 +48,33 @@ description: >-
 指定模型或委派時才採用相應方式。對待校正圖片取得可信依據後，再提交核心標籤。
 需要更新翻譯時，只翻譯目前保留的核心標籤或使用者指定的人工標籤。
 
-長任務回傳 `run_id` 後，以 `gallery_get_tool_run` 查詢完成或錯誤；需要停止時使用
-`gallery_cancel_job`。回報實際更新與略過項目，不把遭拒或推測的標籤當成已寫入。
+長任務的啟動回應不是完成結果。以 `gallery_get_tool_run(run_id)` 查詢，直到 `run.status`
+不再是 `running`，讀取 `run.result` 或 `run.error`。回報實際更新與略過項目，不把遭拒或推測的標籤當成已寫入。
+
+識別碼與停止方式：
+
+- `run_id` 是工具執行紀錄，只用來查詢結果。
+- 啟動回應的 `job_id` 是共用圖庫作業 ID，可能為 `null`；僅非空值可傳 `gallery_cancel_job`。
+- 桌面橋接器提供的 `job_id` 是桌面查證工作 ID，在啟動回應另列為 `agent_job_id`；
+  用 `gallery_cancel_agent_job(agent_job_id)` 停止，不能傳給 `gallery_cancel_job`。
+- 優先照啟動回應的 `cancel_tool` 與 `cancel_arguments` 送出停止要求；兩者為 `null` 時沒有停止入口。
+  停止是合作式處理，已開始的網路請求或安全檔案步驟可能仍須完成。保持 MCP 連線至工具結束。
 
 既有標籤的大量清理、原始圖片刪除及搬移是各自獨立的工作，不能由「重新產生標籤」
 推定使用者已授權。清理既有資料前先提供範圍與數量，經使用者同意後建立可還原備份。
+
+## 發布日期背景查證
+
+桌面背景工作會提供 `job_id`。先用 `gallery_get_agent_job` 讀取指定圖片與線索，
+每批最多 50 張；`gallery_trace_publication_dates` 查 Danbooru 與原作品日期。
+長工具回傳 `run_id` 時，先以 `gallery_get_tool_run` 確認完成再使用結果。
+
+補查必須核對作者原貼文、圖片及作品頁碼。以 `gallery_submit_publication_sources`
+提交原貼文、該作品圖片 URL、作者頁及核對理由；後端重新解析發布時間。
+來源發布時間是圖片中繼資料，不建立年份標籤；下載時間、收錄時間與 CDN 修訂日期
+不能代替發布時間。未知保持未知。完成本批後用 `gallery_complete_agent_batch`，
+由後端對已確認圖片重新編號並留下還原紀錄，不直接執行 SQL 或改檔名。
+
+畫師背景工作使用 `gallery_submit_artist_identity` 提交作者頁互連依據，
+未確認則傳 `confirmed=false`。工作已停止時不再提交；沿用該工作的 Prompt 快照，
+不以其他任務的圖片或猜測資料填補。

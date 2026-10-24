@@ -135,6 +135,10 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
           closeScheduleModal();
           return;
         }
+        if (document.getElementById('dedup-modal')?.classList.contains('open')) {
+          closeDedupModal();
+          return;
+        }
         if (document.getElementById('detail-modal').classList.contains('open')) closeDetailModal();
         return;
       }
@@ -153,6 +157,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
         }
         return;
       }
+      if (window.GalleryApp?.runtime.navigation?.workspace === 'ai') return;
       if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || e.repeat) return;
       if (e.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), video')) return;
       const detailOpen = document.getElementById('detail-modal').classList.contains('open');
@@ -763,7 +768,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       if (window.GalleryApp) return window.GalleryApp.api(url, options);
       const response = await fetch(url, options);
       const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || data.message || '??????');
+      if (!response.ok) throw new Error(data.detail || data.message || '檔案操作失敗');
       return data;
     }
 
@@ -833,7 +838,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
             state.detailImageId = null;
             state.detailIndex = -1;
             currentDetailData = null;
-            document.getElementById('dt-filename').textContent = '??????????';
+            document.getElementById('dt-filename').textContent = '正在載入下一張圖片…';
           } else {
             closeDetailModal();
             unlocked = true;
@@ -857,10 +862,10 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
           }
         }
         if (refreshed[0].status === 'rejected' || refreshed[0].value === false) {
-          showDeleteNotice('???????????????????????????');
+          showDeleteNotice('檔案已移至資源回收筒，但清單暫時無法補載，請重新整理。');
         }
       } catch (error) {
-        showDeleteNotice(`?????${error.message}`);
+        showDeleteNotice(`刪除失敗：${error.message}`);
       } finally {
         if (!unlocked) setImageFileBusy(false);
       }
@@ -1905,7 +1910,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       if (sumBar) {
         sumBar.innerHTML = `
           <span>🎯 可立即歸檔：<b>${d.total_ready_images}</b> 張圖片 ➔ 共 <b>${d.total_artist_folders}</b> 個繪師資料夾（➕ 新建 <b style="color:#fcd34d;">${d.new_folders_to_create}</b> 個 / 📁 併入既有 <b>${d.existing_folders_to_update}</b> 個）</span>
-          <span style="color:var(--text-muted); font-size:12px;">根目錄尚有 ${d.untagged_root_remaining.toLocaleString()} 張未打標圖片</span>
+          <span style="color:var(--text-muted); font-size:12px;">根目錄尚有 ${d.untagged_root_remaining.toLocaleString()} 張未打標圖片 · ${d.pending_identity || 0} 張畫師身分待確認（AI 設定 → Tool 設定 → 畫師身分）</span>
         `;
       }
 
@@ -1978,7 +1983,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       const btn = document.getElementById('btn-org-exec');
       const oldText = btn ? btn.textContent : '';
       if (btn) {
-        btn.textContent = '⏳ 正在建立繪師資料夾並搬移圖片...';
+        btn.textContent = '⏳ 正在查證畫師身分並歸檔...';
         btn.disabled = true;
       }
       try {
@@ -1994,7 +1999,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
           })
         });
         const d = await r.json();
-        alert(`✅ 歸檔完成！\n• 共搬移歸檔：${d.moved} 張圖片\n• 新建繪師資料夾：${d.new_folders_created || 0} 個\n• 併入既有繪師資料夾：${d.existing_folders_updated || 0} 個`);
+        alert(`✅ 歸檔完成！\n• 共搬移歸檔：${d.moved} 張圖片\n• 新建繪師資料夾：${d.new_folders_created || 0} 個\n• 併入既有繪師資料夾：${d.existing_folders_updated || 0} 個\n• 畫師身分待確認：${d.pending_identity || 0} 張（AI 設定 → Tool 設定 → 畫師身分）`);
         await loadArtistFoldersPreview();
         await loadStats();
         await loadFolders();
@@ -2072,6 +2077,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
     }
 
     async function loadRenamePreview() {
+      if (window.GalleryAgent && document.getElementById('rn-mode')?.value === 'publication') return window.GalleryAgent.preview();
       const folder = document.getElementById('rn-folder').value;
       const pad = document.getElementById('rn-pad').value;
       const cdate = document.getElementById('rn-date').value.trim();
@@ -2137,6 +2143,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
     }
 
     async function executeRename() {
+      if (window.GalleryAgent && document.getElementById('rn-mode')?.value === 'publication') return window.GalleryAgent.start();
       const folder = document.getElementById('rn-folder').value;
       const pad = parseInt(document.getElementById('rn-pad').value, 10);
       const cdate = document.getElementById('rn-date').value.trim() || null;
@@ -2215,6 +2222,254 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       alert(`✅ 已成功還原 ${d.restored || 0} 個檔案的原始檔名！`);
       await loadRenameLogsView();
       await loadImages();
+    }
+
+    /* Duplicate & Visual Similarity Cleanup Functions */
+    let currentDedupPreview = null;
+    let selectedDedupIds = new Set();
+
+    function formatFileSize(bytes) {
+      const b = Number(bytes) || 0;
+      if (b >= 1024 * 1024) return `${(b / (1024 * 1024)).toFixed(2)} MB`;
+      if (b >= 1024) return `${(b / 1024).toFixed(1)} KB`;
+      return `${b} B`;
+    }
+
+    function openDedupModal() {
+      const sel = document.getElementById('dedup-folder');
+      if (sel) {
+        let opts = `<option value="__ALL__">🌟 全圖庫所有資料夾</option>`;
+        opts += `<option value="__ROOT__">🚨 僅根目錄待整理圖片</option>`;
+        for (const f of (state.folders || [])) {
+          const selectedAttr = (state.folder === f.name) ? 'selected' : '';
+          opts += `<option value="${escapeHtml(f.name)}" ${selectedAttr}>📁 ${escapeHtml(f.name)} (${f.count} 張)</option>`;
+        }
+        sel.innerHTML = opts;
+        if (state.folder && state.folder !== '__ALL__' && state.folder !== '__FOLDERS__' && state.folder !== '__SUGGESTED__') {
+          sel.value = state.folder;
+        }
+      }
+      document.getElementById('dedup-modal').classList.add('open');
+      loadDedupPreview();
+    }
+
+    function closeDedupModal() {
+      document.getElementById('dedup-modal').classList.remove('open');
+    }
+
+    async function loadDedupPreview() {
+      const mode = document.getElementById('dedup-mode')?.value || 'both';
+      const scope = document.getElementById('dedup-scope')?.value || 'same_folder';
+      const folder = document.getElementById('dedup-folder')?.value || '__ALL__';
+      const box = document.getElementById('dedup-preview-box');
+      const sumBar = document.getElementById('dedup-summary-bar');
+      const execBtn = document.getElementById('btn-dedup-exec');
+      const scanBtn = document.getElementById('btn-dedup-scan');
+
+      if (box) box.innerHTML = `<div style="padding:24px; text-align:center; color:var(--text-muted);">⏳ 正在掃描圖庫並比對 SHA-256 與 512×512 像素結構相似度 (SSIM/MAE)...</div>`;
+      if (sumBar) sumBar.innerHTML = `<span>正在掃描比對中，請稍候...</span>`;
+      if (execBtn) execBtn.disabled = true;
+      if (scanBtn) scanBtn.disabled = true;
+
+      try {
+        const params = new URLSearchParams({ mode, scope, folder, max_groups: '300' });
+        const r = await fetch(`/api/dedup/preview?${params.toString()}`);
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || d.message || '掃描失敗');
+
+        currentDedupPreview = d;
+        selectedDedupIds = new Set(d.all_delete_ids || []);
+        renderDedupPreview();
+      } catch (err) {
+        if (sumBar) sumBar.innerHTML = `<span style="color:#f87171;">⚠️ 掃描失敗：${escapeHtml(err.message)}</span>`;
+        if (box) box.innerHTML = `<div style="padding:20px; color:#f87171;">無法完成重複圖片比對：${escapeHtml(err.message)}</div>`;
+      } finally {
+        if (scanBtn) scanBtn.disabled = false;
+      }
+    }
+
+    function toggleDedupCheckbox(dupId, checked) {
+      if (checked) selectedDedupIds.add(dupId);
+      else selectedDedupIds.delete(dupId);
+      updateDedupSummaryBar();
+    }
+
+    function selectDedupFilter(filterType) {
+      if (!currentDedupPreview) return;
+      selectedDedupIds.clear();
+      if (filterType === 'all') {
+        for (const id of (currentDedupPreview.all_delete_ids || [])) selectedDedupIds.add(id);
+      } else if (filterType === 'exact') {
+        for (const g of (currentDedupPreview.groups || [])) {
+          if (g.match_type === 'exact') {
+            for (const dup of (g.duplicates || [])) selectedDedupIds.add(dup.id);
+          }
+        }
+      }
+      document.querySelectorAll('#dedup-preview-box input[data-dup-id]').forEach(cb => {
+        cb.checked = selectedDedupIds.has(Number(cb.dataset.dupId));
+      });
+      updateDedupSummaryBar();
+    }
+
+    function updateDedupSummaryBar() {
+      const d = currentDedupPreview;
+      const sumBar = document.getElementById('dedup-summary-bar');
+      const execBtn = document.getElementById('btn-dedup-exec');
+      if (!d || !sumBar) return;
+
+      let selectedBytes = 0;
+      for (const g of (d.groups || [])) {
+        for (const dup of (g.duplicates || [])) {
+          if (selectedDedupIds.has(dup.id)) selectedBytes += (dup.size_bytes || 0);
+        }
+      }
+      const selectedCount = selectedDedupIds.size;
+      if (execBtn) {
+        execBtn.disabled = selectedCount === 0;
+        execBtn.textContent = selectedCount > 0
+          ? `🗑️ 清除勾選的 ${selectedCount} 張重複圖片 (釋放 ${formatFileSize(selectedBytes)})`
+          : `🗑️ 請勾選要清除的重複圖片`;
+      }
+
+      sumBar.innerHTML = `
+        <div>
+          📊 已掃描 <b>${(d.total_scanned || 0).toLocaleString()}</b> 張圖片 ➔ 發現 <b>${d.total_groups || 0}</b> 組重複/相似群組
+          （⚡ 完全重複 <b style="color:#fcd34d;">${d.exact_duplicate_images || 0}</b> 張 ／ 👁️ 視覺相似 <b style="color:#38bdf8;">${d.visual_duplicate_images || 0}</b> 張）
+          · 目前勾選清除 <b style="color:#f87171;">${selectedCount}</b> 張（預計釋放 <b>${formatFileSize(selectedBytes)}</b>）
+        </div>
+        <div style="display:flex; gap:6px;">
+          <button type="button" class="btn" style="padding:2px 8px; font-size:11px;" onclick="selectDedupFilter('all')">全選 (${d.total_duplicate_images || 0})</button>
+          <button type="button" class="btn" style="padding:2px 8px; font-size:11px;" onclick="selectDedupFilter('exact')">僅選完全重複 (${d.exact_duplicate_images || 0})</button>
+          <button type="button" class="btn" style="padding:2px 8px; font-size:11px;" onclick="selectDedupFilter('none')">取消全選</button>
+        </div>
+      `;
+    }
+
+    function renderDedupPreview() {
+      const d = currentDedupPreview;
+      const box = document.getElementById('dedup-preview-box');
+      if (!d || !box) return;
+      updateDedupSummaryBar();
+
+      const groups = d.groups || [];
+      if (!groups.length) {
+        box.innerHTML = `<div style="padding:32px; text-align:center; color:#34d399; font-size:14px; font-weight:600;">
+          🎉 太棒了！在目前選擇的範圍內沒有發現任何完全重複或視覺重壓縮的冗餘圖片。
+        </div>`;
+        return;
+      }
+
+      box.innerHTML = groups.map(g => {
+        const keep = g.keep;
+        const isExact = g.match_type === 'exact';
+        const badgeHtml = isExact
+          ? `<span style="background:rgba(245,158,11,0.2); color:#fcd34d; border:1px solid #f59e0b; padding:1px 7px; border-radius:4px; font-size:11px; font-weight:700;">⚡ 完全重複 (SHA-256 100%)</span>`
+          : `<span style="background:rgba(56,189,248,0.18); color:#38bdf8; border:1px solid #0284c7; padding:1px 7px; border-radius:4px; font-size:11px; font-weight:700;">👁️ 視覺相同 / 縮圖重壓縮</span>`;
+        const keepDim = (keep.width && keep.height) ? `${keep.width}×${keep.height}` : '原始尺寸';
+        const keepFolder = keep.folder ? `📁 ${escapeHtml(keep.folder)}` : '📂 根目錄';
+
+        const dupsHtml = (g.duplicates || []).map(dup => {
+          const checked = selectedDedupIds.has(dup.id) ? 'checked' : '';
+          const dupDim = (dup.width && dup.height) ? `${dup.width}×${dup.height}` : '未知尺寸';
+          const dupFolder = dup.folder ? `📁 ${escapeHtml(dup.folder)}` : '📂 根目錄';
+          return `
+            <label style="display:flex; align-items:center; gap:10px; padding:6px 8px; background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.3); border-radius:6px; cursor:pointer;">
+              <input type="checkbox" data-dup-id="${dup.id}" ${checked} onchange="toggleDedupCheckbox(${dup.id}, this.checked)" style="width:16px; height:16px;" />
+              <a href="/api/raw/${dup.id}" target="_blank" title="點擊在新分頁檢視原圖" onclick="event.stopPropagation()">
+                <img src="/api/thumb/${dup.id}" alt="${escapeHtml(dup.filename)}" loading="lazy" style="width:54px; height:54px; object-fit:cover; border-radius:4px; border:1px solid var(--border);" />
+              </a>
+              <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:2px;">
+                <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                  <span style="color:#fca5a5; font-weight:700;">🗑️ 待清除副本</span>
+                  <span style="color:#94a3b8; font-size:11px;">${dupFolder}</span>
+                  <code style="color:#f8fafc; font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(dup.filename)}</code>
+                </div>
+                <div style="color:#cbd5e1; font-size:11px;">
+                  解析度：<b>${dupDim}</b> · 大小：<b>${formatFileSize(dup.size_bytes)}</b> · <span style="color:#fcd34d;">${escapeHtml(dup.reason || '')}</span>
+                </div>
+              </div>
+            </label>
+          `;
+        }).join('');
+
+        return `
+          <div style="padding:10px; background:rgba(255,255,255,0.025); border:1px solid var(--border); border-radius:8px; display:flex; flex-direction:column; gap:8px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px; border-bottom:1px solid rgba(255,255,255,0.06); padding-bottom:6px;">
+              <div style="display:flex; align-items:center; gap:8px;">
+                <b style="color:#e2e8f0;">群組 #${g.group_id}</b>
+                ${badgeHtml}
+                <span style="color:var(--text-muted); font-size:11px;">位置：${escapeHtml(g.folder || '根目錄')}</span>
+              </div>
+              <span style="color:#94a3b8; font-size:11px;">可釋放 ${formatFileSize(g.reclaim_bytes)}</span>
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1.2fr; gap:10px; align-items:start;">
+              <div style="display:flex; align-items:center; gap:10px; padding:6px 8px; background:rgba(16,185,129,0.09); border:1px solid rgba(16,185,129,0.35); border-radius:6px;">
+                <a href="/api/raw/${keep.id}" target="_blank" title="點擊在新分頁檢視保留原圖">
+                  <img src="/api/thumb/${keep.id}" alt="${escapeHtml(keep.filename)}" loading="lazy" style="width:60px; height:60px; object-fit:cover; border-radius:4px; border:1px solid #10b981;" />
+                </a>
+                <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:2px;">
+                  <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                    <span style="color:#6ee7b7; font-weight:700;">✅ 保留最佳版本</span>
+                    <span style="color:#94a3b8; font-size:11px;">${keepFolder}</span>
+                  </div>
+                  <code style="color:#f8fafc; font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(keep.filename)}</code>
+                  <div style="color:#cbd5e1; font-size:11px;">
+                    解析度：<b style="color:#34d399;">${keepDim}</b> · 大小：<b>${formatFileSize(keep.size_bytes)}</b>
+                  </div>
+                </div>
+              </div>
+              <div style="display:flex; flex-direction:column; gap:6px;">
+                ${dupsHtml}
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function executeDedupCleanup() {
+      if (!currentDedupPreview || !selectedDedupIds.size) return;
+      const count = selectedDedupIds.size;
+      if (!confirm(`確定要清除勾選的 ${count} 張重複/相似圖片嗎？\n\n• 系統將自動保留每組最高解析度版本並繼承標籤\n• 自動建立 SQLite 資料庫備份\n• 被清除的檔案將移至 Windows 資源回收筒（可隨時還原）`)) return;
+
+      const btn = document.getElementById('btn-dedup-exec');
+      const oldText = btn ? btn.textContent : '';
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = '⏳ 正在合併標籤並移至資源回收筒...';
+      }
+
+      try {
+        const r = await fetch('/api/dedup/execute', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            mode: document.getElementById('dedup-mode')?.value || 'both',
+            scope: document.getElementById('dedup-scope')?.value || 'same_folder',
+            folder: document.getElementById('dedup-folder')?.value || '__ALL__',
+            groups: currentDedupPreview.groups || [],
+            selected_delete_ids: Array.from(selectedDedupIds),
+          })
+        });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || d.message || '清除失敗');
+
+        alert(`✅ 清除完成！\n• 已移至資源回收筒：${d.deleted_count} 張圖片\n• 釋放空間：${d.reclaimed_mb} MB\n• 繼承合併標籤：${d.merged_tag_links} 筆\n• 資料庫備份：${d.backup_file || '已完成'}`);
+        await loadDedupPreview();
+        await loadStats();
+        await loadFolders();
+        await loadTags();
+        await loadImages();
+      } catch (err) {
+        alert('清除重複圖片失敗：' + err.message);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = oldText;
+        }
+        updateDedupSummaryBar();
+      }
     }
 
     /* Semantic Correlation & Gemini MCP Functions */
@@ -2338,6 +2593,27 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       await loadImages();
     }
 
+    function captureCurrentVideoFrameDataUrl(maxDim = 720) {
+      try {
+        const container = document.getElementById('detail-media-container');
+        const videoEl = container && typeof container.querySelector === 'function' ? container.querySelector('video') : null;
+        if (!videoEl || !videoEl.videoWidth || !videoEl.videoHeight) return null;
+        const w = videoEl.videoWidth;
+        const h = videoEl.videoHeight;
+        const scale = Math.min(1, maxDim / Math.max(w, h));
+        const cw = Math.max(1, Math.round(w * scale));
+        const ch = Math.max(1, Math.round(h * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = cw;
+        canvas.height = ch;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(videoEl, 0, 0, cw, ch);
+        return canvas.toDataURL('image/jpeg', 0.92);
+      } catch (e) {
+        return null;
+      }
+    }
+
     async function runSingleUnifiedTagAndCalibrate() {
       if (!currentDetailData) return;
       const btn = document.getElementById('btn-single-unified');
@@ -2347,25 +2623,30 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       const oldText = label.textContent;
       const oldHint = hint.textContent;
       const oldHintHidden = hint.hidden;
+      const isVideo = currentDetailData.media_type === 'video';
+      const frameDataUrl = isVideo ? captureCurrentVideoFrameDataUrl(720) : null;
+      const reqInit = frameDataUrl
+        ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ frame_data_url: frameDataUrl }) }
+        : { method: 'POST' };
       if (btn) {
         label.textContent = 'AI 辨識中…';
-        hint.textContent = '步驟 1/2 · 正在辨識圖片內容與標籤';
+        hint.textContent = isVideo ? '步驟 1/2 · 正在擷取單一畫面截圖進行 AI 辨識' : '步驟 1/2 · 正在辨識圖片內容與標籤';
         hint.hidden = false;
         btn.disabled = true;
       }
       if (revBox) revBox.style.display = 'none';
 
       try {
-        // 階段 1：先執行本機 GPU AI 視覺打標
-        await fetch(`/api/ai/single/${currentDetailData.id}`, { method: 'POST' });
+        // 階段 1：先執行本機 GPU AI 視覺打標（影片使用單一畫面截圖）
+        await fetch(`/api/ai/single/${currentDetailData.id}`, reqInit);
         await refreshDetailView(currentDetailData.id);
 
-        // 階段 2：接著執行 Danbooru / IQDB / SauceNAO / Google Lens 以圖搜圖校正畫師
+        // 階段 2：接著執行 Danbooru / IQDB / SauceNAO / Google Lens 以圖搜圖校正畫師（影片使用單一畫面截圖）
         if (btn) {
           label.textContent = '搜圖校正中…';
-          hint.textContent = '步驟 2/2 · 正在比對畫師與校正標籤';
+          hint.textContent = isVideo ? '步驟 2/2 · 正在以單一畫面截圖比對畫師與校正標籤' : '步驟 2/2 · 正在比對畫師與校正標籤';
         }
-        const r = await fetch(`/api/reverse_search/single/${currentDetailData.id}`, { method: 'POST' });
+        const r = await fetch(`/api/reverse_search/single/${currentDetailData.id}`, reqInit);
         const d = await r.json();
         if (r.ok) {
           const rev = d.reverse_search_result || {};
@@ -2781,6 +3062,9 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
     let opLogTimer = null;
 
     function openSettings(section = 'browse') {
+      if (window.GalleryApp?.runtime.navigation?.isAiSection(section)) {
+        return GalleryApp.runtime.navigation.openAi(section);
+      }
       settingsReturnFocus = document.activeElement;
       hideHoverPreview();
       syncBrowsePreferences();
@@ -2794,6 +3078,9 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
     function openScheduleModal() { openSettings('schedule'); }
 
     function switchSettingsTab(section) {
+      if (window.GalleryApp?.runtime.navigation?.isAiSection(section)) {
+        return GalleryApp.runtime.navigation.openAi(section);
+      }
       const base = function (section) {
       closeTimePicker();
       for (const name of ['browse', 'schedule', 'history']) {

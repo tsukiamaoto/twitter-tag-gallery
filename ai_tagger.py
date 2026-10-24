@@ -57,12 +57,10 @@ def _preprocess_image(image_path: str, image_size: int = 512) -> Optional[np.nda
     """將圖片或影片影格預處理為 (1, 3, 512, 512) float32 Tensor，保持長寬比並做 ImageNet 標準化"""
     try:
         if str(image_path).lower().endswith(".mp4"):
-            import io
             from thumbnail_cache import _extract_video_thumbnail
-            frame_bytes = _extract_video_thumbnail(Path(image_path), max_size=max(512, image_size))
-            if not frame_bytes:
+            img_ctx = _extract_video_thumbnail(Path(image_path), max_size=max(512, image_size))
+            if img_ctx is None:
                 return None
-            img_ctx = Image.open(io.BytesIO(frame_bytes))
         else:
             img_ctx = Image.open(image_path)
         with img_ctx as img:
@@ -193,7 +191,7 @@ class AITaggerEngine:
         tensor: np.ndarray,
         general_thresh: float = 0.38,
         character_thresh: float = 0.45,
-        copyright_thresh: float = 0.45,
+        copyright_thresh: float = 0.85,
         artist_thresh: float = 0.65,
     ) -> Tuple[List[Tuple[str, str, float]], Optional[str]]:
         """
@@ -626,6 +624,7 @@ class AITaggerEngine:
             rev_found_count = 0
             rev_purged_count = 0
             moved_total = 0
+            identity_pending_count = 0
             pending_moves: Dict[str, List[int]] = {}
 
             # =========================================================================
@@ -726,7 +725,7 @@ class AITaggerEngine:
                                     tensor,
                                     general_thresh=eff_gen_t,
                                     character_thresh=max(0.40, eff_gen_t),
-                                    copyright_thresh=max(0.40, eff_gen_t),
+                                    copyright_thresh=max(0.85, eff_gen_t),
                                     artist_thresh=eff_art_t,
                                 )
                                 best_artist_conf = 0.0
@@ -784,6 +783,13 @@ class AITaggerEngine:
             # 階段 ① 結束後，若開啟 auto_unload 立即先釋放 GPU VRAM，讓後續以圖搜圖完全不佔顯卡記憶體！
             if auto_unload and self.model_loaded and not self.stop_requested:
                 self.unload_model(delete_disk_files=False, stop_running_task=False)
+
+            if run_local_ai and ai_rows and not self.stop_requested:
+                from artist_identity import resolve_image_folders
+                self.status_message = "正在查證畫師跨平台身分（Danbooru；未確認者交由 MCP 補查）..."
+                update_job(stage=self.status_message)
+                identity_report = resolve_image_folders([r["id"] for r in ai_rows])
+                identity_pending_count = len(identity_report["pending_image_ids"])
 
             # =========================================================================
             # 階段 ②：三段式智慧分流 — 第 2 & 3 段：
@@ -969,7 +975,7 @@ class AITaggerEngine:
                     pass
 
             if auto_move_to_artist_folder and pending_moves and not self.stop_requested:
-                from gallery_service import move_images_to_folder
+                from gallery_service import move_images_to_artist_folder as move_images_to_folder
                 for target_f, iids in pending_moves.items():
                     unique_iids = list(dict.fromkeys(iids))
                     m_res = move_images_to_folder(unique_iids, target_f, auto_rename=True, refresh_counts=False)
@@ -996,6 +1002,8 @@ class AITaggerEngine:
             if ai_failures_count:
                 self.status_message+=f"；{ai_failures_count} 張圖片解碼失敗，保留待重試"
                 update_job(status="failed",last_error=f"{ai_failures_count} 張圖片解碼失敗",stage="部分完成")
+            if identity_pending_count:
+                self.status_message += f"；{identity_pending_count} 張畫師身分待確認（設定 → 畫師身分）"
             log_operation(
                 category="ai",
                 action="智慧標籤批次處理 (已暫停)" if self.stop_requested else "智慧標籤三段式批次處理",
@@ -1011,6 +1019,7 @@ class AITaggerEngine:
                     "purged_wrong_ai_tags": rev_purged_count,
                     "decensored_count": decensored_count if run_decensor else 0,
                     "moved_to_artist_folders": moved_total,
+                    "pending_artist_identity": identity_pending_count,
                     "speed_img_per_sec": round(self.speed_img_per_sec, 2),
                     "provider": self.active_provider,
                 },
@@ -1238,6 +1247,14 @@ def lookup_pixiv_artists_batch(
     # =========================================================================
     # 第 4 層：一次性開啟短交易寫入所有結果，並為所有查驗過的圖片加上 pixiv_checked 標記
     # =========================================================================
+    from artist_identity import resolve as resolve_identity
+    pixiv_identity_folders = {}
+    for pid, body in pixiv_api_results.items():
+        user_name, user_id = body.get("userName"), body.get("userId")
+        if user_name:
+            background_checkpoint()
+            identity = resolve_identity(user_name, [f"https://www.pixiv.net/users/{user_id}"] if user_id else [])
+            pixiv_identity_folders[pid] = identity.get("folder_name")
     db_conn = get_db()
     try:
         tag_cache: Dict[str, int] = {
@@ -1260,7 +1277,7 @@ def lookup_pixiv_artists_batch(
                 user_name = body.get("userName")
                 if user_name:
                     tid_artist = ensure_tag(c, tag_cache, user_name, "artist", source="pixiv")
-                    sug_folder = resolve_artist_folder_name(user_name)
+                    sug_folder = pixiv_identity_folders.get(pid)
                     for iid in img_ids:
                         if tid_artist > 0:
                             links.append((iid, tid_artist, 1.0, "pixiv"))
@@ -1335,7 +1352,7 @@ def lookup_pixiv_artists_batch(
 
     moved_total = 0
     if auto_move_to_artist_folder and pending_moves:
-        from gallery_service import move_images_to_folder
+        from gallery_service import move_images_to_artist_folder as move_images_to_folder
         for target_f, iids in pending_moves.items():
             unique_iids = list(dict.fromkeys(iids))
             m_res = move_images_to_folder(unique_iids, target_f, auto_rename=True, refresh_counts=False)

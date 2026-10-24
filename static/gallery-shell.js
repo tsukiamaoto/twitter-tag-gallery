@@ -33,7 +33,6 @@
   let modelActionPending = false;
   let latestModelStatus = null;
   let smartReturnFocus = null;
-  let returnToSmartTag = false;
   let folderPreferences = { pinned: [], recent: [], sort: 'name' };
   let foldersReady = false;
   let folderLoadError = '';
@@ -80,9 +79,10 @@
     sidebar.setAttribute('role', isOpen ? 'dialog' : 'complementary');
     if (isOpen) sidebar.setAttribute('aria-modal', 'true');
     else sidebar.removeAttribute('aria-modal');
-    byId('shell-open-filters').setAttribute('aria-expanded', String(isOpen));
+    for (const id of ['shell-open-filters', 'ai-open-navigation']) byId(id)?.setAttribute('aria-expanded', String(isOpen));
     document.querySelector('main').inert = isOpen;
     document.querySelector('header').inert = isOpen;
+    if (byId('workspace-rail')) byId('workspace-rail').inert = isOpen;
     if (isOpen) {
       drawerTrigger = document.activeElement;
       byId('shell-close-filters').focus();
@@ -120,8 +120,8 @@
       ['openRenameModal()', '批次改名與排序'],
       ['openOrganizeModal()', '資料夾歸檔精靈'],
       ["openSettings('history')", '系統操作與處理日誌'],
-
       ['rescanLibrary()', '重新掃描圖庫'],
+      ['openDedupModal()', '清除重複圖片'],
       ['unloadAiModel(false)', '卸載模型・釋放記憶體'],
     ];
     for (const [handler, text] of toolLabels) {
@@ -548,10 +548,7 @@
     byId('smart-close').addEventListener('click', () => window.closeAiModal());
     byId('smart-close-footer').addEventListener('click', () => window.closeAiModal());
     byId('smart-model-settings').addEventListener('click', () => {
-      window.closeAiModal();
-      window.openSettings('model');
-      returnToSmartTag = true;
-      byId('btn-close-settings').textContent = '返回智慧標籤';
+      GalleryApp.runtime.navigation.openModelFromSmart();
     });
     byId('smart-model-settings').setAttribute('aria-label', '前往 AI 模型設定');
     GalleryApp.use('openAiModal', function (next, ...args) {
@@ -650,15 +647,8 @@
       window.switchSettingsTab(names[next]);
       byId(`settings-tab-${names[next]}`).focus();
     });
-    GalleryApp.use('closeScheduleModal', function (next, ...args) {
-      const result = next(...args);
-      if (returnToSmartTag) {
-        returnToSmartTag = false;
-        byId('btn-close-settings').textContent = '完成';
-        window.openAiModal();
-        byId('smart-model-settings').focus();
-      }
-      return result;
+    GalleryApp.on('workspace:change', navigation => {
+      if (navigation.workspace === 'ai' && navigation.section === 'model') void window.checkAiStatus();
     });
     GalleryApp.use('syncModelUiState', (next, status) => { const result = next(status); syncSmartModel(status); return result; });
     GalleryApp.use('loadAiModelNow', () => runModelAction(false, false));
@@ -922,6 +912,7 @@
     }
     if (menu.open && ['ArrowLeft', 'ArrowRight'].includes(event.key)) event.stopImmediatePropagation();
     if (event.key === '/' && !event.ctrlKey && !event.altKey && !event.metaKey && !event.isComposing &&
+        (!GalleryApp.runtime.navigation || GalleryApp.runtime.navigation.workspace === 'home') &&
         !event.target.closest('input, textarea, select, [contenteditable="true"]') && !document.querySelector('.modal-backdrop.open')) {
       event.preventDefault(); byId('main-search').focus();
     }
@@ -931,6 +922,7 @@
     if (!document.querySelector('body > header .stats-bar') || !byId('main-search')) return;
     setupHeader();
     setupSidebar();
+    GalleryApp.runtime.setDrawer = setDrawer;
     setupBrowsing();
     setupFolderBrowser();
     setupSmartTagging();

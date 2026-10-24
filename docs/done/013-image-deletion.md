@@ -58,3 +58,12 @@
 完整 Python 109 項、JavaScript 23 項與五組瀏覽器測試通過。新增情境刻意延遲清單回應、回傳舊清單及模擬補載失敗，並驗證跨頁下一張、最後一張退回上一張、重複刪除舊詳情及全空關閉；均使用暫存圖庫或模擬 API。
 
 修正已載入正式服務；重新啟動前確認圖庫沒有進行中的工作，只更換已辨識的服務程序。清單 API 回傳 200，前端已提供自動下一張與保留更新清單的版本；紀錄見 `.tag_gallery/delete_refresh_activation_20261021_205716.json`。本次套用未刪除任何正式圖片或圖片紀錄。
+
+## 系統資源回收筒直連與刪除效能最佳化（2026-10-23）
+
+針對機械硬碟（`D:\圖檔\twitter`）刪除圖片耗時數秒至十餘秒的瓶頸進行改版：
+
+- **改用 Windows 系統資源回收筒**：移除自建 `.tag_gallery/trash/<operation_id>/` 兩階段搬移與檔案交易日誌，改由 `SHFileOperationW`（`FO_DELETE` + `FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT`）直接將檔案批次移入 Windows 資源回收筒，並將既有 `.tag_gallery/trash` 內 20 個檔案移入系統資源回收筒後清理目錄。
+- **單一資料庫交易與索引最佳化**：`delete_images` 於單一 SQLite 交易內完成 `DELETE FROM images`、`refresh_tag_counts` 與資源回收筒移入（任一步驟失敗即自動回滾）；移除重複的 `idx_image_tags_img` 索引、將 `idx_image_tags_tag` 升級為 `(tag_id, image_id)` 覆蓋索引，並新增 `idx_images_folder_mtime(folder, mtime)` 覆蓋索引。
+- **快取原位更新**：新增 `remove_deleted_images_from_cache`，在刪除後直接從 `natural_order` 快取過濾已刪除的圖片 ID，避免每次刪除都重新對 3 萬筆路徑執行 `StrCmpLogicalW` 全量排序。
+- **無確認視窗、無成功橫幅、立即解鎖連續刪除**：移除刪除前 `window.confirm` 與介面內「復原剛才刪除／復原上次刪除」按鈕；一般刪除成功時不再顯示頂部提示橫幅（僅在刪除失敗或補載異常時顯示）；`/api/images/delete` 完成並切換目標圖片 ID 後立即解除按鈕與 `Del` 快捷鍵鎖定，不再等待背景原圖解碼或側欄重載。

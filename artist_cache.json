@@ -10341,15 +10341,45 @@
   },
   "mikozin": {
     "name": "mikozin",
-    "other_names": [],
+    "other_names": [
+      "みこさぶ",
+      "みこじん",
+      "ミコジン",
+      "二休み",
+      "futayasumi",
+      "huhuhu13422",
+      "huhuuhusab",
+      "mikojin"
+    ],
     "cjk_name": "みこさぶ",
     "twitter_handles": [
       "huhuhu13422",
       "huhuuhusab"
     ],
-    "pixiv_user_id": null,
-    "urls": [],
-    "suggested_folder": "mikozin",
+    "pixiv_user_id": "767724",
+    "urls": [
+      "https://www.pixiv.net/fanbox/creator/767724",
+      "https://skeb.jp/@huhuhu13422",
+      "https://fantia.jp/fanclubs/196996",
+      "https://www.dlsite.com/maniax/circle/profile/=/maker_id/RG01007173.html",
+      "https://marshmallow-qa.com/mikosab13422",
+      "https://www.melonbooks.co.jp/circle/index.php?circle_id=117087",
+      "https://wavebox.me/wave/e9uaebacbvgsoq6z",
+      "https://www.nicovideo.jp/user/11856721",
+      "https://seiga.nicovideo.jp/user/illust/11856721",
+      "https://www.pixiv.net/users/767724",
+      "https://misskey.io/@mikoji",
+      "https://misskey.io/users/9d135sjs7h",
+      "https://bsky.app/profile/huhuhu13422.bsky.social",
+      "https://bsky.app/profile/did:plc:b457koixwlse5hf3ztfg63pb",
+      "https://mikozinn.fanbox.cc",
+      "https://www.pixiv.net/stacc/mikozinn",
+      "https://fantia.jp/4b0dd7f6cb",
+      "https://x.com/huhuhu13422",
+      "https://x.com/huhuuhusab",
+      "https://x.com/i/user/1469710956",
+      "https://x.com/i/user/1586861276340244480"
+    ],
     "resolved": true
   },
   "nishiki_koi": {
@@ -19412,6 +19442,135 @@
       "https://x.com/loodnon",
       "https://x.com/nonateeb"
     ],
+    "suggested_folder": null,
+    "resolved": true
+  },
+  "url:https://www.pixiv.net/users/767724": {
+    "name": "mikozin",
+    "other_names": [
+      "みこさぶ",
+      "みこじん",
+      "ミコジン",
+      "二休み",
+      "futayasumi",
+      "huhuhu13422",
+      "huhuuhusab",
+      "mikojin"
+    ],
+    "cjk_name": "みこさぶ",
+    "twitter_handles": [
+      "huhuhu13422",
+      "huhuuhusab"
+    ],
+    "pixiv_user_id": "767724",
+    "urls": [
+      "https://www.pixiv.net/fanbox/creator/767724",
+      "https://skeb.jp/@huhuhu13422",
+      "https://fantia.jp/fanclubs/196996",
+      "https://www.dlsite.com/maniax/circle/profile/=/maker_id/RG01007173.html",
+      "https://marshmallow-qa.com/mikosab13422",
+      "https://www.melonbooks.co.jp/circle/index.php?circle_id=117087",
+      "https://wavebox.me/wave/e9uaebacbvgsoq6z",
+      "https://www.nicovideo.jp/user/11856721",
+      "https://seiga.nicovideo.jp/user/illust/11856721",
+      "https://www.pixiv.net/users/767724",
+      "https://misskey.io/@mikoji",
+      "https://misskey.io/users/9d135sjs7h",
+      "https://bsky.app/profile/huhuhu13422.bsky.social",
+      "https://bsky.app/profile/did:plc:b457koixwlse5hf3ztfg63pb",
+      "https://mikozinn.fanbox.cc",
+      "https://www.pixiv.net/stacc/mikozinn",
+      "https://fantia.jp/4b0dd7f6cb",
+      "https://x.com/huhuhu13422",
+      "https://x.com/huhuuhusab",
+      "https://x.com/i/user/1469710956",
+      "https://x.com/i/user/1586861276340244480"
+    ],
+    "resolved": true
+  },
+  "houkisei": {
+    "name": "houkisei",
+    "other_names": [
+      "ほうき星",
+      "houk1se1",
+      "Starship"
+    ],
+    "cjk_name": "ほうき星",
+    "twitter_handles": [
+      "houk1se1",
+      "yorunikutabetai"
+    ],
+    "pixiv_user_id": "70050825",
+    "urls": [
+      "https://www.melonbooks.co.jp/circle/index.php?circle_id=119193",
+      "https://houk1se1.fanbox.cc",
+      "https://fantia.jp/houkisei",
+      "https://skeb.jp/@houk1se1",
+      "https://space.bilibili.com/278027",
+      "https://www.patreon.com/houkisei",
+      "https://houk1se1.gumroad.com",
+      "https://www.instagram.com/houk1se1/",
+      "https://www.pixiv.net/users/70050825",
+      "https://fantia.jp/fanclubs/416233",
+      "https://www.pixiv.net/stacc/user_mmjw7432",
+      "https://ci-en.net/creator/14425",
+      "https://bsky.app/profile/houk1se1.bsky.social",
+      "https://bsky.app/profile/did:plc:4s7u2rh2pu7k44mdzovpu2vq",
+      "https://7311981650575.gumroad.com",
+      "https://www.pixiv.net/fanbox/creator/70050825",
+      "https://www.patreon.com/user?u=69653195",
+      "https://x.com/houk1se1",
+      "https://x.com/i/user/1407353400270929921",
+      "https://x.com/i/user/1673984540694683651",
+      "https://x.com/yorunikutabetai"
+    ],
+    "resolved": true
+  },
+  "url:https://www.pixiv.net/users/70050825": {
+    "name": "houkisei",
+    "other_names": [
+      "ほうき星",
+      "houk1se1",
+      "Starship"
+    ],
+    "cjk_name": "ほうき星",
+    "twitter_handles": [
+      "houk1se1",
+      "yorunikutabetai"
+    ],
+    "pixiv_user_id": "70050825",
+    "urls": [
+      "https://www.melonbooks.co.jp/circle/index.php?circle_id=119193",
+      "https://houk1se1.fanbox.cc",
+      "https://fantia.jp/houkisei",
+      "https://skeb.jp/@houk1se1",
+      "https://space.bilibili.com/278027",
+      "https://www.patreon.com/houkisei",
+      "https://houk1se1.gumroad.com",
+      "https://www.instagram.com/houk1se1/",
+      "https://www.pixiv.net/users/70050825",
+      "https://fantia.jp/fanclubs/416233",
+      "https://www.pixiv.net/stacc/user_mmjw7432",
+      "https://ci-en.net/creator/14425",
+      "https://bsky.app/profile/houk1se1.bsky.social",
+      "https://bsky.app/profile/did:plc:4s7u2rh2pu7k44mdzovpu2vq",
+      "https://7311981650575.gumroad.com",
+      "https://www.pixiv.net/fanbox/creator/70050825",
+      "https://www.patreon.com/user?u=69653195",
+      "https://x.com/houk1se1",
+      "https://x.com/i/user/1407353400270929921",
+      "https://x.com/i/user/1673984540694683651",
+      "https://x.com/yorunikutabetai"
+    ],
+    "resolved": true
+  },
+  "url:https://www.pixiv.net/users/27028281": {
+    "name": "",
+    "other_names": [],
+    "cjk_name": null,
+    "twitter_handles": [],
+    "pixiv_user_id": null,
+    "urls": [],
     "resolved": true
   }
 }

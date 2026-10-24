@@ -139,6 +139,26 @@ class WorkflowToolTests(GalleryCase):
         self.assertEqual(value["result"]["errors"][0]["image_id"],iid)
         self.assertEqual(self.rows("SELECT ai_tagged FROM images WHERE id=?",iid)[0]["ai_tagged"],0)
 
+    def test_video_screenshot_artist_tracking_and_ai_analysis(self):
+        from PIL import Image
+        vname="topu2782_2113465827425178038_1500p_original.mp4"
+        (self.root/vname).write_bytes(b"mp4")
+        database.scan_library()
+        row=self.rows("SELECT id,media_type,suggested_folder FROM images WHERE filename=?",vname)[0]
+        self.assertEqual(row["media_type"],"video")
+        self.assertIsNone(row["suggested_folder"])
+        tags={r["name"]:r["category"] for r in self.rows("SELECT t.name,t.category FROM image_tags it JOIN tags t ON t.id=it.tag_id WHERE it.image_id=?",row["id"])}
+        self.assertNotIn("@topu2782",tags)
+        self.assertEqual(tags.get("Twitter原始檔名"),"source")
+        import ai_tagger, thumbnail_cache
+        frame=Image.new("RGB",(120,90),(30,60,90))
+        with patch("artist_identity.resolve", return_value={"status": "resolved", "folder_name": "Topu"}),patch.object(thumbnail_cache,"_extract_video_thumbnail",return_value=frame),patch.object(ai_tagger.tagger_engine,"predict_single",return_value=([("topu","artist",0.91),("arona_(blue_archive)","character",0.92),("blue_archive","copyright",0.96)],"Topu")):
+            detail=runtime.invoke("gallery_get_image_details",{"image_id":row["id"]})
+            self.assertTrue(detail["screenshot_path"].endswith(".jpg"))
+            run=self.wait_run(runtime.dispatch("gallery_analyze_images",{"image_ids":[row["id"]]})["id"])
+        self.assertEqual(run["status"],"succeeded")
+        self.assertEqual(self.rows("SELECT ai_tagged,suggested_folder FROM images WHERE id=?",row["id"])[0]["suggested_folder"],"Topu")
+
     def test_cancel_tool_can_stop_an_owned_write_job_without_acquiring_it_again(self):
         entered,release=threading.Event(),threading.Event()
         def scan():
@@ -147,6 +167,9 @@ class WorkflowToolTests(GalleryCase):
             run=runtime.dispatch("gallery_scan_library",{})
             self.assertTrue(entered.wait(1))
             try:
+                self.assertEqual(run["cancel_tool"], "gallery_cancel_job")
+                self.assertEqual(run["cancel_arguments"], {"job_id": run["job_id"]})
+                self.assertIsNone(run["agent_job_id"])
                 result=runtime.dispatch("gallery_cancel_job",{"job_id":run["job_id"]})
                 self.assertEqual(result["status"],"stopping")
                 self.assertEqual(runtime.dispatch("gallery_get_jobs",{})["active"]["id"],run["job_id"])
@@ -177,7 +200,7 @@ class WorkflowToolTests(GalleryCase):
 
     def test_readonly_policy_blocks_new_writes_and_keeps_queries(self):
         integrations.save({"mcp_read_only":True})
-        for name in ("gallery_scan_library","gallery_update_image_tags","gallery_analyze_images","gallery_move_images","gallery_recover_file_operations","gallery_undo_rename","gallery_cancel_job"):
+        for name in ("gallery_scan_library","gallery_update_image_tags","gallery_analyze_images","gallery_move_images","gallery_recover_file_operations","gallery_undo_rename","gallery_cancel_job","gallery_cancel_agent_job"):
             with self.subTest(name=name),self.assertRaises(PermissionError):runtime.dispatch(name,registry.CATALOG[name].example)
         self.assertEqual(runtime.dispatch("gallery_search_images",{})["total"],0)
         self.assertEqual(runtime.dispatch("gallery_get_jobs",{})["active"],{})

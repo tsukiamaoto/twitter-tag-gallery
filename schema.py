@@ -45,6 +45,38 @@ def migrate(conn):
           id TEXT PRIMARY KEY, kind TEXT NOT NULL, committed_at REAL NOT NULL
         );
         CREATE TABLE IF NOT EXISTS semantic_rules(theme TEXT PRIMARY KEY,rule_hash TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS artist_identities (
+          id INTEGER PRIMARY KEY, canonical_name TEXT NOT NULL,
+          folder_name TEXT NOT NULL COLLATE NOCASE UNIQUE, danbooru_id INTEGER UNIQUE,
+          source TEXT NOT NULL, evidence_json TEXT NOT NULL, updated_at REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS artist_identity_keys (
+          kind TEXT NOT NULL, value TEXT NOT NULL,
+          artist_id INTEGER NOT NULL REFERENCES artist_identities(id) ON DELETE CASCADE,
+          PRIMARY KEY(kind,value,artist_id)
+        );
+        CREATE TABLE IF NOT EXISTS artist_identity_requests (
+          request_key TEXT PRIMARY KEY, artist_name TEXT NOT NULL, profile_urls_json TEXT NOT NULL,
+          status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0,
+          last_error TEXT NOT NULL DEFAULT '', updated_at REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS publication_files (
+          image_id INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
+          original_filename TEXT NOT NULL, file_version TEXT NOT NULL,
+          content_hash TEXT NOT NULL, md5 TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS publication_sources (
+          image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+          source_url TEXT NOT NULL, published_at REAL NOT NULL,
+          content_hash TEXT NOT NULL, evidence_json TEXT NOT NULL, checked_at REAL NOT NULL,
+          PRIMARY KEY(image_id,source_url)
+        );
+        CREATE INDEX IF NOT EXISTS idx_publication_image ON publication_sources(image_id,published_at);
+        CREATE TABLE IF NOT EXISTS publication_attempts (
+          image_id INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
+          status TEXT NOT NULL, error TEXT NOT NULL DEFAULT '', retry_at REAL NOT NULL DEFAULT 0,
+          updated_at REAL NOT NULL
+        );
     """)
     if len(conn.execute("PRAGMA index_info(idx_image_tags_tag)").fetchall()) < 2:
         conn.execute("DROP INDEX IF EXISTS idx_image_tags_tag")

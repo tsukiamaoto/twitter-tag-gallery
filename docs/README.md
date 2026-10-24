@@ -1,6 +1,6 @@
 # WebUI 改善任務
 
-更新日期：2026-10-21
+更新日期：2026-10-24
 
 ## 工作方式
 
@@ -43,6 +43,8 @@
 | 017 標籤選取本機儲存 | done（已確認正式服務） | [實作與驗收](done/017-tag-filter-persistence.md) |
 | 017 繪師名稱顯示與別名合併 | done（已套用正式服務） | [實作與驗收](done/017-artist-names-and-aliases.md) |
 | 018 模型與自動標籤限制 | done（Web 已套用，模型 MCP 須重連） | [實作與驗收](done/018-core-generated-tags.md) |
+| 020 左側工具列與 AI 設定中心 | done | [整合與驗收](done/020-ai-workspace-navigation.md) |
+| 021 發布日期背景追查與 Prompt 編輯 | done | [實作與驗收](done/021-publication-agent.md) |
 
 新需求從 `todo/` 開始；正在實作或驗證的任務放在 `doing/`，通過驗收後移至 `done/`。空目錄以 `.gitkeep` 保留。
 

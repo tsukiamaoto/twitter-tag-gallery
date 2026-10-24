@@ -10,7 +10,7 @@
     byId('gguf-feedback').textContent = message;
     byId('gguf-feedback').classList.toggle('error', error);
   }
-  function visible() { return !document.hidden && !byId('settings-model').hidden && byId('schedule-modal').classList.contains('open'); }
+  function visible() { return !document.hidden && app.runtime.navigation?.isVisible('model'); }
   function render(data) {
     const previousPhase = latest?.runtime?.phase;
     latest = data;
@@ -91,7 +91,6 @@
       <details><summary>如何放入自己的模型</summary><ul class="settings-note"><li>主模型放入 diffusion_models，或直接放在此 GGUF 資料夾。</li><li>CLIP 編碼器放入 text_encoders，VAE 放入 vae。</li><li>按重新掃描後選擇模型系列；必要元件會在上方列出。</li><li>目前支援 WAI-NSFW-illustrious-SDXL v17.0 的 GGUF 影像模型。</li></ul></details><p class="settings-feedback" id="gguf-feedback" role="status" aria-live="polite"></p>`;
     panel.prepend(card);
     byId('gguf-scan').addEventListener('click', refresh);
-    byId('settings-tab-model').addEventListener('click', refresh);
     byId('gguf-copy-path').addEventListener('click', async () => {
       try { await navigator.clipboard.writeText(byId('gguf-directory').textContent); feedback('已複製模型資料夾路徑。'); }
       catch { feedback('無法複製，請選取上方路徑手動複製。', true); }
@@ -115,10 +114,9 @@
     byId('gguf-download-stop').addEventListener('click', () => action('/api/models/gguf/download/stop'));
     app.on('runtime', () => { if (visible() && Date.now() - lastRead > 2000) void refresh(); });
     document.addEventListener('visibilitychange', () => { if (visible()) void refresh(); else clearTimeout(timer); });
-    app.use('switchSettingsTab', (next, section) => {
-      const result = next(section);
-      if (section === 'model') void refresh();
-      return result;
+    app.on('workspace:change', () => {
+      if (visible()) void refresh();
+      else clearTimeout(timer);
     });
     if (visible()) void refresh();
   }

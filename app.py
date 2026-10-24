@@ -51,6 +51,8 @@ from renamer import (
 app = FastAPI(title="Twitter & Pixiv AI 智慧標籤圖庫系統")
 from management_api import router as management_router
 app.include_router(management_router)
+from agent_api import router as agent_router
+app.include_router(agent_router)
 from gguf_api import router as gguf_router
 app.include_router(gguf_router)
 from image_skills_api import router as image_skills_router
@@ -134,17 +136,15 @@ def sync_root_suggested_folders(min_confidence: float = 0.25) -> int:
     ).fetchall()
 
     best_by_img: Dict[int, str] = {}
+    from artist_identity import known_folder
     for r in rows:
         iid = r["id"]
         tname = r["name"]
-        folder_name = resolve_artist_folder_name(tname)
+        folder_name = known_folder(tname)
         if not folder_name:
             continue
         if iid not in best_by_img:
             best_by_img[iid] = folder_name
-        else:
-            if tname.lower() in DANBOORU_ARTIST_TO_FOLDER:
-                best_by_img[iid] = DANBOORU_ARTIST_TO_FOLDER[tname.lower()]
 
     with conn:
         # Clear stale suggested_folder on root images that only had low-confidence AI guesses
@@ -165,6 +165,8 @@ def sync_root_suggested_folders(min_confidence: float = 0.25) -> int:
             """
         )
         updates = [(fname, iid) for iid, fname in best_by_img.items()]
+        conn.executemany("UPDATE images SET suggested_folder=NULL WHERE id=?",
+                         [(iid,) for iid in {r["id"] for r in rows} - best_by_img.keys()])
         if updates:
             conn.executemany(
                 "UPDATE images SET suggested_folder = ? WHERE id = ?",
@@ -214,7 +216,7 @@ def index():
     if not html_file.exists():
         return HTMLResponse("<h1>UI loading...</h1>")
     html = html_file.read_text(encoding="utf-8")
-    for name in ("gallery-core.js","gallery-app.js","gallery-base.css","gallery-shell.css","gallery-shell.js","integration-settings.js","gguf-models.js","gguf-models.css","image-skills.js","image-skills.css"):
+    for name in ("gallery-core.js","gallery-app.js","gallery-base.css","gallery-shell.css","gallery-shell.js","integration-settings.js","gguf-models.js","gguf-models.css","image-skills.js","image-skills.css","workspace-navigation.js","workspace-navigation.css"):
         html = html.replace(f'/static/{name}"',f'/static/{name}?v={(STATIC_DIR/name).stat().st_mtime_ns}"')
     return HTMLResponse(html)
 
@@ -589,6 +591,10 @@ def api_organize_artist_folders_preview(
           AND id NOT IN (SELECT image_id FROM image_tags WHERE source IN ('pixiv', 'pixiv_checked'))
         """
     ).fetchone()[0]
+    pending_identity_count = conn.execute("""SELECT COUNT(*) FROM images i
+        WHERE i.folder='' AND i.missing_since IS NULL AND i.suggested_folder IS NULL
+          AND EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON t.id=it.tag_id
+                      WHERE it.image_id=i.id AND t.category='artist')""").fetchone()[0]
     conn.close()
 
     by_folder: Dict[str, List[Dict[str, Any]]] = {}
@@ -637,6 +643,7 @@ def api_organize_artist_folders_preview(
 
     return {
         "total_ready_images": total_ready_images,
+        "pending_identity": pending_identity_count,
         "total_artist_folders": len(folder_items),
         "new_folders_to_create": new_folders_count,
         "existing_folders_to_update": existing_folders_count,
@@ -664,6 +671,13 @@ def api_organize_move(req: MoveFilesRequest):
         return res
 
     elif req.mode in ("ai_suggested", "auto_artist_folders"):
+        from artist_identity import resolve_image_folders
+        conn = get_db()
+        try:
+            root_ids = [r[0] for r in conn.execute("SELECT id FROM images WHERE folder='' AND missing_since IS NULL")]
+        finally:
+            conn.close()
+        identity_report = resolve_image_folders(root_ids)
         preview = api_organize_artist_folders_preview(
             min_confidence=req.min_confidence,
             min_images_per_artist=req.min_images_per_artist,
@@ -676,7 +690,8 @@ def api_organize_move(req: MoveFilesRequest):
         for f_info in preview["folders"]:
             folder_name = f_info["folder_name"]
             ids = f_info["image_ids"]
-            res = move_images_to_folder(ids, folder_name, auto_rename=req.auto_rename_on_move, refresh_counts=False)
+            from gallery_service import move_images_to_artist_folder
+            res = move_images_to_artist_folder(ids, folder_name, auto_rename=req.auto_rename_on_move, refresh_counts=False)
             moved_cnt = res.get("moved", 0)
             if moved_cnt > 0:
                 total_moved += moved_cnt
@@ -697,6 +712,7 @@ def api_organize_move(req: MoveFilesRequest):
                 db_conn.close()
         out_res = {
             "moved": total_moved,
+            "pending_identity": len(identity_report["pending_image_ids"]),
             "folders_updated": len(moved_details),
             "new_folders_created": new_created,
             "existing_folders_updated": existing_updated,
@@ -896,11 +912,27 @@ def api_ai_status():
     return tagger_engine.get_status()
 
 
-@app.post("/api/ai/single/{image_id}")
-def api_ai_single(image_id: int):
-    from vision_service import analyze
+class SingleFrameRequest(BaseModel):
+    frame_data_url: Optional[str] = None
+
+
+def _decode_frame_data_url(frame_data_url: Optional[str]) -> Optional[bytes]:
+    if not frame_data_url or not isinstance(frame_data_url, str):
+        return None
+    import base64
     try:
-        result = analyze(image_id)
+        payload = frame_data_url.split(",", 1)[1] if "," in frame_data_url else frame_data_url
+        return base64.b64decode(payload)
+    except Exception:
+        return None
+
+
+@app.post("/api/ai/single/{image_id}")
+def api_ai_single(image_id: int, req: Optional[SingleFrameRequest] = None):
+    from vision_service import analyze
+    ss_bytes = _decode_frame_data_url(req.frame_data_url) if req else None
+    try:
+        result = analyze(image_id, screenshot_bytes=ss_bytes)
     except FileNotFoundError as error:
         raise HTTPException(404,str(error)) from error
     except ValueError as error:
@@ -972,7 +1004,7 @@ def api_semantic_apply_themes():
 
 @app.post("/api/semantic/gemini_flash")
 def api_semantic_gemini_flash():
-    raise HTTPException(410, "已移除 Gemini API 直連；請由 Antigravity 或 Gemini CLI 透過圖庫 MCP 執行")
+    raise HTTPException(410, "已移除 Gemini API 直連；請由 Antigravity 透過圖庫 MCP 執行")
 
 
 # === Reverse Image Search (SauceNAO + IQDB + Twitter/Pixiv) Endpoints ===
@@ -984,12 +1016,15 @@ def api_reverse_search_single(
     image_id: int,
     min_similarity: float = Query(72.0),
     fallback_to_ai: bool = Query(False),
+    req: Optional[SingleFrameRequest] = None,
 ):
+    ss_bytes = _decode_frame_data_url(req.frame_data_url) if req else None
     search_info = reverse_search_and_tag_image(
         image_id=image_id,
         min_similarity=min_similarity,
         fallback_to_ai=fallback_to_ai,
         include_google_lens_url=True,
+        screenshot_bytes=ss_bytes,
     )
     detail = api_image_detail(image_id)
     detail["reverse_search_result"] = search_info

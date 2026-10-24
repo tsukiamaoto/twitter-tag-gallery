@@ -13,9 +13,9 @@ FOLDER_TO_DANBOORU_ARTIST = {
     "CloBA - pixiv": "cloba",
     "Coro Tret Coro Fae": "coro_fae",
     "ErereP": "erere",
-    "Fungi／パンゴム": "pangomu",
+    "Fungi／パンゴム": "fungi542",
     "Gentsuki": "gentsuki",
-    "GSUS": "gsus_(gsus222)",
+    "GSUS": "gsusart",
     "gweda": "gweda",
     "hagi_萩": "hagi_(ame_hagi)",
     "haku89": "haku89",
@@ -24,57 +24,134 @@ FOLDER_TO_DANBOORU_ARTIST = {
     "Horosuke": "horosuke",
     "JJune": "jjune",
     "KumaSteam": "kumasteam",
-    "machi": "machi_(machi710)",
+    "machi": "machi_(machi0910)",
     "mankai kaika": "mankai_kaika",
-    "Marii": "marii_(my_dear_warm)",
     "mignon": "mignon",
     "Mochirong": "mochirong",
-    "msmspc": "msmspc",
+    "msmspc": "m-da_s-tarou",
     "rosumerii": "rosumerii",
-    "Ryoma": "ryoma_(ryoma_12)",
+    "Ryoma": "ryouma_(galley)",
     "Simao": "simao_(x_x36131422)",
     "sy4": "sy4",
-    "toeri": "toeri",
+    "toeri": "toeri_(rococo)",
     "Topu": "topu",
-    "Tsuki no Senninno": "tsuki_no_senninno",
-    "yuyu": "yuyu",
-    "[アーティスト] 青い桜": "aoi_sakura",
+    "Tsuki no Senninno": "tsuki_no_i-min",
+    "yuyu": "yuyu_(yuyuworks)",
+    "[アーティスト] 青い桜": "aoi_sakura_(seak5545)",
     "きくかわ": "kikukawa",
     "じま": "jima",
     "すこやかグミ": "sukoyaka_gumi",
     "ほうき星 (houk1se1)": "houkisei",
-    "らんち": "ranchi",
-    "わくら": "wakura_(wkr)",
+    "らんち": "lunch_(shin_new)",
+    "わくら": "wakura_(gcdan)",
     "アカノムラサキ": "akano_murasaki",
-    "サインこす": "sign_cos",
+    "サインこす": "sincos",
     "タカハル": "takaharu",
     "チョチョミ": "chochomi",
-    "ミコジン": "mikojin",
+    "ミコジン": "mikozin",
+    "モ誰": "modare",
+    "ラムジ(dramz)": "dramz",
     "加瀬大輝": "kase_daiki",
-    "千種みのり": "chikusa_minori",
-    "升天": "shouten",
-    "喵喵喵喵喵噗噜": "miaomiaomiaomiaomiaopulu",
-    "大猫板蓝根": "damao_banlangen",
+    "千種みのり": "chigusa_minori",
+    "升天": "shengtian",
+    "喵喵喵喵喵噗噜": "sadan1317",
+    "大猫板蓝根": "da_mao_banlangen",
     "山村うみ": "yamamura_umi",
-    "煎路（せんじ）": "senji_(senji_1000)",
-    "芝石ひらめ": "shibaishi_hirame",
-    "飯桶": "fantong",
+    "煎路（せんじ）": "senji_(tegone_spike)",
+    "芝石ひらめ": "shiseki_hirame",
+    "長月院": "nagatsukiin",
+    "飯桶": "fantongjun",
     "麻生 Asou": "asou_(asabu202)",
 }
 
 # 反向映射：Danbooru artist tag -> 使用者資料夾名稱
 DANBOORU_ARTIST_TO_FOLDER = {v: k for k, v in FOLDER_TO_DANBOORU_ARTIST.items()}
-# 加入常見別名
+# 加入常見別名、舊名、CJK 名稱與 Twitter 帳號映射，避免同畫師重複建立資料夾
 DANBOORU_ARTIST_TO_FOLDER.update({
     "hara": "Hara",
     "houk1se1": "ほうき星 (houk1se1)",
+    "ほうき星": "ほうき星 (houk1se1)",
+    "houkiboshi_(mmjw7432)": "ほうき星 (houk1se1)",
+    "冬季仙境-奥莉安娜": "ほうき星 (houk1se1)",
     "asou": "麻生 Asou",
+    "麻生": "麻生 Asou",
     "senji": "煎路（せんじ）",
+    "senji_(senji_1000)": "煎路（せんじ）",
     "fungi": "Fungi／パンゴム",
+    "pangomu": "Fungi／パンゴム",
     "casino": "casino (casinoep)",
     "hagi": "hagi_萩",
+    "萩": "hagi_萩",
     "coro_tret": "Coro Tret Coro Fae",
     "topu2782": "Topu",
+    "fantong": "飯桶",
+    "sioconsole1": "飯桶",
+    "sioconsole89": "飯桶",
+    "mikojin": "ミコジン",
+    "huhuhu13422": "ミコジン",
+    "huhuuhusab": "ミコジン",
+    "sign_cos": "サインこす",
+    "shouten": "升天",
+    "chikusa_minori": "千種みのり",
+    "shibaishi_hirame": "芝石ひらめ",
+    "ranchi": "らんち",
+    "wakura_(wkr)": "わくら",
+    "msmspc": "msmspc",
+    "m-da s-tarou": "msmspc",
+    "gsus_(gsus222)": "GSUS",
+    "tsuki_no_senninno": "Tsuki no Senninno",
+    "月之仙人丿": "Tsuki no Senninno",
+    "ryoma_(ryoma_12)": "Ryoma",
+    "きただりょうま": "Ryoma",
+    "marii": "rosumerii",
+    "marii_(my_dear_warm)": "rosumerii",
+    "yuyu": "yuyu",
+    "yuyu_il": "yuyu",
+    "machi_(machi710)": "machi",
+    "toeri": "toeri",
+    "aoi_sakura": "[アーティスト] 青い桜",
+    "miaomiaomiaomiaomiaopulu": "喵喵喵喵喵噗噜",
+    "damao_banlangen": "大猫板蓝根",
+    "ﾁｮﾁｮﾐ": "チョチョミ",
+    "なまひゆ": "goldowl",
+    "絆-kizuna": "hokori sakuni",
+    "kizuna113": "hokori sakuni",
+    "kizuna_0113": "hokori sakuni",
+    "alp315": "Alp",
+    "soraneko_hino": "soraneko hino",
+    "movw3488": "hu dako",
+    "movw2000": "hu dako",
+    "kkn0kk": "kino (m6t2a)",
+    "dikkosama": "dikko",
+    "yampahood": "yampa",
+    "b9gsershfczfpyg": "douya (233)",
+    "miura_n315": "miura-n315",
+    "miura n315": "miura-n315",
+    "goth_lukuru": "lunacle",
+    "goth lukuru": "lunacle",
+    "agm86997980": "omone hokoma agm",
+    "hakusai_hiro": "hakusai (tiahszld)",
+    "hakusai hiro": "hakusai (tiahszld)",
+    "tama38302460": "tama (tamago)",
+    "kittew_art": "kittew",
+    "kittew art": "kittew",
+    "aleriia_v": "aleriia v",
+    "poa_mell": "poa mellhen",
+    "poa mell": "poa mellhen",
+    "d_recolors": "dars (recolors)",
+    "d recolors": "dars (recolors)",
+    "k_pring654": "k pring",
+    "k pring654": "k pring",
+    "sa_ya_1107": "sa-ya2",
+    "sa ya 1107": "sa-ya2",
+    "_konkito": "konkito",
+    "shimmer55224064": "shimmer",
+    "puge_taru": "puge",
+    "puge taru": "puge",
+    "greembang": "greem bang",
+    "betanonbeet": "betabeet",
+    "togetoge_(jakusanseimk2)": "togutogu",
+    "togetoge (jakusanseimk2)": "togutogu",
 })
 
 # 常用 Danbooru 標籤繁體中文翻譯
@@ -482,6 +559,10 @@ def get_tag_display_name(tag_name: str, category: str = "", zh_name: str = "") -
     """Normalize legacy artist labels without rewriting stored tags or sources."""
     if category != "artist":
         return zh_name or get_tag_zh(tag_name, category)
+    from artist_identity import known_folder
+    identity_folder = known_folder(tag_name)
+    if identity_folder:
+        return identity_folder
     known = get_tag_zh(tag_name, category)
     if known:
         return known
@@ -497,7 +578,7 @@ def get_tag_display_name(tag_name: str, category: str = "", zh_name: str = "") -
 _EXISTING_FOLDERS_LOWER = {k.lower(): k for k in FOLDER_TO_DANBOORU_ARTIST.keys()}
 
 
-def resolve_artist_folder_name(artist_tag: str) -> str:
+def resolve_artist_folder_name(artist_tag: str, *, use_identity: bool = True) -> str:
     """
     將繪師標籤名稱解析為適合建立於 D:\\圖檔\\twitter\\ 下的資料夾名稱：
     1. 若對應到現有的 53 個繪師資料夾（例如 chikusa_minori -> 千種みのり），優先使用現有資料夾名稱。
@@ -505,6 +586,11 @@ def resolve_artist_folder_name(artist_tag: str) -> str:
     """
     if not artist_tag:
         return ""
+    if use_identity:
+        from artist_identity import known_folder
+        identity_folder = known_folder(artist_tag)
+        if identity_folder:
+            return identity_folder
     raw = artist_tag.strip()
     if not raw or raw.startswith("pixiv_id:"):
         return ""

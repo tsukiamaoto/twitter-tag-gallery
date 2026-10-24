@@ -6,8 +6,7 @@ const { chromium } = require('playwright');
 const root = path.resolve(__dirname, '..');
 const artifacts = path.join(root, '.tag_gallery', 'ui-review');
 fs.mkdirSync(artifacts, { recursive: true });
-const html = fs.readFileSync(path.join(root, 'static/index.html'), 'utf8').replace('</head>',
-  '<link rel="stylesheet" href="/static/gallery-shell.css"><script defer src="/static/gallery-shell.js"></script><script defer src="/static/integration-settings.js"></script></head>');
+const html = fs.readFileSync(path.join(root, 'static/index.html'), 'utf8');
 
 (async () => {
   const browser = await chromium.launch({ headless: true, channel: process.env.PLAYWRIGHT_CHANNEL || 'msedge' });
@@ -76,16 +75,19 @@ const html = fs.readFileSync(path.join(root, 'static/index.html'), 'utf8').repla
     await page.locator('#smart-model-settings').click();
     assert.equal(await page.locator('#ai-modal').isVisible(), false);
     assert.equal(await page.locator('#settings-model').isVisible(), true);
-    assert.equal(await page.locator('.settings-tab[aria-selected="true"]').count(), 1);
+    assert.equal(await page.locator('#ai-category-list [aria-selected="true"]').count(), 1);
     assert.equal(await page.locator('#btn-modal-load-vram').isEnabled(), true);
     assert.equal(await page.locator('#btn-modal-unload-vram').isDisabled(), true);
     assert.equal(await page.locator('#settings-model #ai-auto-unload').count(), 1);
     await page.locator('#ai-auto-unload').uncheck();
     await page.screenshot({ path: path.join(artifacts, 'model-settings.png') });
-    await page.locator('#btn-close-settings').click();
+    await page.locator('#ai-return-smart').click();
     assert.equal(await page.locator('#ai-modal').isVisible(), true);
     assert.equal(await page.evaluate(() => document.activeElement.id), 'smart-model-settings');
     assert.equal(writes.length, 0, 'Opening dialogs and changing preferences must not run tasks or load models');
+    await page.keyboard.press('Escape');
+    assert.ok((await page.evaluate(() => document.activeElement.getAttribute('onclick'))).includes('openAiModal'), 'Closing the returned dialog restores its original opener');
+    await page.getByRole('button', { name: '智慧標籤', exact: true }).click();
 
     await page.locator('#ai-scope').selectOption('ai_low_conf');
     await page.locator('#ai-limit').fill('13');
@@ -117,7 +119,9 @@ const html = fs.readFileSync(path.join(root, 'static/index.html'), 'utf8').repla
     await page.locator('#smart-model-settings').click();
     for (const id of ['btn-modal-load-vram', 'btn-modal-unload-vram', 'btn-modal-unload-disk']) assert.equal(await page.locator(`#${id}`).isDisabled(), true);
     assert.equal(await page.locator('#shell-model-busy').isVisible(), true);
-    await page.locator('#btn-close-settings').click();
+    await page.locator('#ai-return-smart').click();
+    assert.equal(await page.locator('#ai-scope').inputValue(), 'ai_low_conf');
+    assert.equal(await page.locator('#ai-limit').inputValue(), '13');
     await page.locator('#btn-modal-stop-task').click();
     await page.waitForFunction(() => !document.querySelector('#btn-start-smart-tag').disabled);
     assert.ok(writes.some(request => request.endpoint === '/api/ai/stop'));
@@ -154,6 +158,7 @@ const html = fs.readFileSync(path.join(root, 'static/index.html'), 'utf8').repla
     assert.equal(await page.locator('#btn-modal-load-vram').isEnabled(), true);
     failModel = false;
 
+    await page.locator('#btn-settings').click();
     await page.locator('#settings-tab-browse').focus();
     const lastTab = page.locator('.settings-tabs [role="tab"]').last();
     await page.keyboard.press('End');
@@ -163,6 +168,7 @@ const html = fs.readFileSync(path.join(root, 'static/index.html'), 'utf8').repla
     await page.keyboard.press('ArrowLeft');
     assert.equal(await page.locator(`#${await lastTab.getAttribute('aria-controls')}`).isVisible(), true);
     await page.keyboard.press('Escape');
+    await page.locator('#ai-return-smart').click();
     assert.equal(await page.locator('#ai-modal').isVisible(), true);
     await page.keyboard.press('Escape');
     await page.reload();
@@ -188,10 +194,10 @@ const html = fs.readFileSync(path.join(root, 'static/index.html'), 'utf8').repla
       assert.equal(await page.locator('#smart-close').isVisible(), true);
       assert.equal(await page.locator('#btn-start-smart-tag').isVisible(), true);
       await page.locator('#smart-model-settings').click();
-      const settingsBounds = await page.locator('.settings-dialog').boundingBox();
+      const settingsBounds = await page.locator('#ai-workspace').boundingBox();
       assert.ok(settingsBounds.x >= 0 && settingsBounds.x + settingsBounds.width <= width, `Model settings fit ${width}px`);
-      assert.equal(await page.locator('#btn-close-settings').isVisible(), true);
-      await page.locator('#btn-close-settings').click();
+      assert.equal(await page.locator('#ai-return-smart').isVisible(), true);
+      await page.locator('#ai-return-smart').click();
       if (width === 390) await page.screenshot({ path: path.join(artifacts, 'smart-tagging-mobile.png') });
     }
     await page.locator('#smart-advanced > summary').click();

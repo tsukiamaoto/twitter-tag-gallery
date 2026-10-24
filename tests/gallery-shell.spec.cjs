@@ -7,8 +7,7 @@ const { chromium } = require('playwright');
 const root = path.resolve(__dirname, '..');
 const artifacts = path.join(root, '.tag_gallery', 'ui-review');
 fs.mkdirSync(artifacts, { recursive: true });
-const html = fs.readFileSync(path.join(root, 'static/index.html'), 'utf8').replace('</head>',
-  '<link rel="stylesheet" href="/static/gallery-shell.css"><script defer src="/static/gallery-shell.js"></script><script defer src="/static/integration-settings.js"></script></head>');
+const html = fs.readFileSync(path.join(root, 'static/index.html'), 'utf8');
 const tags = [
   { name: 'aoi', zh_name: '現有繪師：青井', category: 'artist', count: 48, aliases: ['aoi', 'aoi_alt'] },
   { name: 'haru', zh_name: '春野', category: 'artist', count: 32 },
@@ -54,6 +53,7 @@ function illustration(id) {
       else if (pathname === '/api/runtime') data = { ai: status, reverse: status, schedule: { running_job: false, config: { enabled: false, schedule_times: [], source_dirs: [], history_logs: [] } }, model: { busy: false }, active_job: {}, jobs: [] };
       else if (pathname === '/api/ai/status' || pathname === '/api/reverse_search/status') data = status;
       else if (pathname === '/api/schedule/status') data = { running_job: false, status_message: '待機中', config: { enabled: false, schedule_times: ['03:00'], source_dirs: [], history_logs: [] } };
+      else if (pathname === '/api/dedup/preview') data = { mode: 'both', scope: 'same_folder', folder: '__ALL__', total_scanned: 96, total_groups: 0, exact_groups_count: 0, visual_groups_count: 0, total_duplicate_images: 0, exact_duplicate_images: 0, visual_duplicate_images: 0, total_reclaim_bytes: 0, total_reclaim_mb: 0, all_delete_ids: [], groups: [] };
       else if (pathname === '/api/images') {
         queries.push(Object.fromEntries(url.searchParams));
         if (failImages) return route.fulfill({ status: 503, contentType: 'application/json', body: '{}' });
@@ -172,8 +172,12 @@ function illustration(id) {
     await page.keyboard.press('ArrowDown');
     assert.equal(await page.locator('#shell-management').getAttribute('open'), '');
     assert.ok((await page.evaluate(() => document.activeElement.textContent)).includes('批次改名'));
+    const mgmtLabels = await page.locator('#shell-management .shell-management-panel button:visible').allTextContents();
+    assert.ok(mgmtLabels.includes('清除重複圖片'), 'Management menu includes 清除重複圖片');
+    await page.locator('#shell-management .shell-management-panel button', { hasText: '清除重複圖片' }).click();
+    assert.equal(await page.locator('#dedup-modal').isVisible(), true);
     await page.keyboard.press('Escape');
-    assert.equal(await page.locator('#shell-management').getAttribute('open'), null);
+    assert.equal(await page.locator('#dedup-modal').isVisible(), false);
 
     await page.locator('body').click({ position: { x: 500, y: 100 } });
     await page.keyboard.press('/');
@@ -226,7 +230,7 @@ function illustration(id) {
       if (width <= 800) {
         assert.equal(await page.locator('.shell-sidebar').evaluate(el => el.inert), true);
         await page.locator('#shell-open-filters').click();
-        await page.waitForFunction(() => Math.abs(document.querySelector('.shell-sidebar').getBoundingClientRect().left) < 1);
+        await page.waitForFunction(() => Math.abs(document.querySelector('.shell-sidebar').getBoundingClientRect().left - 48) < 1);
         assert.equal(await page.locator('.shell-sidebar').evaluate(el => el.inert), false);
         assert.equal(await page.locator('main').evaluate(el => el.inert), true);
         await page.locator('#tab-btn-tags').focus();
@@ -238,21 +242,21 @@ function illustration(id) {
         await page.keyboard.press('Tab');
         assert.equal(await page.evaluate(() => document.activeElement.id), 'shell-close-filters');
         await page.keyboard.press('Escape');
-        await page.waitForFunction(() => document.querySelector('.shell-sidebar').getBoundingClientRect().right < 1);
+        await page.waitForFunction(() => document.querySelector('.shell-sidebar').getBoundingClientRect().right <= 48);
         assert.equal(await page.locator('main').evaluate(el => el.inert), false);
         assert.equal(await page.evaluate(() => document.activeElement.id), 'shell-open-filters');
       }
       if (width === 390) {
         await page.screenshot({ path: path.join(artifacts, 'mobile.png') });
         await page.locator('#shell-open-filters').click();
-        await page.waitForFunction(() => Math.abs(document.querySelector('.shell-sidebar').getBoundingClientRect().left) < 1);
+        await page.waitForFunction(() => Math.abs(document.querySelector('.shell-sidebar').getBoundingClientRect().left - 48) < 1);
         await page.screenshot({ path: path.join(artifacts, 'mobile-filters.png') });
         await page.locator('#shell-apply-filters').click();
       }
     }
     await page.setViewportSize({ width: 320, height: 568 });
     await page.locator('#shell-open-filters').click();
-    await page.waitForFunction(() => Math.abs(document.querySelector('.shell-sidebar').getBoundingClientRect().left) < 1);
+    await page.waitForFunction(() => Math.abs(document.querySelector('.shell-sidebar').getBoundingClientRect().left - 48) < 1);
     const shortTags = await page.locator('#sidebar-tag-list').boundingBox();
     assert.ok(shortTags.height >= 100, 'Short drawers retain usable tag browsing space');
     await page.locator('#shell-apply-filters').click();

@@ -6,8 +6,7 @@ const { chromium } = require('playwright');
 const root = path.resolve(__dirname, '..');
 const artifacts = path.join(root, '.tag_gallery', 'ui-review');
 fs.mkdirSync(artifacts, { recursive: true });
-const html = fs.readFileSync(path.join(root, 'static/index.html'), 'utf8').replace('</head>',
-  '<link rel="stylesheet" href="/static/gallery-shell.css"><script defer src="/static/gallery-shell.js"></script><script defer src="/static/integration-settings.js"></script></head>');
+const html = fs.readFileSync(path.join(root, 'static/index.html'), 'utf8');
 
 (async () => {
   const browser = await chromium.launch({ headless: true, channel: process.env.PLAYWRIGHT_CHANNEL || 'msedge' });
@@ -140,7 +139,7 @@ const html = fs.readFileSync(path.join(root, 'static/index.html'), 'utf8').repla
       await page.setViewportSize({ width, height: 844 });
       if (width <= 800) {
         await page.locator('#shell-open-filters').click();
-        await page.waitForFunction(() => Math.abs(document.querySelector('.shell-sidebar').getBoundingClientRect().left) < 1);
+        await page.waitForFunction(() => Math.abs(document.querySelector('.shell-sidebar').getBoundingClientRect().left - 48) < 1);
       }
       const geometry = await page.locator('#panel-folders').evaluate(panel => {
         const edge = panel.getBoundingClientRect().right;

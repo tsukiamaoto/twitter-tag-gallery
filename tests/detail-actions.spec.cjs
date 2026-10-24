@@ -46,6 +46,7 @@ const media = '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="800">
           await new Promise(resolve => { releaseReverse = resolve; });
           data = { reverse_search_result: { found: false } };
         } else if (endpoint === '/api/decensor/preview/1') data = { ok: false, message: '此圖未偵測到馬賽克' };
+        else if (endpoint === '/api/images/delete') return route.fulfill({ status: 409, contentType: 'application/json', body: '{"detail":"測試保留"}' });
         else if (endpoint !== '/api/open_explorer/1') throw Error(`Unexpected write: ${endpoint}`);
       } else if (endpoint === '/api/images') data = { items, total: items.length };
       else if (endpoint.startsWith('/api/image/')) {
@@ -112,11 +113,12 @@ const media = '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="800">
     assert.equal(await page.locator('#btn-single-decensor svg').count(), 1);
     await page.locator('#dt-decensor-box button').first().click();
     await page.locator('#btn-detail-more').click();
-    page.once('dialog', dialog => dialog.dismiss());
+    const deletionResponse = page.waitForResponse(response => response.url().endsWith('/api/images/delete'));
     await page.locator('#btn-delete-single').click();
+    await deletionResponse;
     assert.equal(await page.locator('#detail-modal').isVisible(), true);
     assert.equal(await page.locator('#detail-more-actions').getAttribute('open'), null);
-    assert.equal(writes.length, 2);
+    assert.equal(writes.length, 3);
 
     // Busy labels stay short and preserve the toolbar geometry and icon.
     await page.locator('#btn-detail-more').click();

@@ -440,47 +440,45 @@ test('Delete ignores typing, modifiers, dialogs, repeated keys and an active req
   assert.equal(f.run('deletes'), 0);
 });
 
-test('cancelled deletion sends no request; failures preserve selection and permit retry', async () => {
+test('deletion proceeds without confirm; failures preserve selection, show error notice, and permit retry', async () => {
   const f = fixture();
   f.run("state.items = [{id:1, filename:'圖片.jpg'}]; state.selectedIds.add(1)");
   let requests = 0;
-  f.context.window.confirm = () => false;
+  f.context.window.confirm = () => { throw Error('confirm must not be called'); };
   f.context.fetch = async () => { requests++; return { ok: false, json: async () => ({detail:'檔案使用中'}) }; };
-  await f.run('deleteSelectedImages()');
-  assert.equal(requests, 0);
-  f.context.window.confirm = () => true;
   await f.run('deleteSelectedImages()');
   assert.equal(requests, 1);
   assert.equal(f.run('state.selectedIds.has(1)'), true);
   assert.equal(f.run('state.items.length'), 1);
+  assert.equal(f.element('file-delete-notice').hidden, false);
   assert.match(f.element('file-delete-status').textContent, /檔案使用中/);
   assert.equal(f.element('btn-delete-selected').disabled, false);
 });
 
-test('successful delete updates selection and detail, prevents duplicate submits, and supports restore', async () => {
+test('successful delete updates selection and detail, unlocks before background refresh, and keeps notice hidden', async () => {
   const f = fixture();
   f.run('renderGrid = () => {}');
-  f.run('refreshDetailView = async id => { state.detailImageId = id; }');
+  let resolveRefresh;
+  f.context.onRefresh = r => { resolveRefresh = r; };
+  f.run('refreshDetailView = async id => { state.detailImageId = id; await new Promise(onRefresh); }');
   f.run("loadImages = loadStats = loadFolders = loadTags = async () => {}; state.items = [{id:1,filename:'a.jpg'},{id:2,filename:'b.jpg'}]; state.total = 2; state.selectedIds = new Set([1,2,99]); state.detailIndex = 0; state.detailImageId = 1;");
   f.element('detail-modal').classList.add('open');
-  f.context.window.confirm = () => true;
   let resolveDelete;
   let requests = 0;
   f.context.fetch = () => { requests++; return new Promise(resolve => { resolveDelete = resolve; }); };
   const pending = f.run('deleteCurrentImage()');
   await f.run('deleteCurrentImage()');
   assert.equal(requests, 1);
-  resolveDelete({ok:true,json:async () => ({deleted:1,deleted_ids:[1],operation_id:'delete_' + 'a'.repeat(32)})});
+  resolveDelete({ok:true,json:async () => ({deleted:1,deleted_ids:[1],recycled:1,missing_count:0})});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.run('imageFileOperationBusy'), false, 'Unlocked before refreshDetailView completes');
+  assert.equal(f.run('state.detailImageId'), 2);
+  resolveRefresh();
   await pending;
   assert.equal(f.run('JSON.stringify([...state.selectedIds])'), '[2,99]');
   assert.equal(f.run('state.items[0].id'), 2);
   assert.equal(f.element('detail-modal').classList.contains('open'), true);
-  assert.equal(f.run('state.detailImageId'), 2);
-  assert.equal(f.element('btn-restore-deleted').hidden, false);
-  f.context.fetch = async () => ({ok:true,json:async () => ({restored:1})});
-  await f.run('restoreLastDeletedImages()');
-  assert.match(f.element('file-delete-status').textContent, /已復原 1 個檔案/);
-  assert.equal(f.element('btn-restore-deleted').hidden, true);
+  assert.equal(f.element('file-delete-notice').hidden, true);
 });
 
 test('single deletion targets the displayed ID after a new copy or list reorder', async () => {
@@ -489,19 +487,15 @@ test('single deletion targets the displayed ID after a new copy or list reorder'
   f.run('refreshDetailView = async id => { state.detailImageId = id; }');
   f.run("loadImages = loadStats = loadFolders = loadTags = async () => {}; state.items = [{id:1,filename:'other.jpg'}]; state.detailIndex = 0; state.detailImageId = 7; currentDetailData = {id:7,filename:'copy.jpg'};");
   f.element('detail-modal').classList.add('open');
-  let payload, confirmation;
-  f.context.window.confirm = message => { confirmation = message; return true; };
+  let payload;
   f.context.fetch = async (_url, options) => {
     payload = JSON.parse(options.body);
-    return {ok:true,json:async () => ({deleted:1,deleted_ids:[7],restorable:0,missing_count:1})};
+    return {ok:true,json:async () => ({deleted:1,deleted_ids:[7],recycled:0,missing_count:1})};
   };
   await f.run('deleteCurrentImage()');
   assert.deepEqual(payload.image_ids, [7]);
-  assert.match(confirmation, /copy.jpg/);
-  assert.doesNotMatch(confirmation, /other.jpg/);
   assert.equal(f.run('state.items[0].id'), 1);
-  assert.equal(f.element('btn-restore-deleted').hidden, true);
-  assert.match(f.element('file-delete-status').textContent, /已移除 1 筆圖片紀錄與標籤連結/);
+  assert.equal(f.element('file-delete-notice').hidden, true);
 });
 
 test('missing detail renders a clear message and a removed record closes the viewer', async () => {
@@ -521,10 +515,9 @@ test('missing detail renders a clear message and a removed record closes the vie
 test('delete removes cards before refill and old or stale responses cannot bring them back', async () => {
   const f = fixture();
   f.run("renderGrid = () => {}; loadStats = loadFolders = loadTags = async () => {}; state.items = [{id:1,filename:'a.jpg'},{id:2,filename:'b.jpg'}]; state.total = 2; state.selectedIds.add(1)");
-  f.context.window.confirm = () => true;
   const pending = [];
   f.context.fetch = (url, options) => {
-    if (url === '/api/images/delete') return Promise.resolve({ok:true,json:async () => ({deleted:1,deleted_ids:[1],restorable:0})});
+    if (url === '/api/images/delete') return Promise.resolve({ok:true,json:async () => ({deleted:1,deleted_ids:[1],recycled:1})});
     assert.equal(options.cache, 'no-store');
     return new Promise(resolve => pending.push(resolve));
   };
@@ -532,7 +525,7 @@ test('delete removes cards before refill and old or stale responses cannot bring
   const deletion = f.run('deleteSelectedImages()');
   while (pending.length < 2) await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.run('state.items.map(item => item.id).join()'), '2', 'Card disappears while refill is pending');
-  assert.match(f.element('file-delete-status').textContent, /已刪除 1/);
+  assert.equal(f.element('file-delete-notice').hidden, true, 'Notice stays hidden on normal deletion');
   pending[0]({ok:true,json:async () => ({items:[{id:1},{id:2}],total:2})});
   await old;
   assert.equal(f.run('state.items.map(item => item.id).join()'), '2');
@@ -556,8 +549,7 @@ test('detail deletion advances across page boundaries, falls back to previous, a
     f.context.scenario = scenario;
     f.run("renderGrid = () => {}; loadStats = loadFolders = loadTags = async () => {}; state.items = scenario.items.map(id => ({id,filename:id+'.jpg'})); state.total = scenario.total; state.page = scenario.page; state.pageSize = 10; state.detailImageId = scenario.id; refreshDetailView = async id => { state.detailImageId = id; }; loadImages = async () => { state.items = scenario.nextItems.map(id => ({id,filename:id+'.jpg'})); state.total = scenario.total - 1; return true; };");
     f.element('detail-modal').classList.add('open');
-    f.context.window.confirm = () => true;
-    f.context.fetch = async () => ({ok:true,json:async () => ({deleted:1,deleted_ids:[scenario.id],restorable:0})});
+    f.context.fetch = async () => ({ok:true,json:async () => ({deleted:1,deleted_ids:[scenario.id],recycled:1})});
     await f.run('deleteCurrentImage()');
     assert.equal(f.run('state.detailImageId'), scenario.expected);
     assert.equal(f.element('detail-modal').classList.contains('open'), scenario.expected !== null);

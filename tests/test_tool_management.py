@@ -37,7 +37,7 @@ class ToolManagementTests(GalleryCase):
         self.fail("Tool did not complete")
 
     def test_catalog_sdk_and_fallback_have_identical_tools_and_schemas(self):
-        self.assertEqual(len(registry.CATALOG), 24)
+        self.assertIn("gallery_confirm_artist_identity", registry.CATALOG)
         async def sdk_tools():
             return [tool.model_dump(by_alias=True) for tool in await build_server().list_tools()]
         sdk = anyio.run(sdk_tools)
@@ -182,7 +182,7 @@ class ToolManagementTests(GalleryCase):
                     async with ClientSession(*streams) as session:
                         await session.initialize()
                         listed=await session.list_tools()
-                        self.assertEqual(len(listed.tools),24)
+                        self.assertEqual(len(listed.tools),len(registry.CATALOG))
                         result=await session.call_tool("gallery_get_overview",{})
                         self.assertEqual(json.loads(result.content[0].text)["total_images"],0)
                         invalid=await session.call_tool("gallery_get_overview",{"unexpected":True})

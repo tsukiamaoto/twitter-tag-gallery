@@ -10,10 +10,14 @@
   <link rel="stylesheet" href="/static/gallery-shell.css" />
   <script defer src="/static/gallery-shell.js"></script>
   <script defer src="/static/integration-settings.js"></script>
+  <link rel="stylesheet" href="/static/agent-settings.css" />
+  <script defer src="/static/agent-settings.js"></script>
   <link rel="stylesheet" href="/static/gguf-models.css" />
   <script defer src="/static/gguf-models.js"></script>
   <link rel="stylesheet" href="/static/image-skills.css" />
   <script defer src="/static/image-skills.js"></script>
+  <link rel="stylesheet" href="/static/workspace-navigation.css" />
+  <script defer src="/static/workspace-navigation.js"></script>
 </head>
 <body>
 
@@ -47,8 +51,9 @@
       <button class="btn btn-danger" id="btn-top-unload-model" style="display:none; background:#dc2626; border-color:#dc2626;" onclick="unloadAiModel(false)" title="目前 AI 模型已載入於顯卡記憶體中，點擊立即卸載並釋放 VRAM">⏏️ 卸載模型 (釋放 VRAM)</button>
       <button class="btn btn-warn" onclick="openRenameModal()">✏️ 批次改名 (鎖定順序)</button>
       <button class="btn" onclick="openOrganizeModal()">📂 資料夾歸檔精靈</button>
+      <button class="btn" onclick="openSettings('history')" title="檢視所有處理功能的完整歷史操作日誌">📋 操作日誌</button>
       <button class="btn" onclick="rescanLibrary()" title="重新掃描 D:\圖檔\twitter 檔案變動">🔄 重新掃描</button>
-      <button class="btn" onclick="openSettings('history')" title="檢視全系統操作日誌與執行紀錄">📋 操作日誌</button>
+      <button class="btn" onclick="openDedupModal()" title="比對並清除完全重複或視覺高度相似圖片">🧹 清除重複圖片</button>
 
       <button class="btn" id="btn-settings" onclick="openSettings()" title="瀏覽偏好、匯入排程與執行紀錄">⚙ 設定</button>
     </div>
@@ -505,15 +510,16 @@
   <div class="modal-backdrop" id="rename-modal" onclick="if(event.target===this) closeRenameModal()">
     <div class="dialog-box" style="max-width:920px; max-height:90vh; overflow:hidden; display:flex; flex-direction:column;">
       <div style="display:flex; justify-content:space-between; align-items:center;">
-        <h3>✏️ 批次改名與順序鎖定工具 (格式：日期_流水號_畫師名)</h3>
+        <h3>✏️ 圖片發布日期追查與批次改名</h3>
         <button class="btn" onclick="closeRenameModal()">✖</button>
       </div>
 
       <p style="font-size:13px; color:var(--text-muted); line-height:1.5;">
-        採用 <b>Windows 原生自然排序 (StrCmpLogicalW)</b> 鎖定順序（確保 <code>_2</code> 永遠在 <code>_10</code> 前面，且既有已編號檔案不會被新檔案插隊），並統一改為 <code>YYYYMMDD_0001_畫師名.jpg</code> 格式。每次改名皆自動備份紀錄，支援隨時<b>一鍵還原舊檔名</b>。
+        由 <b>Antigravity · Gemini 3.8 Flash</b> 在背景追查作者發布日期，確認後依日期重新編號為 <code>YYYYMMDD_0001.ext</code>。未知圖片保留原名，每次改名保留<b>還原紀錄</b>。關閉此視窗後仍會繼續。
       </p>
 
       <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; background:var(--bg-main); padding:12px; border-radius:8px; border:1px solid var(--border);">
+        <label style="width:190px;font-size:12px;"><b>處理方式：</b><select id="rn-mode" class="select-box" style="width:100%;margin-top:4px;" onchange="GalleryAgent.switchMode()"><option value="publication">追查原始發布日期</option><option value="legacy">原有日期與手動改名</option></select></label>
         <label style="flex:2; min-width:220px; font-size:12px;">
           <b>選擇目標資料夾：</b>
           <select id="rn-folder" class="select-box" style="width:100%; margin-top:4px;" onchange="loadRenamePreview()"></select>
@@ -547,7 +553,64 @@
         <span style="font-size:12px; color:var(--text-muted);">💡 兩階段無衝突安全改名，同步更新圖庫標籤索引，絕不遺失任何標籤</span>
         <div style="display:flex; gap:8px;">
           <button class="btn" onclick="closeRenameModal()">關閉</button>
-          <button class="btn btn-primary" id="btn-rn-exec" onclick="executeRename()">✅ 確認執行安全改名</button>
+          <button class="btn btn-primary" id="btn-rn-exec" onclick="executeRename()">開始背景追查與改名</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Duplicate & Visual Similarity Cleanup Modal -->
+  <div class="modal-backdrop" id="dedup-modal" onclick="if(event.target===this) closeDedupModal()">
+    <div class="dialog-box" style="max-width:960px; max-height:90vh; overflow:hidden; display:flex; flex-direction:column;">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h3>🧹 清除重複與相似圖片</h3>
+        <button class="btn" onclick="closeDedupModal()">✖</button>
+      </div>
+
+      <p style="font-size:13px; color:var(--text-muted); line-height:1.5;">
+        結合 <b>SHA-256 位元組完全比對</b> 與 <b>dHash/pHash + 512×512 SSIM/MAE 像素結構比對</b>，自動找出完全重複、重壓縮或縮圖副本。
+        依<b>像素數、PNG 格式、檔案大小</b>等順序保留並合併核心與手動標籤。視覺比對僅處理靜態圖，細微表情、文字等差分仍可能通過，請先檢視候選。動畫只參與完全重複比對。
+      </p>
+
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; background:var(--bg-main); padding:10px 12px; border-radius:8px; border:1px solid var(--border);">
+        <label style="flex:1.4; min-width:220px; font-size:12px;">
+          <b>比對模式：</b>
+          <select id="dedup-mode" class="select-box" style="width:100%; margin-top:4px;" onchange="loadDedupPreview()">
+            <option value="both" selected>🔍 完全重複 + 靜態圖視覺相似比對 (需檢視細微差分)</option>
+            <option value="exact">⚡ 僅完全重複檔案 (SHA-256 與位元組 100% 相同)</option>
+            <option value="visual">👁️ 僅視覺相似與縮圖比對 (dHash/pHash + SSIM ≥ 0.95)</option>
+          </select>
+        </label>
+        <label style="flex:1; min-width:180px; font-size:12px;">
+          <b>比對範圍：</b>
+          <select id="dedup-scope" class="select-box" style="width:100%; margin-top:4px;" onchange="loadDedupPreview()">
+            <option value="same_folder" selected>📁 僅同一資料夾內比對 (推薦)</option>
+            <option value="all">🌐 跨資料夾全圖庫比對</option>
+          </select>
+        </label>
+        <label style="flex:1; min-width:180px; font-size:12px;">
+          <b>目標資料夾：</b>
+          <select id="dedup-folder" class="select-box" style="width:100%; margin-top:4px;" onchange="loadDedupPreview()">
+            <option value="__ALL__" selected>🌟 全圖庫所有資料夾</option>
+            <option value="__ROOT__">🚨 僅根目錄待整理圖片</option>
+          </select>
+        </label>
+        <button class="btn btn-primary" id="btn-dedup-scan" style="padding:6px 12px; font-size:12px;" onclick="loadDedupPreview()">🔄 重新掃描比對</button>
+      </div>
+
+      <div id="dedup-summary-bar" style="font-size:13px; font-weight:600; color:#6ee7b7; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+        <span>準備掃描重複與相似圖片...</span>
+      </div>
+
+      <div id="dedup-preview-box" style="flex:1; overflow-y:auto; background:var(--bg-main); border:1px solid var(--border); border-radius:8px; padding:10px; min-height:280px; font-size:12px; display:flex; flex-direction:column; gap:10px;">
+        ⏳ 正在載入重複圖片比對預覽...
+      </div>
+
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; padding-top:6px; border-top:1px solid var(--border);">
+        <span style="font-size:12px; color:var(--text-muted);">🛡️ 清除前自動建立 SQLite 備份、合併保留圖標籤，並將多餘檔案移至 Windows 資源回收筒</span>
+        <div style="display:flex; gap:8px;">
+          <button class="btn" onclick="closeDedupModal()">關閉</button>
+          <button class="btn btn-danger" id="btn-dedup-exec" onclick="executeDedupCleanup()">🗑️ 清除勾選的重複圖片 (移至資源回收筒)</button>
         </div>
       </div>
     </div>
