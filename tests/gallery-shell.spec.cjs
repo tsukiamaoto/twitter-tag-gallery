@@ -37,6 +37,11 @@ function illustration(id) {
       const request = route.request();
       const url = new URL(request.url());
       const pathname = url.pathname;
+      if (pathname === '/api/dedup/scans' && request.method() === 'POST') return route.fulfill({
+        contentType: 'application/json', status: 202, body: JSON.stringify({scan_id: 'preview-only', status: 'completed', result: {
+          total_scanned: 96, total_groups: 0, total_duplicate_images: 0, groups: [], all_delete_ids: [],
+        }}),
+      });
       if (request.method() !== 'GET') { posts.push(pathname); return route.fulfill({ status: 405, body: '{}' }); }
       if (pathname === '/') return route.fulfill({ contentType: 'text/html', body: html });
       if (pathname.startsWith('/static/')) return route.fulfill({
@@ -174,6 +179,9 @@ function illustration(id) {
     assert.ok((await page.evaluate(() => document.activeElement.textContent)).includes('批次改名'));
     const mgmtLabels = await page.locator('#shell-management .shell-management-panel button:visible').allTextContents();
     assert.ok(mgmtLabels.includes('清除重複圖片'), 'Management menu includes 清除重複圖片');
+    assert.equal(mgmtLabels.some(label => label.includes('掃描圖庫')), false);
+    assert.equal(await page.locator('[onclick="rescanLibrary()"]').count(), 0);
+    assert.equal(await page.evaluate(() => typeof window.rescanLibrary), 'undefined');
     await page.locator('#shell-management .shell-management-panel button', { hasText: '清除重複圖片' }).click();
     assert.equal(await page.locator('#dedup-modal').isVisible(), true);
     await page.keyboard.press('Escape');

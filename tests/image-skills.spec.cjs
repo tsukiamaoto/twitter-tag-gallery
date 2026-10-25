@@ -17,6 +17,10 @@ const templates = JSON.parse(fs.readFileSync(path.join(root, 'image_skill_templa
     const schedule = { running_job: false, config: { enabled: false, schedule_times: [], source_dirs: [], history_logs: [] } };
     const gguf = { models: [{ id: skills[0].model_id, filename: path.basename(skills[0].model_id), profile: 'wai_illustrious', valid: true, bytes: 1000 }],
       directory: 'mock/models', selection: { model_id: skills[0].model_id, profile: 'wai_illustrious' }, runtime: { phase: 'unloaded' }, download: {}, missing: [] };
+    const assignedModel = 'diffusion_models/custom-wai-illustrious.gguf';
+    gguf.models.push({ id: assignedModel, filename: path.basename(assignedModel), profile: 'wai_illustrious', valid: true });
+    const agentSkills = ['gallery-deduplication', 'twitter-tag-correlation', 'gallery-artist-identity', 'gallery-publication-tracing']
+      .map(id => ({ id, name: id, description: `Agent 工作流程 ${id}`, revision: 'a'.repeat(64), valid: true, kind: 'agent' }));
     await context.route('**/*', async route => {
       const request = route.request(), endpoint = new URL(request.url()).pathname, method = request.method();
       if (endpoint === '/') return route.fulfill({ contentType: 'text/html; charset=utf-8', body: fs.readFileSync(path.join(root, 'static/index.html'), 'utf8') });
@@ -35,6 +39,7 @@ const templates = JSON.parse(fs.readFileSync(path.join(root, 'image_skill_templa
           skills = skills.filter(item => item.id !== skill.id).concat(skill); data = { skill, message: '已儲存技能' };
         }
       } else if (endpoint === '/api/image-skills') data = { skills, active_id: active, directory: 'mock/image_skills' };
+      else if (endpoint === '/api/agent-skills') data = { skills: [...agentSkills, ...skills.map(skill => ({ ...skill, kind: 'image-repair' }))] };
       else if (endpoint === '/api/models/gguf') data = gguf;
       else if (endpoint === '/api/runtime') data = { ai, reverse: { running: false }, schedule, active_job: {}, jobs: [], model: {} };
       else if (endpoint === '/api/stats') data = { total_images: 0, root_unorganized: 0, folder_organized: 0, ai_tagged: 0, suggested_folder_count: 0, ai_status: ai };
@@ -50,6 +55,9 @@ const templates = JSON.parse(fs.readFileSync(path.join(root, 'image_skill_templa
     await page.waitForSelector('.image-skill-list-card[data-skill-id="anime-decensor-wai-illustrious"]');
     assert.equal(await page.locator('#image-skill-modal').isHidden(), true, 'Editor modal starts closed on card list view');
     assert.equal(await page.locator('.image-skill-list-card').count(), 1);
+    assert.equal(await page.locator('#image-skill-cards > .agent-skill-card').count(), 4, 'All Agent Skills share the same list');
+    assert.equal(await page.locator('[role="list"][aria-label="Agent Skill 列表"] > [role="listitem"]').count(), 5, 'Image Skills appear once in the unified catalog');
+    assert.equal(await page.locator('.agent-skill-section').count(), 0);
     assert.equal(await page.locator('.image-skill-list-card').first().getAttribute('data-active'), 'true');
     fs.mkdirSync(artifacts, { recursive: true });
     await page.locator('#ai-workspace').screenshot({ path: path.join(artifacts, 'image-skills-cards-desktop.png'), animations: 'disabled' });
@@ -71,6 +79,9 @@ const templates = JSON.parse(fs.readFileSync(path.join(root, 'image_skill_templa
     // Editing locks skill switching, tracks the draft and supports a keyboard save.
     const revised = 'Repair the damaged background. Preserve the original line work and lighting.';
     await page.locator('#image-skill-prompt').fill(revised);
+    await page.locator('#image-skill-model').selectOption(assignedModel);
+    await page.locator('details').filter({ has: page.locator('#image-skill-instructions') }).locator('summary').click();
+    await page.locator('#image-skill-instructions').fill('Preserve the original image. Preview the repaired copy.');
     assert.equal(await page.locator('#image-skill-draft-state').textContent(), '尚未儲存');
     assert.equal(await page.locator('#image-skill-apply').isDisabled(), true);
     assert.equal(await page.locator('#image-skill-picker').isDisabled(), true);
@@ -78,6 +89,9 @@ const templates = JSON.parse(fs.readFileSync(path.join(root, 'image_skill_templa
     await page.locator('#image-skill-prompt').press('Control+s');
     await page.waitForFunction(() => document.querySelector('#image-skill-draft-state').textContent === '已儲存');
     assert.equal(mutations[0].body.prompt, revised);
+    assert.equal(mutations[0].body.model_id, assignedModel);
+    assert.equal(mutations[0].body.instructions, 'Preserve the original image. Preview the repaired copy.');
+    assert.ok((await page.locator('.image-skill-list-card-meta').first().textContent()).includes(path.basename(assignedModel)));
     assert.equal(await page.locator('#image-skill-apply').isEnabled(), true, 'An edited active skill can be applied again');
     await page.locator('#image-skill-apply').click();
     await page.waitForFunction(() => document.querySelector('#image-skills-feedback').textContent === '已套用技能');

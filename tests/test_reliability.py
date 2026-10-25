@@ -280,7 +280,7 @@ class IntegrationTests(GalleryCase):
     def test_antigravity_export_uses_native_policy_fields(self):
         integrations.save({"mcp_read_only":True})
         config=integrations.client_config("antigravity")["mcpServers"]["gallery"]
-        self.assertIn("gallery_scan_library",config["disabledTools"])
+        self.assertIn("gallery_recover_file_operations",config["disabledTools"])
         self.assertNotIn("gallery_get_overview",config["disabledTools"])
         self.assertNotIn("trust",config);self.assertNotIn("includeTools",config)
         exported=integrations.client_config()["mcpServers"]

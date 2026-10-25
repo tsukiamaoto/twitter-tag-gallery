@@ -22,7 +22,6 @@ class CreateJob(BaseModel):
 class PromptUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     usage_prompt: str = Field(default="", max_length=16000)
-    task_prompt: str | None = Field(default=None, max_length=24000)
     revision: int = Field(ge=0)
     reset: bool = False
 
@@ -80,7 +79,7 @@ def publication_preview(folder: str = "__ALL_ARTIST_FOLDERS__"):
 
 @router.put("/api/settings/mcp/tools/{name}/prompt")
 def save_prompt(name: str, request: PromptUpdate):
-    return call(prompt_store.save, name, request.usage_prompt, request.task_prompt, request.revision, request.reset)
+    return call(prompt_store.save, name, request.usage_prompt, request.revision, request.reset)
 
 
 @router.post("/api/agent/bridge")

@@ -1,0 +1,217 @@
+/* All API calls are intercepted: no real file moves or Windows task changes. */
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { chromium } = require('playwright');
+const root = path.resolve(__dirname, '..');
+const artifacts = path.join(root, '.tag_gallery/ui-review');
+
+(async () => {
+  const browser = await chromium.launch({ headless: true, channel: process.env.PLAYWRIGHT_CHANNEL || 'msedge' });
+  try {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, timezoneId: 'Asia/Taipei' });
+    const errors = [], writes = [], imageReads = [];
+    let failLoad = true, failSave = false, failRefresh = false, busyRun = false;
+    let schedule = { running_job: false, status_message: '排程器待機中', config: {
+      enabled: true, schedule_times: ['22:00'], source_dirs: ['C:\\Users\\Gary\\Downloads\\pic'],
+      history_logs: [], general_thresh: 0.83, artist_thresh: 0.87, reverse_search_limit: 17,
+    } };
+    await context.route('**/*', async route => {
+      const request = route.request(), url = new URL(request.url()), endpoint = url.pathname;
+      if (endpoint === '/') return route.fulfill({ contentType: 'text/html', body: fs.readFileSync(path.join(root, 'static/index.html'), 'utf8') });
+      if (endpoint.startsWith('/static/')) return route.fulfill({ contentType: endpoint.endsWith('.css') ? 'text/css' : 'text/javascript', body: fs.readFileSync(path.join(root, endpoint), 'utf8') });
+      let data = {};
+      if (endpoint === '/api/images') { imageReads.push(endpoint); data = { items: [], total: 0, page: 1, page_size: 60 }; }
+      else if (endpoint === '/api/tags') data = { items: [], has_more: false };
+      else if (endpoint === '/api/folders') data = [];
+      else if (endpoint === '/api/stats') data = { total_images: 0, root_unorganized: 0, folder_organized: 0, ai_tagged: 0, suggested_folder_count: 0, ai_status: {} };
+      else if (endpoint === '/api/runtime') data = { ai: {}, reverse: {}, schedule, active_job: {}, jobs: [], model: {} };
+      else if (endpoint === '/api/schedule/status') {
+        if (failLoad || failRefresh) return route.fulfill({ status: 503, json: { detail: '暫時無法讀取' } });
+        data = schedule;
+      } else if (endpoint === '/api/schedule/config') {
+        writes.push({ endpoint, body: request.postDataJSON() });
+        if (failSave) return route.fulfill({ status: 500, json: { detail: '儲存失敗' } });
+        schedule = { ...schedule, config: { ...schedule.config, ...request.postDataJSON() } };
+        data = { status: 'saved', config: schedule.config, windows_task: { registered: true } };
+      } else if (endpoint === '/api/schedule/run_now') { writes.push({ endpoint }); data = busyRun ? { status: 'busy', message: '其他背景任務忙碌中' } : { status: 'started' }; }
+      else if (endpoint === '/api/schedule/pick_folder') data = { selected_path: 'D:\\下載\\待整理圖片' };
+      else if (endpoint === '/api/schedule/preview_source') data = { total_files: 24, total_subdirs: 2, directories: request.postDataJSON().source_dirs.map(value => ({ path: value, exists: true, file_count: 12, subdir_count: 1 })) };
+      else if (request.method() !== 'GET') throw new Error(`Unexpected write: ${endpoint}`);
+      return route.fulfill({ json: data });
+    });
+    const page = await context.newPage(); page.on('pageerror', error => errors.push(error.message));
+    await page.goto('http://schedule.test/');
+    await page.waitForSelector('#workspace-schedule');
+    assert.deepEqual(await page.locator('#workspace-rail button').allTextContents(), ['首頁', '排程', 'AI']);
+    await page.locator('#workspace-schedule').click();
+    await page.waitForSelector('#schedule-retry:visible');
+    assert.equal(await page.locator('#btn-save-schedule').isDisabled(), true);
+    assert.equal(await page.locator('#sch-time-1').isDisabled(), true);
+    assert.equal(await page.locator('#schedule-modal').isVisible(), false);
+    assert.equal(await page.locator('#shell-sidebar').isVisible(), false);
+    failLoad = false;
+    await page.locator('#schedule-retry').click();
+    await page.waitForFunction(() => !document.querySelector('#btn-save-schedule').disabled);
+    assert.equal(await page.locator('#sch-time-1').inputValue(), '22:00');
+    assert.equal(await page.locator('#schedule-draft-status').textContent(), '所有變更已儲存');
+    assert.equal(await page.locator('#schedule-state').getAttribute('data-state'), 'enabled');
+    assert.equal(await page.locator('.schedule-history-empty').isVisible(), true);
+    assert.equal(await page.locator('#schedule-next-time').textContent(), '22:00');
+    fs.mkdirSync(artifacts, { recursive: true });
+    await page.screenshot({ path: path.join(artifacts, 'schedule-desktop.png'), animations: 'disabled' });
+
+    await page.locator('#schedule-add-time').click();
+    assert.equal(await page.locator('#sch-time-2').inputValue(), '22:00');
+    await page.locator('#btn-save-schedule').click();
+    assert.equal(writes.length, 0, 'Duplicate times are rejected before saving');
+    assert.match(await page.locator('#schedule-feedback').textContent(), /不可相同/);
+    await page.locator('#sch-time-2').fill('');
+    assert.equal(await page.locator('#sch-time-2').isVisible(), true, 'An incomplete time stays open while editing');
+    await page.locator('#btn-save-schedule').click();
+    assert.equal(writes.length, 0, 'An incomplete second time is rejected');
+    await page.locator('#sch-time-2').fill('08:30');
+    await page.locator('#sch-time-1').fill('21:30');
+    assert.equal(await page.locator('#schedule-draft-status').textContent(), '有尚未儲存的變更');
+    assert.equal(await page.locator('#schedule-preview-label').textContent(), '儲存後生效');
+    const baselineReads = imageReads.length;
+    await page.locator('#workspace-home').click();
+    await page.locator('#workspace-ai').click();
+    await page.evaluate(() => openSettings('schedule'));
+    assert.equal(await page.locator('#sch-time-1').inputValue(), '21:30');
+    assert.equal(await page.locator('#sch-time-2').inputValue(), '08:30');
+    assert.equal(imageReads.length, baselineReads, 'Workspace switches do not reload the gallery');
+    await page.locator('#schedule-page-title').focus();
+    for (const key of ['/', 'ArrowRight', 'Delete']) await page.keyboard.press(key);
+    assert.equal(imageReads.length, baselineReads);
+    assert.equal(writes.length, 0);
+    assert.equal(await page.locator('#main-search').evaluate(el => el === document.activeElement), false);
+    await page.locator('#btn-settings').click();
+    assert.equal(await page.locator('.settings-tabs #settings-tab-schedule').count(), 0);
+    await page.keyboard.press('ArrowRight');
+    assert.equal(await page.locator('#settings-tab-history').getAttribute('aria-selected'), 'true');
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#settings-schedule').isVisible(), true);
+    assert.equal(await page.locator('#sch-time-1').inputValue(), '21:30');
+
+    await page.locator('#btn-pick-source-folder').click();
+    await page.waitForFunction(() => document.querySelector('#schedule-source-count').textContent === '2');
+    assert.match(await page.locator('#sch-source-dirs').inputValue(), /待整理圖片/);
+    assert.match(await page.locator('#sch-source-preview').textContent(), /24/);
+    await page.locator('#schedule-manual-paths summary').click();
+    await page.locator('#sch-source-dirs').fill('D:\\新草稿\\圖片');
+    assert.equal(await page.locator('#sch-source-preview').isVisible(), false, 'Editing sources clears stale preview');
+    await page.locator('#schedule-refresh-status').click();
+    await page.waitForFunction(() => !document.querySelector('#schedule-refresh-status').disabled);
+    assert.equal(await page.locator('#sch-source-dirs').inputValue(), 'D:\\新草稿\\圖片', 'Status refresh preserves unsaved sources');
+    assert.equal(await page.locator('#sch-time-1').inputValue(), '21:30');
+    failRefresh = true;
+    await page.locator('#schedule-refresh-status').click();
+    await page.waitForFunction(() => document.querySelector('#sch-live-status').textContent.includes('更新失敗'));
+    failRefresh = false;
+
+    failSave = true;
+    await page.locator('#btn-sch-run-now').click();
+    await page.waitForFunction(() => document.querySelector('#schedule-feedback').textContent.includes('儲存失敗'));
+    assert.equal(writes.filter(value => value.endpoint.endsWith('run_now')).length, 0, 'Save failure never starts the pipeline');
+    assert.equal(await page.locator('#schedule-draft-status').textContent(), '有尚未儲存的變更');
+    failSave = false;
+    await page.locator('#btn-save-schedule').click();
+    await page.waitForFunction(() => document.querySelector('#schedule-feedback').textContent.includes('已同步 Windows'));
+    assert.equal(await page.locator('#schedule-draft-status').textContent(), '所有變更已儲存');
+    const saved = writes.at(-1).body;
+    assert.equal(saved.general_thresh, 0.83); assert.equal(saved.artist_thresh, 0.87); assert.equal(saved.reverse_search_limit, 17);
+    assert.deepEqual(saved.schedule_times, ['21:30', '08:30']);
+    assert.deepEqual(saved.source_dirs, ['D:\\新草稿\\圖片']);
+    await page.locator('#btn-sch-run-now').click();
+    await page.waitForFunction(() => document.querySelector('#schedule-feedback').textContent.includes('已開始執行'));
+    assert.equal(writes.filter(value => value.endpoint.endsWith('run_now')).length, 1);
+    busyRun = true;
+    await page.locator('#btn-sch-run-now').click();
+    await page.waitForFunction(() => document.querySelector('#schedule-feedback').textContent.includes('其他背景任務忙碌中'));
+    assert.match(await page.locator('#schedule-feedback').textContent(), /啟動失敗/);
+    busyRun = false;
+    await page.locator('#picker-clear-2').click();
+    assert.equal(await page.locator('#sch-time-2').inputValue(), '');
+    assert.equal(await page.locator('#schedule-add-time').isVisible(), true);
+    await page.locator('#sch-enabled').uncheck();
+    assert.equal(await page.locator('#schedule-next-time').textContent(), '已暫停');
+    await page.locator('#sch-enabled').check();
+    await page.locator('#sch-source-dirs').fill('');
+    const writesBeforeEmpty = writes.length;
+    await page.locator('#btn-save-schedule').click();
+    assert.match(await page.locator('#schedule-feedback').textContent(), /至少一個來源/);
+    assert.equal(writes.length, writesBeforeEmpty);
+    await page.locator('#sch-source-dirs').fill('D:\\下載\\' + '長資料夾名稱'.repeat(18) + '\\圖片');
+    await page.locator('#schedule-manual-paths summary').click();
+    await page.evaluate(() => setScheduleFeedback(''));
+    schedule.config.history_logs = Array.from({ length: 6 }, (_, index) => ({ timestamp: `2026-10-${23 - index} 22:00:02`, trigger_reason: 'Windows 系統排程器自動觸發', moved_from_source: 72 - index * 10, empty_dirs_removed: 0, ai_tagged_count: 59 - index * 10, organized_to_artist_folders: 50 - index * 8, new_artist_folders_created: index % 3, elapsed_sec: 340.29 + index * 10 }));
+    await page.locator('#schedule-refresh-status').click();
+    await page.waitForSelector('.schedule-history-entry');
+    assert.equal(await page.locator('.schedule-history-entry:visible').count(), 3, 'Only the three most recent runs are shown initially');
+    assert.equal(await page.locator('#schedule-history-more').getAttribute('aria-expanded'), 'false');
+    const firstRun = page.locator('.schedule-history-entry').first();
+    await firstRun.locator('summary').focus();
+    await page.keyboard.press('Enter');
+    assert.equal(await firstRun.getAttribute('open'), '');
+    assert.match(await firstRun.locator('.schedule-history-details').textContent(), /340.29 秒/);
+    await page.evaluate(() => renderScheduleHistory({ config: { history_logs: JSON.parse(document.querySelector('#sch-history-box').dataset.signature) }, status_message: '背景狀態已更新' }));
+    assert.equal(await firstRun.getAttribute('open'), '', 'Background polling keeps run details open');
+    assert.equal(await firstRun.locator('summary').evaluate(el => el === document.activeElement), true, 'Background polling keeps keyboard focus');
+    await page.locator('#schedule-history-more').click();
+    assert.equal(await page.locator('.schedule-history-entry:visible').count(), 6);
+    schedule.config.history_logs.unshift({ ...schedule.config.history_logs[0], timestamp: '2026-10-24 22:00:02', trigger_reason: '<img src=x onerror=alert(1)>', elapsed_sec: 0 });
+    await page.locator('#schedule-refresh-status').click();
+    await page.waitForFunction(() => document.querySelectorAll('.schedule-history-entry').length === 7);
+    assert.equal(await page.locator('.schedule-history-entry:visible').count(), 7, 'Viewing all runs survives refreshed history');
+    assert.equal(await page.locator('.schedule-history-entry[open]').count(), 1, 'An open run remains open when a newer run is inserted');
+    assert.equal(await page.locator('#sch-history-box img').count(), 0, 'History content is rendered as text');
+    await page.locator('#schedule-history-more').click();
+    assert.equal(await page.locator('.schedule-history-entry:visible').count(), 3);
+    await page.locator('.schedule-history-entry[open] summary').click();
+    schedule.config.history_logs.shift();
+    await page.locator('#schedule-refresh-status').click();
+    await page.waitForFunction(() => document.querySelectorAll('.schedule-history-entry').length === 6);
+
+    const widths = [2133, 1600, 1440, 1064, 901, 900, 801, 800, 768, 760, 600, 520, 390, 320];
+    for (const width of widths) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.evaluate(() => { document.querySelector('#schedule-content').scrollTop = 0; });
+      const bounds = await page.evaluate(() => {
+        const content = document.querySelector('#schedule-content'), footer = document.querySelector('.schedule-footer').getBoundingClientRect();
+        return { viewport: innerWidth, document: document.documentElement.scrollWidth, client: content.clientWidth, scroll: content.scrollWidth, footer: { top: footer.top, bottom: footer.bottom } };
+      });
+      assert.ok(bounds.document <= width && bounds.scroll <= bounds.client + 1, `No overflow at ${width}px: ${JSON.stringify(bounds)}`);
+      assert.ok(bounds.footer.top > 0 && bounds.footer.bottom <= 900, `Footer is visible at ${width}px`);
+      if ([1440, 390, 320].includes(width)) await page.screenshot({ path: path.join(artifacts, `schedule-${width}.png`), animations: 'disabled' });
+      await page.locator('#schedule-advanced summary').click();
+      assert.match(await page.locator('#schedule-options-summary').textContent(), /已啟用 \d+ 項/);
+      const disclosure = await page.locator('#schedule-advanced summary').boundingBox();
+      assert.ok(disclosure.height >= 44, 'The full advanced settings header is a large click target');
+      await page.locator('#sch-also-root').scrollIntoViewIfNeeded();
+      assert.equal(await page.locator('#btn-save-schedule').isVisible(), true);
+      await page.locator('#schedule-advanced summary').click();
+      await page.locator('.schedule-history-entry summary').first().scrollIntoViewIfNeeded();
+      assert.equal(await page.locator('#sch-history-box').evaluate(el => el.scrollHeight <= el.clientHeight + 1), true, 'Run history uses the page scroll instead of a nested scroll area');
+      const historyBounds = await page.locator('.schedule-history-card').evaluate(el => ({ client: el.clientWidth, scroll: el.scrollWidth }));
+      assert.ok(historyBounds.scroll <= historyBounds.client + 1, `Run history fits at ${width}px`);
+      if ([1440, 390, 320].includes(width)) await page.screenshot({ path: path.join(artifacts, `schedule-history-${width}.png`), animations: 'disabled' });
+    }
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.evaluate(() => { document.querySelector('#sch-source-dirs').value = 'C:\\Users\\Gary\\Downloads\\pic'; renderSourceFolderChips(); document.querySelector('#schedule-content').scrollTop = 0; });
+    await page.screenshot({ path: path.join(artifacts, 'schedule-refined-desktop.png'), animations: 'disabled' });
+    await page.locator('#schedule-advanced').evaluate(el => el.scrollIntoView({ block: 'start' }));
+    await page.mouse.move(30, 300);
+    await page.screenshot({ path: path.join(artifacts, 'schedule-refined-history.png'), animations: 'disabled' });
+    await page.locator('#schedule-advanced summary').click();
+    await page.locator('#schedule-advanced').evaluate(el => el.scrollIntoView({ block: 'start' }));
+    await page.screenshot({ path: path.join(artifacts, 'schedule-refined-options.png'), animations: 'disabled' });
+    await page.evaluate(() => openScheduleModal());
+    assert.equal(await page.locator('#workspace-schedule').getAttribute('aria-current'), 'page');
+    assert.equal(await page.locator('#sch-time-1').inputValue(), '21:30');
+    const ids = await page.locator('[id]').evaluateAll(elements => elements.map(el => el.id));
+    assert.equal(ids.length, new Set(ids).size, 'All input and page IDs are unique');
+    assert.deepEqual(errors, []);
+    console.log(JSON.stringify({ result: 'PASS', widths, mockedWrites: writes.length, browserErrors: errors.length, screenshots: artifacts }));
+  } finally { await browser.close(); }
+})().catch(error => { console.error(error); process.exitCode = 1; });

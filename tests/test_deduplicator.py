@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
 """Tests for exact and visual duplicate detection, variation preservation, tag inheritance, and MCP tool."""
 from pathlib import Path
+import os
+import struct
+import zlib
 from unittest.mock import patch
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageCms, ImageDraw
 
 import database
 import deduplicator
@@ -15,6 +18,264 @@ from test_reliability import GalleryCase
 
 
 class DeduplicatorTests(GalleryCase):
+    def test_png_metadata_does_not_decode_with_pillow_and_opencv_decodes_once(self):
+        path = self.image("single-decode.png")
+        import cv2
+        from PIL import PngImagePlugin
+        with patch.object(PngImagePlugin.PngImageFile, "load", side_effect=AssertionError("Pillow must not decode")), \
+                patch.object(cv2, "imdecode", wraps=cv2.imdecode) as decode:
+            entry = deduplicator._compute_pixel_fingerprint(path)
+        self.assertIsNotNone(entry)
+        self.assertEqual(decode.call_count, 1)
+
+    def test_png_exif_after_pixel_data_is_preserved_without_raster_decode(self):
+        first = self.image("plain.png")
+        second = self.root / "rotated.png"
+        exif = Image.Exif()
+        exif[274] = 3
+        data = exif.tobytes()[6:]
+        chunk = b"eXIf" + data
+        encoded = first.read_bytes()
+        # Insert EXIF immediately before IEND, after IDAT.
+        second.write_bytes(encoded[:-12] + struct.pack(">I", len(data)) + chunk
+                           + struct.pack(">I", zlib.crc32(chunk) & 0xffffffff) + encoded[-12:])
+        with patch.object(Image.Image, "load", side_effect=AssertionError("no raster decode")):
+            self.assertNotEqual(deduplicator._image_header(first)[2], deduplicator._image_header(second)[2])
+        with patch.object(deduplicator, "_load_full_image") as decode:
+            matched, metrics = deduplicator.compare_visual_identity(first, second)
+            self.assertFalse(matched)
+            self.assertEqual(metrics["reason"], "display_metadata_mismatch")
+            decode.assert_not_called()
+
+    def test_unique_dimensions_and_verified_exact_copies_need_no_full_decode(self):
+        image = self.image("master.png")
+        (self.root / "copy.png").write_bytes(image.read_bytes())
+        Image.new("RGB", (23, 29), "blue").save(self.root / "unique.png")
+        database.scan_library()
+        events = []
+        with patch.object(deduplicator, "_load_full_image", side_effect=AssertionError("unnecessary decode")):
+            preview = deduplicator.scan_duplicates(progress=lambda **value: events.append(value))
+        self.assertEqual(preview["exact_duplicate_images"], 1)
+        self.assertEqual(preview["visual_duplicate_images"], 0)
+        self.assertTrue(any(e.get("skipped_images") == 2 for e in events))
+        self.assertEqual(events[-1]["stage"], "比對完成")
+
+    def test_dimensions_are_grouped_within_scope_before_decoding(self):
+        for folder, color in (("artist-a", "red"), ("artist-b", "blue")):
+            directory = self.root / folder
+            directory.mkdir()
+            Image.new("RGB", (32, 32), color).save(directory / "image.png")
+        database.scan_library()
+        with patch.object(deduplicator, "_load_full_image", side_effect=AssertionError("different folders")):
+            result = deduplicator.scan_duplicates(scope="same_folder")
+        self.assertEqual(result["total_duplicate_images"], 0)
+
+    def test_new_peer_activates_a_previously_skipped_singleton(self):
+        first = self.image("first.png")
+        database.scan_library()
+        with patch.object(deduplicator, "_compute_pixel_fingerprint") as compute:
+            self.assertEqual(deduplicator.scan_duplicates()["total_duplicate_images"], 0)
+            compute.assert_not_called()
+        with Image.open(first) as image:
+            image.save(self.root / "peer.webp", lossless=True)
+        database.scan_library()
+        self.assertEqual(deduplicator.scan_duplicates()["visual_duplicate_images"], 1)
+
+    def test_unchanged_header_cache_skips_image_open_but_invalidates_on_edit(self):
+        path = self.image("singleton.png")
+        database.scan_library()
+        deduplicator.scan_duplicates()
+        with patch.object(deduplicator.Image, "open", side_effect=AssertionError("cached header")):
+            self.assertEqual(deduplicator.scan_duplicates()["total_duplicate_images"], 0)
+        Image.new("RGB", (11, 12), "blue").save(path)
+        rows = self.rows("SELECT * FROM images")
+        deduplicator._pixel_candidates(rows, "all")
+        self.assertEqual((rows[0]["width"], rows[0]["height"]), (11, 12))
+
+    def test_mismatched_dimensions_reject_before_decoding(self):
+        first = self.image("first.png")
+        second = self.root / "second.png"
+        Image.new("RGB", (11, 10), "red").save(second)
+        with patch.object(deduplicator, "_load_full_image") as decode:
+            matched, metrics = deduplicator.compare_visual_identity(first, second)
+        self.assertFalse(matched)
+        self.assertEqual(metrics["reason"], "dimensions_mismatch")
+        decode.assert_not_called()
+
+    def test_one_low_contrast_pixel_is_preserved_at_original_resolution(self):
+        original = self.root / "原圖.png"
+        changed = self.root / "表情差分.png"
+        image = Image.new("RGB", (1536, 1024), (120, 130, 140))
+        image.save(original)
+        image.putpixel((1535, 1023), (121, 130, 140))
+        image.save(changed)
+        # Even the loosest legacy settings cannot override exact equality.
+        matched, metrics = deduplicator.compare_visual_identity(
+            original, changed, max_mae=20.0, min_ssim=0.8, max_diff_frac=0.05)
+        self.assertFalse(matched)
+        self.assertEqual(metrics["changed_pixels"], 1)
+        self.assertEqual(metrics["max_channel_diff"], 1)
+        database.scan_library()
+        self.assertEqual(deduplicator.scan_duplicates()["total_duplicate_images"], 0)
+
+    def test_alpha_channel_differences_are_preserved(self):
+        first, second = self.root / "first.png", self.root / "alpha.png"
+        image = Image.new("RGBA", (64, 64), (120, 130, 140, 255))
+        image.save(first)
+        image.putpixel((30, 31), (120, 130, 140, 254))
+        image.save(second)
+        matched, metrics = deduplicator.compare_visual_identity(first, second)
+        self.assertFalse(matched)
+        self.assertEqual(metrics["changed_pixels"], 1)
+        database.scan_library()
+        self.assertEqual(deduplicator.scan_duplicates()["total_duplicate_images"], 0)
+
+    def test_16bit_low_bit_differences_are_not_discarded(self):
+        first, second = self.root / "16bit.png", self.root / "16bit-diff.png"
+        pixels = np.full((64, 64), 32000, dtype=np.uint16)
+        Image.fromarray(pixels).save(first)
+        pixels[31, 30] += 1
+        Image.fromarray(pixels).save(second)
+        matched, metrics = deduplicator.compare_visual_identity(first, second)
+        self.assertFalse(matched)
+        self.assertEqual(metrics["max_channel_diff"], 1)
+
+    def test_equivalent_opaque_rgb_rgba_and_grayscale_pixels_match(self):
+        paths = [self.root / (mode + ".png") for mode in ("L", "RGB", "RGBA")]
+        image = Image.new("L", (40, 60), 123)
+        for path, mode in zip(paths, ("L", "RGB", "RGBA")):
+            image.convert(mode).save(path)
+        for path in paths[1:]:
+            matched, metrics = deduplicator.compare_visual_identity(paths[0], path)
+            self.assertTrue(matched)
+            self.assertEqual(metrics["changed_pixels"], 0)
+        database.scan_library()
+        self.assertEqual(deduplicator.scan_duplicates(mode="visual")["total_duplicate_images"], 2)
+
+    def test_resize_recompression_and_display_metadata_changes_are_preserved(self):
+        original = self.root / "master.png"
+        self._create_gradient_image(original)
+        variants = [self.root / name for name in ("small.png", "compressed.jpg", "oriented.png", "profile.png")]
+        with Image.open(original) as image:
+            image.resize((200, 200)).save(variants[0])
+            image.save(variants[1], quality=90)
+            exif = image.getexif()
+            exif[274] = 3
+            image.save(variants[2], exif=exif)
+            image.save(variants[3], icc_profile=ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes())
+        for path in variants:
+            with self.subTest(path=path.name):
+                matched, _ = deduplicator.compare_visual_identity(original, path)
+                self.assertFalse(matched)
+        database.scan_library()
+        self.assertEqual(deduplicator.scan_duplicates()["total_duplicate_images"], 0)
+
+    def test_pixel_cache_invalidates_same_size_edit_and_decoder_version(self):
+        first, second = self.root / "a.png", self.root / "b.png"
+        image = Image.new("RGB", (64, 64), (120, 130, 140))
+        image.save(first, compress_level=0)
+        image.save(second, compress_level=9)
+        database.scan_library()
+        self.assertEqual(deduplicator.scan_duplicates(mode="visual")["total_duplicate_images"], 1)
+        rows = self.rows("SELECT * FROM images")
+        with patch.object(deduplicator, "_compute_pixel_fingerprint") as compute:
+            deduplicator.ensure_pixel_hashes(rows)
+            compute.assert_not_called()
+        before = first.stat()
+        image.putpixel((20, 30), (121, 130, 140))
+        image.save(first, compress_level=0)
+        self.assertEqual(first.stat().st_size, before.st_size)
+        os.utime(first, ns=(before.st_atime_ns, before.st_mtime_ns + 1000000))
+        self.assertEqual(deduplicator.scan_duplicates(mode="visual")["total_duplicate_images"], 0)
+        conn = deduplicator._open_visual_hash_db()
+        with conn:
+            conn.execute("UPDATE pixel_hashes SET version='outdated'")
+        conn.close()
+        with patch.object(deduplicator, "_compute_pixel_fingerprint", wraps=deduplicator._compute_pixel_fingerprint) as compute:
+            deduplicator.ensure_pixel_hashes(rows)
+            self.assertEqual(compute.call_count, 2)
+
+    def test_cached_fingerprint_collision_still_requires_direct_comparison(self):
+        first, second = self.root / "a.png", self.root / "b.png"
+        image = Image.new("RGB", (64, 64), "white")
+        image.save(first)
+        image.putpixel((10, 10), (254, 255, 255))
+        image.save(second)
+        database.scan_library()
+        deduplicator.scan_duplicates(mode="visual")
+        conn = deduplicator._open_visual_hash_db()
+        with conn:
+            conn.execute("UPDATE pixel_hashes SET pixel_hash='forced-collision'")
+            ids = [row["id"] for row in self.rows("SELECT id FROM images ORDER BY id")]
+            conn.execute("INSERT INTO visual_pair_cache VALUES(?,?,?,?,0,1,0,0)",
+                         (*ids, first.stat().st_size, second.stat().st_size))
+        conn.close()
+        self.assertEqual(deduplicator.scan_duplicates()["total_duplicate_images"], 0)
+
+    def test_cleanup_rejects_stale_preview_before_backup_or_tag_merge(self):
+        first, second = self.root / "a.png", self.root / "b.png"
+        image = Image.new("RGB", (64, 64), "white")
+        image.save(first, compress_level=0)
+        image.save(second, compress_level=9)
+        database.scan_library()
+        preview = deduplicator.scan_duplicates()
+        self.assertEqual(preview["total_duplicate_images"], 1)
+        image.putpixel((10, 10), (254, 255, 255))
+        image.save(second)
+        with patch("backup_service.backup") as backup, patch.object(gallery_deletion, "delete_images") as delete:
+            with self.assertRaisesRegex(ValueError, "重新掃描"):
+                deduplicator.execute_dedup_groups(preview["groups"])
+            backup.assert_not_called()
+            delete.assert_not_called()
+            from fastapi import HTTPException
+            from management_api import DedupExecuteRequest, dedup_execute
+            with self.assertRaises(HTTPException) as response:
+                dedup_execute(DedupExecuteRequest(groups=preview["groups"], selected_delete_ids=preview["all_delete_ids"]))
+            self.assertEqual(response.exception.status_code, 400)
+            backup.assert_not_called()
+            delete.assert_not_called()
+        self.assertTrue(first.exists())
+        self.assertTrue(second.exists())
+
+    def test_exact_and_pixel_subgroups_share_one_kept_image(self):
+        image = Image.new("RGB", (64, 64), "white")
+        for name, level in (("a.png", 0), ("b.png", 9)):
+            path = self.root / name
+            image.save(path, compress_level=level)
+            (self.root / ("copy-" + name)).write_bytes(path.read_bytes())
+        database.scan_library()
+        preview = deduplicator.scan_duplicates()
+        self.assertEqual(preview["total_groups"], 1)
+        self.assertEqual(preview["total_duplicate_images"], 3)
+        self.assertEqual(preview["exact_duplicate_images"], 1)
+        self.assertEqual(preview["visual_duplicate_images"], 2)
+        self.assertNotIn(preview["groups"][0]["keep"]["id"], preview["all_delete_ids"])
+        with patch.object(gallery_deletion, "recycle_files", side_effect=lambda paths: [Path(p).unlink() for p in paths]):
+            result = deduplicator.execute_dedup_groups(preview["groups"])
+        self.assertEqual(result["deleted_count"], 3)
+        self.assertEqual(len(list(self.root.glob("*.png"))), 1)
+
+    def test_scope_limits_pixel_equality_to_selected_folders(self):
+        image = Image.new("RGB", (64, 64), "white")
+        for folder, level in (("artist-a", 0), ("artist-b", 9)):
+            directory = self.root / folder
+            directory.mkdir()
+            image.save(directory / "image.png", compress_level=level)
+        database.scan_library()
+        self.assertEqual(deduplicator.scan_duplicates(scope="same_folder")["total_duplicate_images"], 0)
+        self.assertEqual(deduplicator.scan_duplicates(scope="all")["total_duplicate_images"], 1)
+        self.assertEqual(deduplicator.scan_duplicates(scope="all", folder="artist-a")["total_duplicate_images"], 0)
+
+    def test_exact_comparison_checks_middle_of_large_files(self):
+        first, second = self.root / "large-a.bin", self.root / "large-b.bin"
+        data = bytearray(9 * 1024 * 1024)
+        first.write_bytes(data)
+        second.write_bytes(data)
+        self.assertTrue(deduplicator._files_identical(first, second))
+        data[len(data) // 2] = 1
+        second.write_bytes(data)
+        self.assertFalse(deduplicator._files_identical(first, second))
+
     def _create_gradient_image(self, path: Path, size=(400, 400), fmt="PNG", quality=95, add_variation=False):
         path.parent.mkdir(parents=True, exist_ok=True)
         w, h = size
@@ -46,11 +307,10 @@ class DeduplicatorTests(GalleryCase):
         exact_dup_path = folder_dir / "20260101_0001 (1).png"
         exact_dup_path.write_bytes(master_path.read_bytes())
 
-        # 3. Downscaled & JPEG-recompressed visual duplicate (300x300 JPG)
-        visual_dup_path = folder_dir / "20260101_0002_small.jpg"
+        # 3. Lossless format conversion with all original pixels preserved.
+        visual_dup_path = folder_dir / "20260101_0002_lossless.webp"
         with Image.open(master_path) as m_img:
-            small = m_img.resize((300, 300), Image.Resampling.BICUBIC)
-            small.save(visual_dup_path, format="JPEG", quality=92)
+            m_img.save(visual_dup_path, format="WEBP", lossless=True)
 
         # 4. Artist variation / differential image (same 600x600 base, but has a local change)
         variation_path = folder_dir / "20260101_0003_diff.png"
@@ -63,7 +323,7 @@ class DeduplicatorTests(GalleryCase):
             rows = {r["filename"]: r["id"] for r in conn.execute("SELECT id, filename FROM images").fetchall()}
             master_id = rows["20260101_0001.png"]
             exact_id = rows["20260101_0001 (1).png"]
-            visual_id = rows["20260101_0002_small.jpg"]
+            visual_id = rows["20260101_0002_lossless.webp"]
             variation_id = rows["20260101_0003_diff.png"]
 
             # Attach a character tag to exact_id and a manual tag to visual_id to verify tag inheritance
@@ -139,7 +399,7 @@ class DeduplicatorTests(GalleryCase):
                     first.save(path, save_all=True, append_images=[Image.new("RGB", first.size, color)], duration=100, loop=0)
                     with Image.open(path) as image:
                         self.assertEqual(image.n_frames, 2)
-                    self.assertIsNone(deduplicator._compute_single_visual_hash(path))
+                    self.assertIsNone(deduplicator._compute_pixel_fingerprint(path))
                 matched, metrics = deduplicator.compare_visual_identity(*paths)
                 self.assertFalse(matched)
                 self.assertEqual(metrics["reason"], "animated_media")

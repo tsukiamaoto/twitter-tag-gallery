@@ -15,7 +15,7 @@ const templates = JSON.parse(fs.readFileSync(path.join(root, 'image_skill_templa
     let configuration = { mcp_enabled: true, mcp_read_only: false, disabled_tools: [], sessions: [] };
     const catalog = [
       { name: 'gallery_get_overview', label: '圖庫概覽', description: '讀取圖庫統計', writes: false, example: {}, inputSchema: { type: 'object' } },
-      { name: 'gallery_scan_library', label: '掃描圖庫', description: '掃描圖片', writes: true, background: true, example: {}, inputSchema: { type: 'object' } },
+      { name: 'gallery_recover_file_operations', label: '復原中斷檔案操作', description: '修復中斷的檔案操作', writes: true, background: true, example: {}, inputSchema: { type: 'object' } },
     ];
     const ai = { running: false, model_loaded: false, status_message: '待機中' };
     const schedule = { running_job: false, config: { enabled: false, schedule_times: [], source_dirs: [], history_logs: [] } };
@@ -92,7 +92,7 @@ const templates = JSON.parse(fs.readFileSync(path.join(root, 'image_skill_templa
     assert.equal(calls.filter(value => value === '/api/images').length, imageRequests);
     assert.deepEqual(writes, []);
     await page.locator('#btn-settings').click();
-    assert.deepEqual(await page.locator('.settings-tabs [role="tab"]').allTextContents(), ['瀏覽偏好', '匯入排程', '操作日誌與紀錄', '背景任務與復原']);
+    assert.deepEqual(await page.locator('.settings-tabs [role="tab"]').allTextContents(), ['瀏覽偏好', '操作日誌與紀錄', '背景任務與復原']);
     await page.keyboard.press('Escape');
     assert.equal(await page.locator('#schedule-modal').isVisible(), false);
 
@@ -106,8 +106,8 @@ const templates = JSON.parse(fs.readFileSync(path.join(root, 'image_skill_templa
     assert.equal(await page.locator('#mcp-modal').isHidden(), true);
     assert.ok((await page.locator('.mcp-list-card[data-server-id="gallery"]').textContent()).includes('尚未儲存'));
     await page.locator('#settings-tab-tools').click();
-    await page.getByText('工具權限', { exact: true }).click();
-    await page.waitForSelector('#mcp-tool-list input');
+    assert.equal(await page.locator('#settings-tools').getByText('工具權限', { exact: true }).count(), 0);
+    await page.waitForSelector('.agent-tool-toggle');
     await page.waitForSelector('#agent-tool-catalog button');
     assert.equal(await page.locator('.agent-tool-row-content').first().textContent(), '讀取圖庫統計');
     await page.locator('#agent-tool-catalog button').first().click();
@@ -115,11 +115,11 @@ const templates = JSON.parse(fs.readFileSync(path.join(root, 'image_skill_templa
     await page.locator('#agent-usage-prompt').fill('Keep this tool prompt draft.');
     await page.locator('#agent-prompt-close').click();
     assert.equal(await page.locator('#agent-tool-modal').isVisible(), false);
-    assert.equal(await page.locator('[data-name="gallery_scan_library"]').isEnabled(), true, 'Unsaved MCP changes do not affect tool permissions');
-    await page.locator('[data-name="gallery_scan_library"]').uncheck();
-    await page.locator('#tools-permission-save').click();
-    await page.waitForFunction(() => document.querySelector('#tools-permission-feedback').textContent.includes('立即套用'));
-    assert.deepEqual(writes[0].body, { disabled_tools: ['gallery_scan_library'] });
+    const recoverySwitch = page.getByRole('switch', { name: '啟用 復原中斷檔案操作', exact: true });
+    assert.equal(await recoverySwitch.isEnabled(), true, 'Unsaved MCP changes do not affect tool permissions');
+    await recoverySwitch.uncheck();
+    await page.waitForFunction(() => document.querySelector('#agent-tool-feedback').textContent.includes('已停用並儲存'));
+    assert.deepEqual(writes[0].body, { disabled_tools: ['gallery_recover_file_operations'] });
     await page.locator('#settings-tab-mcp').click();
     await page.locator('.mcp-list-card[data-server-id="gallery"]').click();
     assert.equal(await page.locator('#mcp-modal').isVisible(), true);
@@ -129,7 +129,7 @@ const templates = JSON.parse(fs.readFileSync(path.join(root, 'image_skill_templa
     await page.locator('#mcp-modal-close').click();
     assert.equal(await page.locator('#mcp-modal').isHidden(), true);
     assert.deepEqual(writes[1].body, { mcp_enabled: true, mcp_read_only: true });
-    assert.deepEqual(configuration.disabled_tools, ['gallery_scan_library']);
+    assert.deepEqual(configuration.disabled_tools, ['gallery_recover_file_operations']);
     await page.locator('#settings-tab-tools').click();
     assert.equal(await page.locator('#agent-usage-prompt').inputValue(), 'Keep this tool prompt draft.');
 
@@ -185,6 +185,7 @@ const templates = JSON.parse(fs.readFileSync(path.join(root, 'image_skill_templa
           assert.ok(card.x >= 0 && card.x + card.width <= width && card.y + card.height <= 1000, `MCP card remains visible at ${width}px`);
         }
         if (section === 'image-skills') {
+          await page.locator('.image-skill-list-card').first().waitFor({ state: 'visible' });
           const card = await page.locator('.image-skill-list-card').first().boundingBox();
           assert.ok(card.x >= 0 && card.x + card.width <= width && card.y + card.height <= 1000, `Skill card remains visible at ${width}px`);
         }

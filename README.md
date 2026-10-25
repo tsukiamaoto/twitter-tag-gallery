@@ -5,6 +5,7 @@
 - 設定 → **MCP 管理**：圖庫 MCP 開關、唯讀模式、工具權限、本機握手診斷、Antigravity 設定匯出；「工具操作與執行紀錄」可查看各工具的參數格式、填入 JSON、實際執行並查看結果。
 - 設定 → **畫師身分**：智慧標籤、Pixiv 反查與自動歸檔先查 Danbooru 的畫師 ID、別名與平台網址；查不到則交由 Antigravity 等 MCP 客戶端補查作者頁面連結，確認後以工具保存別名與共用資料夾。圖庫不啟動模型 CLI、不需要 API 金鑰；未確認者暫緩自動歸檔。此頁提供補查佇列與可複製的客戶端操作指令，見 [畫師跨平台身分](docs/done/019-artist-identity.md)。
 - MCP 連線設定使用 **Antigravity**；登入與模型選擇在該客戶端管理，圖庫不使用 Gemini API 金鑰或直接呼叫模型 API。
+- AI → **Skill 管理**：統一管理 Agent Skills；影像修補可在技能內編輯工作流程、Prompt 與指定執行模型，完整設定保存在同一份 `SKILL.md`，見 [影像修補 Agent Skill](docs/done/024-image-agent-skills.md)。
 - 模型與自動流程只寫入**畫師、角色、作品、來源**；人工標籤保留。模型不能透過 MCP 寫入一般描述、分級、年份或主題，更新後需重連 MCP，見 [018 驗收紀錄](docs/done/018-core-generated-tags.md)。
 - 批次改名 → **追查原始發布日期**：按下後由既有 Antigravity 桌面版的 Gemini 3.8 Flash 在背景處理，以 Danbooru 協助找作者原貼文；確認後改為 `YYYYMMDD_0001.ext`，未知保留原名。AI → **Tool 設定**可搜尋全部工具、查看及編輯使用說明和模型任務 Prompt，見 [發布日期與 Prompt 管理](docs/done/021-publication-agent.md)。
 - 設定 → **背景任務與復原**：跨程序進度、未完成項目重試、檔案操作復原與資料庫備份。
@@ -18,9 +19,11 @@
 
 工具定義與參數集中於 `tool_registry.py`，共用執行、作業鎖及紀錄在 `tool_runtime.py`，業務實作在 `gallery_tools.py`、`gallery_workflow_tools.py`；`mcp_server.py` 只處理協定。Web 與 MCP 共用 `gallery_query.py` 搜尋及 `gallery_tag_service.py` 標籤寫入。設定頁與 MCP 都會驗證已儲存的權限；寫入工具共用背景作業鎖，停止要求可在忙碌時送出，唯讀工具每個程序最多同時執行兩個。執行紀錄保留最近 200 次，每次最多 128 KiB 結果，不保存輸入參數。這個操作區管理本專案內建工具。
 
-新增掃描、圖片搜尋／詳情、核心標籤編輯、本機 AI 打標、搬移預覽／執行、檔案復原、改名還原與任務查詢／停止工具。掃描、AI、搬移及復原會先回傳 `run_id`、`job_id`，使用 `gallery_get_tool_run` 查詢結果、`gallery_cancel_job` 送出停止要求；客戶端需保持 MCP 連線至任務結束。使用順序與完整工具參數見 [圖庫 MCP 流程](docs/done/012-reliability-and-mcp.md#圖庫-mcp-流程工具2026-10-21)。
+提供圖片搜尋／詳情、核心標籤編輯、本機 AI 打標、搬移預覽／執行、檔案復原、改名還原與任務查詢／停止工具。AI、搬移及復原會先回傳 `run_id`、`job_id`，使用 `gallery_get_tool_run` 查詢結果、`gallery_cancel_job` 送出停止要求；客戶端需保持 MCP 連線至任務結束。圖庫索引在初次啟動與排程匯入後自動同步，不提供獨立的手動重新掃描入口。使用順序與完整工具參數見 [圖庫 MCP 流程](docs/done/012-reliability-and-mcp.md#圖庫-mcp-流程工具2026-10-21)。
 
-背景工具的啟動回應另提供 `cancel_tool` 與 `cancel_arguments`，可直接用於停止。`run_id` 只查工具結果；非空的 `job_id` 控制共用圖庫作業；`agent_job_id` 控制桌面查證工作，使用 `gallery_cancel_agent_job`。桌面查證工具輸入的舊欄位 `job_id` 仍代表桌面工作，不能混用共用作業 ID。批次標籤工具禁止空篩選；反查與畫師校正預設不搬移，畫師校正也不預設清除 AI 畫師標籤。去重的視覺比對排除動畫，細微差分仍需檢視；動畫只參與位元組完全相同的比對。
+背景工具的啟動回應另提供 `cancel_tool` 與 `cancel_arguments`，可直接用於停止。`run_id` 只查工具結果；非空的 `job_id` 控制共用圖庫作業；`agent_job_id` 控制桌面查證工作，使用 `gallery_cancel_agent_job`。桌面查證工具輸入的舊欄位 `job_id` 仍代表桌面工作，不能混用共用作業 ID。批次標籤工具禁止空篩選；反查與畫師校正預設不搬移，畫師校正也不預設清除 AI 畫師標籤。去重使用 OpenCV 原尺寸逐像素完全比對（包含透明度），差異像素必須為 0；任何表情、服裝、文字差分、縮圖或有損壓縮造成的像素差異都保留。像素比對排除動畫；動畫只參與完整位元組完全相同的比對。舊相似度快取不再使用，清除前會重新驗證原始檔案。
+
+去重掃描會先驗證完全相同的檔案，再按資料夾與原尺寸篩選像素候選；沒有相同尺寸對象的圖片只讀取標頭，已確認的檔案副本也會略過像素索引。PNG 中繼資料以區塊讀取，像素由 OpenCV 解碼一次；既有有效像素快取仍可沿用。清理視窗顯示目前階段、已處理數、耗時及快取／略過數，相同範圍的進行中掃描共用工作，不同範圍依序處理。設定頁僅讀取最近結果，不會自動啟動全庫掃描。最終仍要求原尺寸全部像素與透明度完全相同，清除前再次驗證原檔。
 
 開發驗證：先執行 `python -m pip install -r requirements-dev.txt` 與 `npm install`，再執行 `python -B -m unittest discover -s tests -p "test_*.py"`、`npm test`、`npm run test:browser`。瀏覽器測試使用本機 Microsoft Edge 與模擬 API。首次啟動新版會先備份既有資料庫再套用相容性遷移，舊 MCP 客戶端也需要重新連線。
 

@@ -2,12 +2,14 @@
 fastapi>=0.100.0
 uvicorn[standard]>=0.23.0
 pydantic>=2.0.0
+PyYAML>=6.0,<7
 pywin32>=306; sys_platform == "win32"
 
 # Image & Data Processing
 pillow>=10.0.0
 numpy>=1.24.0
-ImageHash>=4.3,<5
+# Keep NumPy 1.x compatibility for the existing ONNX runtime.
+opencv-python-headless>=4.8,<4.12
 
 # Web Scraping & Reverse Image Search
 requests>=2.31.0

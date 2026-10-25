@@ -185,7 +185,7 @@ def _load_store():
         return {
             "mcp_enabled": value.get("mcp_enabled", DEFAULTS["mcp_enabled"]),
             "mcp_read_only": value.get("mcp_read_only", DEFAULTS["mcp_read_only"]),
-            "disabled_tools": value.get("disabled_tools", []),
+            "disabled_tools": sorted({name for name in value.get("disabled_tools", []) if name in TOOLS}),
             "builtin_overrides": overrides,
             "custom_servers": custom_servers,
             "managed_client_keys": [k for k in managed_keys if k],
@@ -259,7 +259,7 @@ def list_servers(store=None):
         "builtin": True,
         "name": gallery_override.get("name") or "Antigravity 圖庫 MCP",
         "category": gallery_override.get("category") or "核心圖庫工具 · Antigravity",
-        "description": gallery_override.get("description") or "由 Antigravity 呼叫圖庫工具（搜尋、掃描、標籤校正、歸檔與復原）。登入與模型選擇在客戶端管理。",
+        "description": gallery_override.get("description") or "由 Antigravity 呼叫圖庫工具（搜尋、標籤校正、歸檔與復原）。登入與模型選擇在客戶端管理。",
         "transport": "stdio",
         "enabled": bool(store["mcp_enabled"]),
         "read_only": bool(store["mcp_read_only"]),

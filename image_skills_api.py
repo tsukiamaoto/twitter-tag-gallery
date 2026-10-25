@@ -1,16 +1,21 @@
 from fastapi import APIRouter, HTTPException
 import image_skills as store
 from gguf_models import manager
-from gguf_api import action
 
 router = APIRouter(prefix="/api/image-skills", tags=["Image skills"])
 
 
 def run(function, *arguments):
     try:
-        return action(function, *arguments)
+        return function(*arguments)
     except KeyError as error:
         raise HTTPException(404, "找不到技能") from error
+    except FileNotFoundError as error:
+        raise HTTPException(404, "找不到技能檔案") from error
+    except (ValueError, UnicodeError) as error:
+        raise HTTPException(422, str(error)) from error
+    except (OSError, RuntimeError) as error:
+        raise HTTPException(409, str(error)) from error
 
 
 @router.get("")

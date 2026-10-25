@@ -1,6 +1,8 @@
 """Desktop queue, prompt revisions and real filesystem renaming in offline galleries."""
 import datetime as dt
 import json
+import os
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -12,6 +14,7 @@ from fastapi.testclient import TestClient
 import agent_jobs as jobs
 import database
 import prompt_store
+import agent_skills
 import publication_dates as publication
 from agent_api import router
 from antigravity_bridge import actual_model
@@ -19,6 +22,12 @@ from test_reliability import GalleryCase
 
 
 class AgentPublicationTests(GalleryCase):
+    def setUp(self):
+        super().setUp()
+        skill_root = self.root.parent / "skills"
+        shutil.copytree(agent_skills.skills_root(), skill_root, ignore=shutil.ignore_patterns(".storage"))
+        self.stack.enter_context(patch.dict(os.environ, {"TWITTER_AGENT_SKILLS_ROOT": str(skill_root)}))
+
     def scanned(self, *names):
         for name in names:
             self.image(name)
@@ -43,15 +52,15 @@ class AgentPublicationTests(GalleryCase):
         from tool_registry import get_tool, catalog
         from mcp_server import protocol_tools
         tool = get_tool("gallery_trace_publication_dates")
-        saved = prompt_store.save(tool.name, "查證新說明", "查證任務新指示", 0)
+        saved = prompt_store.save(tool.name, "查證新說明", 0)
         self.assertEqual(saved["prompt_revision"], 1)
         self.assertTrue(tool.protocol()["description"].startswith("查證新說明\n"))
         self.assertIn("run.result", tool.protocol()["description"])
         self.assertEqual(next(t for t in protocol_tools() if t["name"] == tool.name)["description"], tool.protocol()["description"])
-        self.assertEqual(next(t for t in catalog() if t["name"] == "gallery_submit_publication_sources")["task_prompt"]["prompt"], "查證任務新指示")
+        self.assertTrue(all("task_prompt" not in t and "workflow" not in t for t in catalog()))
         with self.assertRaises(RuntimeError):
-            prompt_store.save(tool.name, "stale", None, 0)
-        prompt_store.save(tool.name, "", None, 1, reset=True)
+            prompt_store.save(tool.name, "stale", 0)
+        prompt_store.save(tool.name, "", 1, reset=True)
         self.assertTrue(tool.protocol()["description"].startswith(tool.description + "\n"))
 
     def test_nonexclusive_tool_exposes_agent_cancellation_and_rejects_late_work(self):
@@ -104,7 +113,8 @@ class AgentPublicationTests(GalleryCase):
         iid = self.rows("SELECT id FROM images")[0]["id"]
         self.source(iid, "2024-01-01T00:00:00Z")
         self.assertEqual(jobs.create("publication", {"folder": "artist", "pad_digits": 4})["id"], first["id"])
-        prompt_store.save("gallery_trace_publication_dates", "changed", "changed task", 0)
+        skill = agent_skills.read("gallery-publication-tracing")
+        agent_skills.save(skill["id"], skill["content"] + "\nchanged task\n", skill["revision"])
         self.assertNotEqual(jobs.get(first["id"])["prompt"]["prompt"], "changed task")
 
     def test_cancel_resume_fences_old_conversation_and_preserves_snapshot(self):

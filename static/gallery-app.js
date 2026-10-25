@@ -157,7 +157,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
         }
         return;
       }
-      if (window.GalleryApp?.runtime.navigation?.workspace === 'ai') return;
+      if (window.GalleryApp?.runtime.navigation && GalleryApp.runtime.navigation.workspace !== 'home') return;
       if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || e.repeat) return;
       if (e.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), video')) return;
       const detailOpen = document.getElementById('detail-modal').classList.contains('open');
@@ -1778,7 +1778,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
         const schLiveEl = document.getElementById('sch-live-status');
         if (schLiveEl && stSch) {
           schLiveEl.textContent = stSch.status_message || '待機中';
-          if (document.getElementById('schedule-modal').classList.contains('open')) renderScheduleHistory(stSch);
+          if (document.getElementById('schedule-modal').classList.contains('open') || window.GalleryApp?.runtime.navigation?.workspace === 'schedule') renderScheduleHistory(stSch);
         }
 
         const schAsBanner = stSch.running_job ? {
@@ -2036,16 +2036,6 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       await loadImages();
     }
 
-    async function rescanLibrary() {
-      const r = await fetch('/api/scan', { method: 'POST' });
-      const d = await r.json();
-      alert(`掃描完成！總圖數：${d.total_images} (新增 ${d.new_added} 張，耗時 ${d.elapsed_sec} 秒)`);
-      await loadStats();
-      await loadFolders();
-      await loadTags();
-      await loadImages();
-    }
-
     /* Batch Rename & Order Lock Functions */
     let rnTimer = null;
 
@@ -2224,9 +2214,10 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       await loadImages();
     }
 
-    /* Duplicate & Visual Similarity Cleanup Functions */
+    /* Exact File & Pixel Duplicate Cleanup Functions */
     let currentDedupPreview = null;
     let selectedDedupIds = new Set();
+    let dedupPreviewGeneration = 0;
 
     function formatFileSize(bytes) {
       const b = Number(bytes) || 0;
@@ -2254,10 +2245,40 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
     }
 
     function closeDedupModal() {
+      dedupPreviewGeneration++;
       document.getElementById('dedup-modal').classList.remove('open');
     }
 
+    function renderDedupProgress(scan) {
+      const panel = document.getElementById('dedup-progress');
+      const stage = document.getElementById('dedup-progress-stage');
+      const bar = document.getElementById('dedup-progress-bar');
+      const detail = document.getElementById('dedup-progress-detail');
+      if (!panel || !stage || !bar || !detail) return;
+      const p = scan.progress || {};
+      const total = Math.max(0, Number(p.total_target) || 0);
+      const done = Math.min(total, Math.max(0, Number(p.processed_count) || 0));
+      panel.hidden = false;
+      panel.setAttribute('aria-busy', 'true');
+      stage.textContent = scan.status === 'queued' ? '等待前一個掃描完成' : (p.stage || '準備掃描');
+      if (total) {
+        bar.max = total;
+        bar.value = done;
+        bar.setAttribute('aria-valuetext', `${done.toLocaleString()} / ${total.toLocaleString()}`);
+      } else {
+        bar.removeAttribute('value');
+        bar.removeAttribute('aria-valuetext');
+      }
+      const parts = [total ? `本階段 ${done.toLocaleString()} / ${total.toLocaleString()}` : '正在準備',
+        `已用 ${Math.floor(Number(scan.elapsed_seconds) || 0).toLocaleString()} 秒`];
+      if (p.cached_images != null) parts.push(`沿用像素快取 ${Number(p.cached_images).toLocaleString()} 張`);
+      if (p.skipped_images != null) parts.push(`尺寸無相同對象 ${Number(p.skipped_images).toLocaleString()} 張`);
+      if (p.exact_copies_skipped) parts.push(`略過檔案副本 ${Number(p.exact_copies_skipped).toLocaleString()} 張`);
+      detail.textContent = parts.join(' · ');
+    }
+
     async function loadDedupPreview() {
+      const generation = ++dedupPreviewGeneration;
       const mode = document.getElementById('dedup-mode')?.value || 'both';
       const scope = document.getElementById('dedup-scope')?.value || 'same_folder';
       const folder = document.getElementById('dedup-folder')?.value || '__ALL__';
@@ -2266,25 +2287,48 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       const execBtn = document.getElementById('btn-dedup-exec');
       const scanBtn = document.getElementById('btn-dedup-scan');
 
-      if (box) box.innerHTML = `<div style="padding:24px; text-align:center; color:var(--text-muted);">⏳ 正在掃描圖庫並比對 SHA-256 與 512×512 像素結構相似度 (SSIM/MAE)...</div>`;
+      currentDedupPreview = null;
+      selectedDedupIds.clear();
+      if (box) { box.innerHTML = ''; box.style.display = 'none'; }
       if (sumBar) sumBar.innerHTML = `<span>正在掃描比對中，請稍候...</span>`;
       if (execBtn) execBtn.disabled = true;
       if (scanBtn) scanBtn.disabled = true;
+      renderDedupProgress({status: 'running', progress: {stage: '準備掃描'}});
 
       try {
-        const params = new URLSearchParams({ mode, scope, folder, max_groups: '300' });
-        const r = await fetch(`/api/dedup/preview?${params.toString()}`);
-        const d = await r.json();
-        if (!r.ok) throw new Error(d.detail || d.message || '掃描失敗');
+        const r = await fetch('/api/dedup/scans', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({mode, scope, folder, max_groups: 300}),
+        });
+        let scan = await r.json();
+        if (generation !== dedupPreviewGeneration) return;
+        if (!r.ok) throw new Error(scan.detail || scan.message || '無法啟動掃描，請重試');
+        while (scan.status === 'queued' || scan.status === 'running') {
+          renderDedupProgress(scan);
+          await new Promise(resolve => setTimeout(resolve, 750));
+          if (generation !== dedupPreviewGeneration) return;
+          const statusResponse = await fetch(`/api/dedup/scans/${encodeURIComponent(scan.scan_id)}`);
+          scan = await statusResponse.json();
+          if (generation !== dedupPreviewGeneration) return;
+          if (!statusResponse.ok) throw new Error(scan.detail || '無法讀取進度，請重新掃描以接續');
+        }
+        if (scan.status !== 'completed' || !scan.result) throw new Error(scan.error || '掃描失敗，請重試');
+        const d = scan.result;
 
         currentDedupPreview = d;
         selectedDedupIds = new Set(d.all_delete_ids || []);
         renderDedupPreview();
       } catch (err) {
+        if (generation !== dedupPreviewGeneration) return;
         if (sumBar) sumBar.innerHTML = `<span style="color:#f87171;">⚠️ 掃描失敗：${escapeHtml(err.message)}</span>`;
         if (box) box.innerHTML = `<div style="padding:20px; color:#f87171;">無法完成重複圖片比對：${escapeHtml(err.message)}</div>`;
       } finally {
-        if (scanBtn) scanBtn.disabled = false;
+        if (generation === dedupPreviewGeneration) {
+          if (box) box.style.display = 'flex';
+          if (scanBtn) scanBtn.disabled = false;
+          const progress = document.getElementById('dedup-progress');
+          if (progress) { progress.hidden = true; progress.setAttribute('aria-busy', 'false'); }
+        }
       }
     }
 
@@ -2301,8 +2345,8 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
         for (const id of (currentDedupPreview.all_delete_ids || [])) selectedDedupIds.add(id);
       } else if (filterType === 'exact') {
         for (const g of (currentDedupPreview.groups || [])) {
-          if (g.match_type === 'exact') {
-            for (const dup of (g.duplicates || [])) selectedDedupIds.add(dup.id);
+          for (const dup of (g.duplicates || [])) {
+            if (g.match_type === 'exact' || dup.metrics?.method === 'exact_bytes') selectedDedupIds.add(dup.id);
           }
         }
       }
@@ -2334,8 +2378,8 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
 
       sumBar.innerHTML = `
         <div>
-          📊 已掃描 <b>${(d.total_scanned || 0).toLocaleString()}</b> 張圖片 ➔ 發現 <b>${d.total_groups || 0}</b> 組重複/相似群組
-          （⚡ 完全重複 <b style="color:#fcd34d;">${d.exact_duplicate_images || 0}</b> 張 ／ 👁️ 視覺相似 <b style="color:#38bdf8;">${d.visual_duplicate_images || 0}</b> 張）
+          📊 已掃描 <b>${(d.total_scanned || 0).toLocaleString()}</b> 張圖片 ➔ 發現 <b>${d.total_groups || 0}</b> 組完全重複群組
+          （⚡ 完全重複 <b style="color:#fcd34d;">${d.exact_duplicate_images || 0}</b> 張 ／ 👁️ 像素完全相同 <b style="color:#38bdf8;">${d.visual_duplicate_images || 0}</b> 張）
           · 目前勾選清除 <b style="color:#f87171;">${selectedCount}</b> 張（預計釋放 <b>${formatFileSize(selectedBytes)}</b>）
         </div>
         <div style="display:flex; gap:6px;">
@@ -2355,7 +2399,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       const groups = d.groups || [];
       if (!groups.length) {
         box.innerHTML = `<div style="padding:32px; text-align:center; color:#34d399; font-size:14px; font-weight:600;">
-          🎉 太棒了！在目前選擇的範圍內沒有發現任何完全重複或視覺重壓縮的冗餘圖片。
+          🎉 太棒了！在目前選擇的範圍內沒有發現任何檔案或像素完全相同的副本。
         </div>`;
         return;
       }
@@ -2365,7 +2409,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
         const isExact = g.match_type === 'exact';
         const badgeHtml = isExact
           ? `<span style="background:rgba(245,158,11,0.2); color:#fcd34d; border:1px solid #f59e0b; padding:1px 7px; border-radius:4px; font-size:11px; font-weight:700;">⚡ 完全重複 (SHA-256 100%)</span>`
-          : `<span style="background:rgba(56,189,248,0.18); color:#38bdf8; border:1px solid #0284c7; padding:1px 7px; border-radius:4px; font-size:11px; font-weight:700;">👁️ 視覺相同 / 縮圖重壓縮</span>`;
+          : `<span style="background:rgba(56,189,248,0.18); color:#38bdf8; border:1px solid #0284c7; padding:1px 7px; border-radius:4px; font-size:11px; font-weight:700;">👁️ 原尺寸像素完全相同</span>`;
         const keepDim = (keep.width && keep.height) ? `${keep.width}×${keep.height}` : '原始尺寸';
         const keepFolder = keep.folder ? `📁 ${escapeHtml(keep.folder)}` : '📂 根目錄';
 
@@ -2431,7 +2475,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
     async function executeDedupCleanup() {
       if (!currentDedupPreview || !selectedDedupIds.size) return;
       const count = selectedDedupIds.size;
-      if (!confirm(`確定要清除勾選的 ${count} 張重複/相似圖片嗎？\n\n• 系統將自動保留每組最高解析度版本並繼承標籤\n• 自動建立 SQLite 資料庫備份\n• 被清除的檔案將移至 Windows 資源回收筒（可隨時還原）`)) return;
+      if (!confirm(`確定要清除勾選的 ${count} 張完全重複圖片嗎？\n\n• 清除前重新驗證檔案或原尺寸像素完全一致\n• 系統將保留每組最佳版本並繼承標籤\n• 自動建立 SQLite 資料庫備份\n• 被清除的檔案將移至 Windows 資源回收筒（可隨時還原）`)) return;
 
       const btn = document.getElementById('btn-dedup-exec');
       const oldText = btn ? btn.textContent : '';
@@ -2726,10 +2770,12 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       const btnEl = document.getElementById(`picker-btn-${slotIdx}`);
       const labelEl = document.getElementById(`picker-label-${slotIdx}`);
       const clearBtn = document.getElementById(`picker-clear-${slotIdx}`);
-      if (!inputEl || !btnEl || !labelEl) return;
+      if (!inputEl) return;
 
       const cleanHm = (hm || '').trim();
       inputEl.value = cleanHm;
+      window.GalleryApp?.emit('schedule:form', { slot: slotIdx, value: cleanHm });
+      if (!btnEl || !labelEl) return;
 
       if (cleanHm) {
         labelEl.textContent = formatTimeLabel(cleanHm);
@@ -2866,13 +2912,14 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       const box = document.getElementById('sch-folder-chips');
       if (!ta || !box) return;
       const dirs = ta.value.split('\n').map(s => s.trim()).filter(Boolean);
+      window.GalleryApp?.emit('schedule:form');
       if (!dirs.length) {
-        box.innerHTML = '<span class="settings-note">尚未選擇來源資料夾，請點「瀏覽資料夾」加入。</span>';
+        box.innerHTML = '<div class="schedule-source-empty"><span aria-hidden="true">＋</span><strong>從哪裡匯入圖片？</strong><p>加入來源資料夾，或手動貼上路徑。</p></div>';
         return;
       }
       box.innerHTML = dirs.map((d, idx) => `
         <div class="folder-chip-item">
-          <span>📁 ${escapeHtml(d)}</span>
+          <span class="schedule-folder-icon" aria-hidden="true">▱</span><span><strong>${escapeHtml(d.replace(/\\/g, '/').split('/').filter(Boolean).pop() || d)}</strong><code>${escapeHtml(d)}</code></span>
           <button class="btn btn-text" aria-label="移除來源資料夾：${escapeHtml(d)}" onclick="removeSourceFolderFromList(${idx})">×</button>
         </div>
       `).join('');
@@ -3049,8 +3096,8 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       } finally {
         nativeFolderPickerPending = false;
         button.disabled = false;
-        button.textContent = '瀏覽資料夾…';
-        if (document.getElementById('schedule-modal').classList.contains('open')) button.focus();
+        button.textContent = '＋ 加入資料夾';
+        if (document.getElementById('schedule-modal').classList.contains('open') || window.GalleryApp?.runtime.navigation?.workspace === 'schedule') button.focus();
       }
     }
 
@@ -3062,6 +3109,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
     let opLogTimer = null;
 
     function openSettings(section = 'browse') {
+      if (section === 'schedule' && window.GalleryApp?.runtime.navigation) return GalleryApp.runtime.navigation.openSchedule();
       if (window.GalleryApp?.runtime.navigation?.isAiSection(section)) {
         return GalleryApp.runtime.navigation.openAi(section);
       }
@@ -3071,30 +3119,26 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       document.getElementById('schedule-modal').classList.add('open');
       switchSettingsTab(section);
       document.getElementById(`settings-tab-${section}`).focus();
-      loadScheduleConfig();
       loadOperationLogs();
     }
 
     function openScheduleModal() { openSettings('schedule'); }
 
     function switchSettingsTab(section) {
+      if (section === 'schedule' && window.GalleryApp?.runtime.navigation) return GalleryApp.runtime.navigation.openSchedule();
       if (window.GalleryApp?.runtime.navigation?.isAiSection(section)) {
         return GalleryApp.runtime.navigation.openAi(section);
       }
       const base = function (section) {
       closeTimePicker();
-      for (const name of ['browse', 'schedule', 'history']) {
+      for (const name of ['browse', 'history']) {
         const selected = name === section;
         const tab = document.getElementById(`settings-tab-${name}`);
         tab.setAttribute('aria-selected', String(selected));
         tab.tabIndex = selected ? 0 : -1;
         document.getElementById(`settings-${name}`).hidden = !selected;
       }
-      document.getElementById('schedule-footer-actions').hidden = section !== 'schedule';
-      document.getElementById('btn-close-settings').hidden = section === 'schedule';
-      document.getElementById('settings-footer-note').textContent = section === 'schedule'
-        ? '修改後請儲存；立即執行會搬移檔案。'
-        : section === 'history' ? '記錄除搜尋與過濾外的所有功能處理（同步寫入 SQLite 與 activity.log）' : '瀏覽偏好套用後自動儲存';
+      document.getElementById('settings-footer-note').textContent = section === 'history' ? '記錄除搜尋與過濾外的所有功能處理（同步寫入 SQLite 與 activity.log）' : '瀏覽偏好套用後自動儲存';
       document.querySelector('.settings-content').scrollTop = 0;
       if (section === 'history') {
         loadOperationLogs();
@@ -3124,7 +3168,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       tag_edit: { label: '🏷️ 標籤變更', color: '#7dd3fc', bg: 'rgba(56,189,248,0.18)' },
       decensor: { label: '✨ 去馬賽克', color: '#f9a8d4', bg: 'rgba(236,72,153,0.18)' },
       semantic: { label: '🧠 語意主題', color: '#c4b5fd', bg: 'rgba(139,92,246,0.18)' },
-      scan: { label: '🔄 圖庫掃描', color: '#93c5fd', bg: 'rgba(59,130,246,0.18)' },
+      scan: { label: '🔄 索引同步', color: '#93c5fd', bg: 'rgba(59,130,246,0.18)' },
       schedule: { label: '🕒 定時排程', color: '#5eead4', bg: 'rgba(20,184,166,0.18)' },
     };
 
@@ -3195,11 +3239,11 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
 
     function handleSettingsTabKeydown(e) {
       const base = function (e) {
-      const names = ['browse', 'schedule', 'history'];
+      const names = ['browse', 'history'];
       const index = names.findIndex(name => e.target.id === `settings-tab-${name}`);
       if (index < 0 || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
       e.preventDefault();
-      const next = e.key === 'Home' ? 0 : e.key === 'End' ? 2 : (index + (e.key === 'ArrowLeft' ? 2 : 1)) % 3;
+      const next = e.key === 'Home' ? 0 : e.key === 'End' ? names.length - 1 : (index + (e.key === 'ArrowLeft' ? names.length - 1 : 1)) % names.length;
       switchSettingsTab(names[next]);
       document.getElementById(`settings-tab-${names[next]}`).focus();
       };
@@ -3210,6 +3254,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
       const feedback = document.getElementById('schedule-feedback');
       feedback.textContent = message;
       feedback.classList.toggle('error', isError);
+      window.GalleryApp?.emit('schedule:feedback', { message, isError });
     }
 
     function closeScheduleModal() {
@@ -3224,6 +3269,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
     async function loadScheduleConfig() {
       const sequence = ++scheduleLoadSequence;
       scheduleConfigLoaded = false;
+      window.GalleryApp?.emit('schedule:loading');
       document.getElementById('btn-save-schedule').disabled = true;
       document.getElementById('btn-sch-run-now').disabled = true;
       setScheduleFeedback('正在讀取排程設定…');
@@ -3251,10 +3297,12 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
         renderScheduleHistory(d);
         scheduleConfigLoaded = true;
         setScheduleFeedback('');
+        window.GalleryApp?.emit('schedule:loaded', cfg);
       } catch (error) {
         if (sequence === scheduleLoadSequence) {
-          setScheduleFeedback('讀取失敗，請關閉設定後重試。', true);
-          document.getElementById('sch-history-box').textContent = '無法讀取紀錄，請重新開啟設定。';
+          setScheduleFeedback('無法讀取排程設定，請重新載入。', true);
+          document.getElementById('sch-history-box').textContent = '無法讀取紀錄，請重新整理。';
+          window.GalleryApp?.emit('schedule:load-error');
         }
       } finally {
         if (sequence === scheduleLoadSequence) {
@@ -3265,25 +3313,42 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
     }
 
     function renderScheduleHistory(d) {
+      window.GalleryApp?.emit('schedule:status', d);
       const cfg = d.config || {};
       document.getElementById('sch-live-status').textContent = d.status_message || '待機中';
 
       const histBox = document.getElementById('sch-history-box');
       const logs = cfg.history_logs || [];
+      const expanded = histBox.dataset.expanded === 'true';
+      const more = document.getElementById('schedule-history-more');
+      if (more) {
+        more.hidden = logs.length <= 3;
+        more.setAttribute('aria-expanded', String(expanded));
+        more.textContent = expanded ? '收合較早紀錄' : `查看全部 ${logs.length} 次紀錄`;
+        document.getElementById('schedule-history-count').textContent = !logs.length ? '最近的匯入結果' : logs.length > 3 && !expanded ? `最近 3 次 · 共 ${logs.length} 次` : `共 ${logs.length} 次紀錄`;
+      }
+      // Runtime polling should leave open details, keyboard focus and scroll intact.
+      const signature = JSON.stringify(logs);
+      if (histBox.dataset.signature === signature && histBox.firstElementChild) return;
+      histBox.dataset.signature = signature;
       if (!logs.length) {
-        histBox.textContent = '尚無執行紀錄。完成匯入排程設定後，這裡會顯示執行結果。';
+        histBox.innerHTML = '<div class="schedule-history-empty"><span aria-hidden="true">◷</span><strong>還沒有執行紀錄</strong><p>第一次匯入完成後，結果會顯示在這裡。</p></div>';
       } else {
-        histBox.innerHTML = logs.map(lg => `
-          <div style="padding:4px 0; border-bottom:1px solid rgba(255,255,255,0.05);">
-            <span style="color:#fcd34d;">[${escapeHtml(lg.timestamp)}]</span>
-            <b>${escapeHtml(lg.trigger_reason)}</b> —
-            搬入: <b style="color:#38bdf8;">${lg.moved_from_source}</b> 張 |
-            清空空夾: <b style="color:#f472b6;">${lg.empty_dirs_removed}</b> 個 |
-            AI打標: <b style="color:#a5b4fc;">${lg.ai_tagged_count}</b> 張 |
-            歸檔繪師夾: <b style="color:#34d399;">${lg.organized_to_artist_folders}</b> 張 (新建 ${lg.new_artist_folders_created} 夾)
-            <span style="color:#64748b;">(${lg.elapsed_sec}s)</span>
-          </div>
-        `).join('');
+        const openEntries = new Set([...histBox.querySelectorAll('details[open]')].map(entry => entry.dataset.historyKey));
+        histBox.innerHTML = logs.map((lg, index) => {
+          const key = JSON.stringify([lg.timestamp, lg.trigger_reason]);
+          const seconds = Math.max(0, Math.round(Number(lg.elapsed_sec) || 0));
+          const duration = seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
+          return `<details class="schedule-history-entry" data-history-key="${escapeHtml(key)}"${openEntries.has(key) ? ' open' : ''}${!expanded && index >= 3 ? ' hidden' : ''}>
+            <summary>
+              <span class="schedule-history-meta"><time>${escapeHtml(lg.timestamp)}</time><span>${escapeHtml(lg.trigger_reason)}</span></span>
+              <span class="schedule-history-metrics"><span>搬入 <b>${escapeHtml(String(lg.moved_from_source ?? 0))}</b></span><span>打標 <b>${escapeHtml(String(lg.ai_tagged_count ?? 0))}</b></span><span>歸檔 <b>${escapeHtml(String(lg.organized_to_artist_folders ?? 0))}</b></span></span>
+              <span class="schedule-history-duration">${duration}</span>
+              <span class="schedule-history-toggle"><span class="schedule-disclosure-open">詳情</span><span class="schedule-disclosure-close">收合</span><svg class="schedule-chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m5 7.5 5 5 5-5" /></svg></span>
+            </summary>
+            <dl class="schedule-history-details"><div><dt>移除空資料夾</dt><dd>${escapeHtml(String(lg.empty_dirs_removed ?? 0))} 個</dd></div><div><dt>新建畫師資料夾</dt><dd>${escapeHtml(String(lg.new_artist_folders_created ?? 0))} 個</dd></div><div><dt>執行耗時</dt><dd>${escapeHtml(String(lg.elapsed_sec ?? 0))} 秒</dd></div></dl>
+          </details>`;
+        }).join('');
       }
     }
 
@@ -3358,6 +3423,13 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
         setScheduleFeedback('請先選擇至少一個來源資料夾。', true);
         return false;
       }
+      for (const id of ['sch-time-1', 'sch-time-2']) {
+        const input = document.getElementById(id);
+        if (!input.reportValidity()) { setScheduleFeedback('請設定有效的執行時間。', true); return false; }
+      }
+      if (payload.schedule_times.length === 2 && payload.schedule_times[0] === payload.schedule_times[1]) {
+        setScheduleFeedback('兩個執行時段不可相同。', true); return false;
+      }
       document.getElementById('btn-save-schedule').disabled = true;
       document.getElementById('btn-sch-run-now').disabled = true;
       setScheduleFeedback('正在儲存…');
@@ -3370,6 +3442,7 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
         if (!r.ok) throw new Error(`伺服器回應 ${r.status}`);
         const d = await r.json();
         scheduleConfigSnapshot = d.config || payload;
+        window.GalleryApp?.emit('schedule:saved', { config: scheduleConfigSnapshot, windowsTask: d.windows_task, payload });
         let message = payload.enabled ? `已儲存 · 每日 ${payload.schedule_times.join('、')} 執行` : '已儲存 · 每日排程已停用';
         if (d.windows_task) {
           message += d.windows_task.registered ? ' · 已同步 Windows 排程' : payload.enabled ? ' · Windows 排程同步未成功，請檢查系統工作排程器' : ' · 已移除 Windows 排程';
@@ -3392,7 +3465,8 @@ const BROWSE_PREFERENCES_KEY = 'twitter-tag-gallery.browse.v1';
         const r = await fetch('/api/schedule/run_now', { method: 'POST' });
         if (!r.ok) throw new Error(`伺服器回應 ${r.status}`);
         const d = await r.json();
-        setScheduleFeedback(d.status === 'already_running' ? d.message || '排程正在執行中' : '已開始執行，可到「執行紀錄」查看進度。');
+        if (['busy', 'error', 'failed'].includes(d.status)) throw new Error(d.message || '目前無法啟動排程，請稍後重試。');
+        setScheduleFeedback(d.status === 'already_running' ? d.message || '排程正在執行中' : '已開始執行，執行紀錄會更新進度。');
         checkAiStatus();
       } catch (error) {
         setScheduleFeedback(`設定已儲存，但啟動失敗：${error.message}`, true);

@@ -33,19 +33,53 @@ class WorkflowToolTests(GalleryCase):
         database.scan_library()
         return {row["rel_path"]:row["id"] for row in self.rows("SELECT id,rel_path FROM images")}
 
-    def test_scan_dispatch_and_result_polling_do_not_pollute_history(self):
-        self.image("風景.png")
-        started = runtime.dispatch("gallery_scan_library",{})
+    def test_recovery_dispatch_and_result_polling_do_not_pollute_history(self):
+        started = runtime.dispatch("gallery_recover_file_operations",{})
         self.assertEqual(started["run_id"],started["id"])
         value=self.wait_run(started["run_id"])
         self.assertEqual(value["status"],"succeeded")
-        self.assertEqual(value["result"]["new_added"],1)
+        self.assertEqual(value["result"]["errors"],[])
         for _ in range(3):
             result=runtime.dispatch("gallery_get_tool_run",{"run_id":started["id"]})
-            self.assertEqual(result["run"]["result"]["total_images"],1)
+            self.assertEqual(result["run"]["result"]["errors"],[])
             runtime.dispatch("gallery_get_jobs",{})
         self.assertEqual(len(runtime.history()),1)
         self.assertEqual(runtime.history()[0]["source"],"mcp")
+
+    def test_manual_scan_is_unavailable_over_http_and_mcp(self):
+        import app
+        from fastapi.testclient import TestClient
+
+        self.image("unindexed.png")
+        with patch.object(database, "scan_library") as sync:
+            # No lifespan: this checks routing without starting the scheduler.
+            client = TestClient(app.app)
+            self.addCleanup(client.close)
+            self.assertEqual(client.post("/api/scan").status_code, 404)
+            with self.assertRaises(KeyError):
+                runtime.dispatch("gallery_scan_library", {})
+            sync.assert_not_called()
+        async def listed():
+            return await build_server().list_tools()
+        self.assertNotIn("gallery_scan_library", [tool.name for tool in anyio.run(listed)])
+        self.assertNotIn("gallery_scan_library", integrations.TOOLS)
+        output = io.StringIO()
+        run_stdio_loop(io.StringIO(json.dumps({"id": 1, "method": "tools/call", "params": {
+            "name": "gallery_scan_library", "arguments": {}}}) + "\n"), output)
+        self.assertTrue(json.loads(output.getvalue())["result"]["isError"])
+        self.assertEqual(self.rows("SELECT id FROM images"), [])
+        self.assertEqual(runtime.history(), [])
+
+    def test_saved_permissions_drop_retired_tools_and_remain_editable(self):
+        integrations.config_path().write_text(json.dumps({
+            "mcp_enabled": True, "mcp_read_only": False,
+            "disabled_tools": ["gallery_scan_library", "gallery_move_images"],
+            "builtin_overrides": {"gallerypub": {"disabled_tools": ["gallery_scan_library"]}},
+        }), encoding="utf-8")
+        config = integrations.load()
+        self.assertEqual(config["disabled_tools"], ["gallery_move_images"])
+        integrations.save({"disabled_tools": config["disabled_tools"]})
+        self.assertNotIn("gallery_scan_library", integrations.config_path().read_text(encoding="utf-8"))
 
     def test_search_uses_shared_query_with_tags_sort_pagination_and_missing_filter(self):
         ids=self.scanned("風景_10.png","風景_2.png","artist/other.png")
@@ -161,10 +195,10 @@ class WorkflowToolTests(GalleryCase):
 
     def test_cancel_tool_can_stop_an_owned_write_job_without_acquiring_it_again(self):
         entered,release=threading.Event(),threading.Event()
-        def scan():
+        def recover():
             entered.set();release.wait(3);work.update_job(stage="stop checkpoint");return {}
-        with patch.object(workflows,"tool_gallery_scan_library",side_effect=scan):
-            run=runtime.dispatch("gallery_scan_library",{})
+        with patch.object(workflows,"tool_gallery_recover_file_operations",side_effect=recover):
+            run=runtime.dispatch("gallery_recover_file_operations",{})
             self.assertTrue(entered.wait(1))
             try:
                 self.assertEqual(run["cancel_tool"], "gallery_cancel_job")
@@ -200,18 +234,18 @@ class WorkflowToolTests(GalleryCase):
 
     def test_readonly_policy_blocks_new_writes_and_keeps_queries(self):
         integrations.save({"mcp_read_only":True})
-        for name in ("gallery_scan_library","gallery_update_image_tags","gallery_analyze_images","gallery_move_images","gallery_recover_file_operations","gallery_undo_rename","gallery_cancel_job","gallery_cancel_agent_job"):
+        for name in ("gallery_update_image_tags","gallery_analyze_images","gallery_move_images","gallery_recover_file_operations","gallery_undo_rename","gallery_cancel_job","gallery_cancel_agent_job"):
             with self.subTest(name=name),self.assertRaises(PermissionError):runtime.dispatch(name,registry.CATALOG[name].example)
         self.assertEqual(runtime.dispatch("gallery_search_images",{})["total"],0)
         self.assertEqual(runtime.dispatch("gallery_get_jobs",{})["active"],{})
 
     def test_sdk_and_fallback_return_run_ids_for_long_tools(self):
-        async def sdk():return await build_server().call_tool("gallery_scan_library",{})
+        async def sdk():return await build_server().call_tool("gallery_recover_file_operations",{})
         result=anyio.run(sdk)
         content=result.content if hasattr(result,"content") else result
         started=json.loads(content[0].text)
         self.assertEqual(self.wait_run(started["run_id"])["status"],"succeeded")
         output=io.StringIO()
-        run_stdio_loop(io.StringIO(json.dumps({"id":1,"method":"tools/call","params":{"name":"gallery_scan_library","arguments":{}}})+"\n"),output)
+        run_stdio_loop(io.StringIO(json.dumps({"id":1,"method":"tools/call","params":{"name":"gallery_recover_file_operations","arguments":{}}})+"\n"),output)
         started=json.loads(json.loads(output.getvalue())["result"]["content"][0]["text"])
         self.assertEqual(self.wait_run(started["run_id"])["status"],"succeeded")

@@ -178,11 +178,11 @@ class UndoRename(Arguments):
 class CleanDuplicates(Arguments):
     mode: Literal["both", "exact", "visual"] = Field(
         default="both",
-        description="both=完全重複與靜態圖視覺相似；exact=SHA-256 加位元組驗證，可處理動畫；visual=靜態圖感知雜湊加 SSIM/MAE，排除動畫，候選需人工檢視細微差分",
+        description="both=完全重複檔案與像素完全相同的靜態圖；exact=SHA-256 加完整位元組驗證，可處理動畫；visual=OpenCV 原尺寸逐像素完全比對（含透明度），排除動畫，不縮圖、不接受任何像素差異",
     )
     scope: Literal["same_folder", "all"] = Field(
         default="same_folder",
-        description="same_folder=僅比對同一資料夾內的重複/相似圖；all=跨資料夾全圖庫比對",
+        description="same_folder=僅比對同一資料夾內的重複圖；all=跨資料夾全圖庫比對",
     )
     folder: str = Field(
         default="__ALL__",
@@ -193,13 +193,14 @@ class CleanDuplicates(Arguments):
         default=False,
         description="false 僅預覽重複群組與可釋放空間；true 才自動合併標籤、建立資料庫備份並將較低畫質副本移至系統資源回收筒",
     )
-    max_mae: StrictFloat = Field(default=6.5, ge=0.5, le=20.0, description="視覺相似最大平均像素誤差 (MAE)，預設 6.5")
-    min_ssim: StrictFloat = Field(default=0.95, ge=0.80, le=1.0, description="視覺相似最低結構相似度 (SSIM)，預設 0.95")
+    max_mae: StrictFloat = Field(default=6.5, ge=0.5, le=20.0, description="舊客戶端相容參數，已停用；不影響 OpenCV 像素完全一致的判斷", json_schema_extra={"deprecated": True})
+    min_ssim: StrictFloat = Field(default=0.95, ge=0.80, le=1.0, description="舊客戶端相容參數，已停用；不影響 OpenCV 像素完全一致的判斷", json_schema_extra={"deprecated": True})
     max_diff_frac: StrictFloat = Field(
         default=0.005,
         ge=0.0001,
         le=0.05,
-        description="縮至 512x512 後任一色彩通道差異超過 45/255 的像素比例上限（0.005=0.5%）；更小或低對比差分仍可能通過，不能保證辨識所有差分圖",
+        description="舊客戶端相容參數，已停用；差異像素必須為 0，不能用此參數放寬",
+        json_schema_extra={"deprecated": True},
     )
     max_groups: int = Field(default=200, ge=1, le=1000, description="回傳群組上限；不限制執行刪除數量，截斷時 groups_truncated=true")
 
@@ -353,8 +354,7 @@ _tools = [
     Tool("gallery_calibrate_image_artist_and_tags", "寫入畫師校正", "僅寫入已驗證的畫師、角色與作品；保留人工標籤。預設不搬移、不清除 AI 畫師；僅在明確啟用參數時執行。提交角色/作品會清除對應分類低於 0.70 的 AI 標籤。禁止一般描述或主題標籤。", True, Calibrations, {"calibrations": [{"image_id": 1, "verified_artist": "artist_name", "move_to_artist_folder": False}]}, network=True),
     Tool("gallery_purge_all_low_conf_ai_artists", "清理畫師與資料夾", "清除低信心度 AI 畫師標籤，並可還原因此誤建的資料夾。", True, Purge, {"max_ai_conf_to_purge": 0.65, "revert_unverified_ai_folders": False}),
     Tool("gallery_auto_organize_artist_folders", "畫師歸檔", "依認證畫師預覽或執行歸檔；execute_move=false 僅預覽。", True, Organize, {"execute_move": False, "min_confidence": 0.25}),
-    Tool("gallery_clean_duplicates", "清除重複與相似圖片", "比對完全重複（SHA-256 + 位元組驗證）或靜態圖視覺相似（dHash/pHash + SSIM/MAE）。動畫只參與完全重複比對。視覺比對可能漏辨細小差分，先檢視預覽；execute_delete=false 僅預覽，true 重新掃描後清除匹配副本。依像素數、PNG、檔案大小等排序保留，不保證藝術品質；繼承核心與人工標籤，刪除前備份資料庫並移至資源回收筒。", True, CleanDuplicates, {"mode": "both", "scope": "same_folder", "folder": "__ALL__", "execute_delete": False}, background=True),
-    Tool("gallery_scan_library", "掃描圖庫", "掃描目前設定的圖庫並同步索引；保留人工標籤，完整掃描才標記遺失。回傳 run_id，使用 gallery_get_tool_run 查詢結果。", True, Overview, {}, background=True),
+    Tool("gallery_clean_duplicates", "清除重複圖片", "比對完全重複檔案（SHA-256 + 完整位元組驗證）或像素完全相同的靜態圖（OpenCV 原尺寸逐像素完全一致，含透明度）。任何像素差異都保留；不縮圖、不接受相似度門檻。動畫只參與完全重複檔案比對。execute_delete=false 僅預覽，true 重新掃描並驗證原始檔案後清除匹配副本。依像素數、PNG、檔案大小等排序保留，不保證藝術品質；繼承核心與人工標籤，刪除前備份資料庫並移至資源回收筒。", True, CleanDuplicates, {"mode": "both", "scope": "same_folder", "folder": "__ALL__", "execute_delete": False}, background=True),
     Tool("gallery_search_images", "搜尋圖片", "以關鍵字、標籤、資料夾及 AI 狀態分頁查詢圖片，取得後續操作所需的 image_id。", False, ImageSearch, {"q": "風景", "page_size": 20}),
     Tool("gallery_get_image_details", "圖片詳細資料", "取得圖片標籤、處理狀態、遺失狀態及圖庫內路徑；tag_limit 限制回傳標籤數。", False, ImageDetails, {"image_id": 1}),
     Tool("gallery_update_image_tags", "編輯核心標籤", "對指定圖片新增畫師、角色、作品或來源標籤，記為模型來源；不能新增一般描述、分級、年份或主題，也不能覆蓋或移除人工標籤。整批 ID 必須存在。", True, EditTags, {"image_ids": [1], "add_tags": [{"name": "artist_name", "category": "artist"}]}),

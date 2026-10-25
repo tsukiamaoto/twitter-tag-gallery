@@ -45,6 +45,9 @@
 | 018 模型與自動標籤限制 | done（Web 已套用，模型 MCP 須重連） | [實作與驗收](done/018-core-generated-tags.md) |
 | 020 左側工具列與 AI 設定中心 | done | [整合與驗收](done/020-ai-workspace-navigation.md) |
 | 021 發布日期背景追查與 Prompt 編輯 | done | [實作與驗收](done/021-publication-agent.md) |
+| 022 左側排程入口與排程頁面 | done | [實作與驗收](done/022-schedule-workspace.md) |
+| 023 Tool 與 Skill 解耦 | done | [實作與驗收](done/023-tool-skill-separation.md) |
+| 024 影像修補 Agent Skill 與指定模型 | done（待後端重新載入） | [實作與驗收](done/024-image-agent-skills.md) |
 
 新需求從 `todo/` 開始；正在實作或驗證的任務放在 `doing/`，通過驗收後移至 `done/`。空目錄以 `.gitkeep` 保留。
 

@@ -62,19 +62,3 @@ description: >-
 
 既有標籤的大量清理、原始圖片刪除及搬移是各自獨立的工作，不能由「重新產生標籤」
 推定使用者已授權。清理既有資料前先提供範圍與數量，經使用者同意後建立可還原備份。
-
-## 發布日期背景查證
-
-桌面背景工作會提供 `job_id`。先用 `gallery_get_agent_job` 讀取指定圖片與線索，
-每批最多 50 張；`gallery_trace_publication_dates` 查 Danbooru 與原作品日期。
-長工具回傳 `run_id` 時，先以 `gallery_get_tool_run` 確認完成再使用結果。
-
-補查必須核對作者原貼文、圖片及作品頁碼。以 `gallery_submit_publication_sources`
-提交原貼文、該作品圖片 URL、作者頁及核對理由；後端重新解析發布時間。
-來源發布時間是圖片中繼資料，不建立年份標籤；下載時間、收錄時間與 CDN 修訂日期
-不能代替發布時間。未知保持未知。完成本批後用 `gallery_complete_agent_batch`，
-由後端對已確認圖片重新編號並留下還原紀錄，不直接執行 SQL 或改檔名。
-
-畫師背景工作使用 `gallery_submit_artist_identity` 提交作者頁互連依據，
-未確認則傳 `confirmed=false`。工作已停止時不再提交；沿用該工作的 Prompt 快照，
-不以其他任務的圖片或猜測資料填補。

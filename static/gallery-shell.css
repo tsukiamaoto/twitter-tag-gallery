@@ -377,7 +377,6 @@ body[data-gallery-density="compact"] .card-body { display: none; }
 .settings-tabs { overflow-x: auto; flex-wrap: nowrap; }
 .settings-tabs .settings-tab { flex-shrink: 0; white-space: nowrap; }
 .settings-panel > label:not(.settings-check) { display: grid; gap: 7px; font-size: 13px; }
-#mcp-tool-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
 #mcp-client-config { width: 100%; min-height: 170px; resize: vertical; font-family: Consolas, monospace; font-size: 12px; }
 .tool-workbench { display: grid; gap: 12px; min-width: 0; padding-top: 14px; }
 .tool-workbench > label { display: grid; gap: 7px; min-width: 0; }
@@ -387,4 +386,3 @@ body[data-gallery-density="compact"] .card-body { display: none; }
 .tool-output:empty { display: none; }
 .tool-history { display: grid; gap: 7px; }
 .tool-history-row { height: auto; text-align: left; white-space: normal; overflow-wrap: anywhere; }
-@media (max-width: 600px) { #mcp-tool-list { grid-template-columns: minmax(0, 1fr); } }

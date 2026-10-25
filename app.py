@@ -57,6 +57,8 @@ from gguf_api import router as gguf_router
 app.include_router(gguf_router)
 from image_skills_api import router as image_skills_router
 app.include_router(image_skills_router)
+from agent_skills_api import router as agent_skills_router
+app.include_router(agent_skills_router)
 
 STATIC_DIR = Path(__file__).parent / "static"
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
@@ -249,11 +251,6 @@ def api_stats():
         "category_counts": cat_counts,
         "ai_status": tagger_engine.get_status(),
     }
-
-
-@app.post("/api/scan")
-def api_scan():
-    return scan_library()
 
 
 @app.get("/api/folders")
@@ -960,7 +957,7 @@ def api_open_explorer(image_id: int):
         raise HTTPException(status_code=404, detail="Image not found")
     path = gallery_path(GALLERY_ROOT, row["rel_path"])
     if not path.is_file():
-        raise HTTPException(status_code=404, detail="圖片檔案不存在，可能已移動或刪除，請重新掃描圖庫")
+        raise HTTPException(status_code=404, detail="圖片檔案不存在，可能已移動或刪除")
     full_path = str(path)
     try:
         reveal_file(path)

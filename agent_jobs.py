@@ -10,7 +10,7 @@ import uuid
 
 import database
 from background_work import atomic_json
-import prompt_store
+import agent_workflows
 
 ACTIVE = ("queued", "waiting", "running", "launching", "launch_uncertain")
 REQUIRED_MODEL = "gemini-3.8-flash"
@@ -120,7 +120,7 @@ def history(limit=30):
 
 
 def create(workflow, context):
-    if workflow not in prompt_store.DEFAULT_TASKS:
+    if workflow not in agent_workflows.WORKFLOWS:
         raise ValueError("未知的查證工作")
     from integration_settings import require_tool
     require_tool("gallery_trace_publication_dates" if workflow == "publication" else "gallery_resolve_artist_identity")
@@ -174,15 +174,15 @@ def create(workflow, context):
     else:
         rows = []
     now = time.time()
-    if workflow == "publication":
-        atomic_json(database.DATA_DIR / "publication_settings.json", {"enabled": True, "pad_digits": context["pad_digits"]}, durable=True)
     with connection() as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
         for previous in conn.execute("SELECT * FROM agent_jobs WHERE status IN ('queued','waiting','running','launching','launch_uncertain') AND workflow=?", (workflow,)):
             if json.loads(previous["context_json"]) == context:
                 return get(previous["id"])
         job_id = uuid.uuid4().hex
-        prompt = prompt_store.snapshot(workflow, {"job_id": job_id, **context})
+        prompt = agent_workflows.snapshot(workflow, {"job_id": job_id, **context})
+        if workflow == "publication":
+            atomic_json(database.DATA_DIR / "publication_settings.json", {"enabled": True, "pad_digits": context["pad_digits"]}, durable=True)
         conn.execute("INSERT INTO agent_jobs(id,workflow,status,context_json,prompt_json,created_at,updated_at) VALUES(?,?,'queued',?,?,?,?)",
                      (job_id, workflow, json.dumps(context, ensure_ascii=False), json.dumps(prompt, ensure_ascii=False), now, now))
         conn.executemany("INSERT INTO agent_items(job_id,image_id) VALUES(?,?)", [(job_id, row["id"]) for row in rows])

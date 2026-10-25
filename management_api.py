@@ -4,7 +4,7 @@ from pathlib import Path
 import time
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 import database
@@ -49,11 +49,44 @@ class DedupExecuteRequest(BaseModel):
     mode: Literal["both", "exact", "visual"] = "both"
     scope: Literal["same_folder", "all"] = "same_folder"
     folder: str = Field(default="__ALL__", max_length=500)
-    max_mae: float = Field(default=6.5, ge=0.5, le=20.0)
-    min_ssim: float = Field(default=0.95, ge=0.80, le=1.0)
-    max_diff_frac: float = Field(default=0.005, ge=0.0001, le=0.05)
+    # Legacy thresholds are accepted for compatibility and cannot relax pixel equality.
+    max_mae: float = Field(default=6.5, ge=0.5, le=20.0, json_schema_extra={"deprecated": True})
+    min_ssim: float = Field(default=0.95, ge=0.80, le=1.0, json_schema_extra={"deprecated": True})
+    max_diff_frac: float = Field(default=0.005, ge=0.0001, le=0.05, json_schema_extra={"deprecated": True})
     selected_delete_ids: list[Annotated[int, Field(strict=True, gt=0)]] | None = None
     groups: list[dict] | None = None
+
+
+class DedupScanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mode: Literal["both", "exact", "visual"] = "both"
+    scope: Literal["same_folder", "all"] = "same_folder"
+    folder: str = Field(default="__ALL__", max_length=500)
+    max_groups: int = Field(default=300, ge=1, le=1000)
+
+
+@router.post("/api/dedup/scans", status_code=202)
+def start_dedup_scan(request: DedupScanRequest):
+    from dedup_scan_jobs import start_scan
+    try:
+        return start_scan(**request.model_dump())
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from error
+
+
+@router.get("/api/dedup/scans/latest")
+def latest_dedup_scan():
+    from dedup_scan_jobs import latest_scan
+    return {"scan": latest_scan()}
+
+
+@router.get("/api/dedup/scans/{scan_id}")
+def get_dedup_scan(scan_id: str):
+    from dedup_scan_jobs import get_scan
+    try:
+        return get_scan(scan_id)
+    except KeyError as error:
+        raise HTTPException(404, "找不到掃描，服務可能已重新啟動，請重新掃描") from error
 
 
 @router.get("/api/dedup/preview")
@@ -61,9 +94,9 @@ def dedup_preview(
     mode: Literal["both", "exact", "visual"] = "both",
     scope: Literal["same_folder", "all"] = "same_folder",
     folder: str = "__ALL__",
-    max_mae: float = 6.5,
-    min_ssim: float = 0.95,
-    max_diff_frac: float = 0.005,
+    max_mae: Annotated[float, Query(deprecated=True, description="舊相容參數，已停用；像素必須完全相同")] = 6.5,
+    min_ssim: Annotated[float, Query(deprecated=True, description="舊相容參數，已停用；像素必須完全相同")] = 0.95,
+    max_diff_frac: Annotated[float, Query(deprecated=True, description="舊相容參數，已停用；差異像素必須為 0")] = 0.005,
     max_groups: int = 300,
 ):
     from deduplicator import scan_duplicates

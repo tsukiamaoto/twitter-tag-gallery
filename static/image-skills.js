@@ -1,11 +1,11 @@
-/* Editable application prompt presets. Selecting a skill never transforms a gallery image. */
+/* Structured editor for image repair Agent Skills and their assigned model. */
 (() => {
   'use strict';
   const app = window.GalleryApp, byId = id => document.getElementById(id), api = '/api/image-skills';
   const defaults = { wai_illustrious: { label: 'WAI-NSFW-illustrious-SDXL v17.0', model: 'diffusion_models/WAI-illustrious-SDXL-v170-Q4_K_M.gguf', steps: 20 } };
   let catalog = { skills: [], active_id: null }, models = [], selected = null, previousSelected = null;
   let dirty = false, busy = false, pending = null, loaded = false, modalWanted = false, returnFocus = null;
-  const fields = ['name', 'description', 'profile', 'model', 'prompt', 'steps', 'seed'];
+  const fields = ['name', 'description', 'profile', 'model', 'prompt', 'steps', 'seed', 'instructions'];
 
   function feedback(message, error = false) {
     for (const id of ['image-skills-feedback', 'image-skills-page-feedback']) {
@@ -26,6 +26,8 @@
       steps: Number(byId('image-skill-steps').value),
       seed: Number(byId('image-skill-seed').value),
       output_mode: 'copy',
+      ...(byId('image-skill-instructions').value.trim() ? { instructions: byId('image-skill-instructions').value.trim() } : {}),
+      ...(catalog.skills.find(skill => skill.id === selected)?.revision ? { revision: catalog.skills.find(skill => skill.id === selected).revision } : {}),
     };
   }
 
@@ -83,7 +85,7 @@
     selected = skill?.id || null;
     if (selected) previousSelected = selected;
     const value = skill || { name: '', description: '', profile: 'wai_illustrious', model_id: defaults.wai_illustrious.model, prompt: '', steps: 20, seed: 42 };
-    for (const field of fields.filter(f => f !== 'model')) byId(`image-skill-${field}`).value = value[field];
+    for (const field of fields.filter(f => f !== 'model')) byId(`image-skill-${field}`).value = value[field] ?? '';
     modelOptions(value.profile, value.model_id);
     byId('image-skill-picker').value = selected || '';
     byId('image-skill-info').open = !selected;
@@ -113,7 +115,7 @@
   function renderCards() {
     const container = byId('image-skill-cards');
     if (!container) return;
-    container.replaceChildren();
+    for (const node of container.querySelectorAll('.image-skill-list-card, .image-skill-empty')) node.remove();
     if (!loaded && !catalog.skills.length) {
       const loadingCard = document.createElement('div');
       loadingCard.className = 'image-skill-empty';
@@ -122,10 +124,6 @@
       return;
     }
     if (!catalog.skills.length) {
-      const empty = document.createElement('div');
-      empty.className = 'image-skill-empty';
-      empty.textContent = '目前尚無影像修補技能，請點選右上角「新增技能」建立。';
-      container.append(empty);
       return;
     }
     for (const skill of catalog.skills) {
@@ -142,16 +140,15 @@
       top.className = 'image-skill-list-card-top';
       const heading = document.createElement('div');
       heading.className = 'image-skill-list-card-heading';
-      const category = document.createElement('span');
-      category.className = 'image-skill-list-card-category';
-      category.textContent = '影像修補技能';
       const title = document.createElement('h4');
       title.className = 'image-skill-list-card-title';
       title.textContent = skill.name;
-      heading.append(category, title);
+      heading.append(title);
 
       const badges = document.createElement('div');
       badges.className = 'image-skill-list-card-badges';
+      const kind = document.createElement('span'); kind.className = 'image-skill-badge'; kind.textContent = '影像修補';
+      badges.append(kind);
       if (isActive) {
         const activeBadge = document.createElement('span');
         activeBadge.className = 'image-skill-badge';
@@ -191,7 +188,8 @@
       meta.className = 'image-skill-list-card-meta';
       const modelInfo = document.createElement('span');
       const profileLabel = defaults[skill.profile]?.label || skill.profile;
-      modelInfo.textContent = `${profileLabel} · ${skill.model_id.split('/').pop()}`;
+      modelInfo.textContent = `指定模型：${skill.model_id.split('/').pop()}`;
+      modelInfo.title = `${profileLabel} · ${skill.model_id}`;
       const stepInfo = document.createElement('span');
       stepInfo.textContent = `${skill.steps} 步 · ${Number(skill.seed) === -1 ? '隨機種子' : `種子 ${skill.seed}`}`;
       meta.append(modelInfo, stepInfo);
@@ -202,7 +200,7 @@
       editBtn.type = 'button';
       editBtn.className = 'btn image-skill-card-edit';
       editBtn.dataset.skillId = skill.id;
-      editBtn.textContent = '詳細資訊與修正';
+      editBtn.textContent = '設定與模型';
       editBtn.addEventListener('click', event => {
         event.stopPropagation();
         if (dirty && selected !== skill.id) {
@@ -231,7 +229,7 @@
         if (event.target.closest('button')) return;
         editBtn.click();
       });
-      container.append(card);
+      container.insertBefore(card, container.querySelector('.agent-skill-card'));
     }
   }
 
@@ -293,7 +291,7 @@
     tab.setAttribute('aria-selected', 'false');
     tab.setAttribute('aria-controls', 'settings-image-skills');
     tab.tabIndex = -1;
-    tab.textContent = '影像修補技能';
+    tab.textContent = 'Skill 管理';
     tab.addEventListener('click', () => window.switchSettingsTab('image-skills'));
     document.querySelector('.settings-tabs').append(tab);
 
@@ -306,16 +304,18 @@
     panel.innerHTML = `
       <div class="image-skills-header">
         <div class="image-skills-heading">
-          <h3>影像修補技能</h3>
-          <p class="settings-note">以 Prompt 定義修補方式，搭配適合的模型。點選技能卡片即可跳出視窗修正詳細設定。</p>
+          <h3>Agent Skills</h3>
+          <p class="settings-note">管理技能的工作流程與執行設定。影像修補也是 Agent Skill，可在技能內指定執行模型。</p>
           <p class="image-skills-current settings-note" id="image-skills-active">讀取中…</p>
         </div>
         <div class="image-skills-toolbar">
-          <button class="btn btn-primary" type="button" id="image-skill-new"><span aria-hidden="true">＋</span> 新增技能</button>
+          <button type="button" class="btn" id="agent-skills-refresh">重新整理</button>
+          <button class="btn btn-primary" type="button" id="image-skill-new">新增影像修補 Skill</button>
         </div>
       </div>
       <p id="image-skills-page-feedback" class="settings-feedback" role="status" aria-live="polite"></p>
-      <div id="image-skill-cards" class="image-skill-cards" role="list" aria-label="影像修補技能卡片列表"></div>`;
+      <p id="agent-skills-feedback" class="settings-feedback" role="status"></p>
+      <div id="image-skill-cards" class="image-skill-cards" role="list" aria-label="Agent Skill 列表"></div>`;
     document.querySelector('.settings-content').append(panel);
 
     const modal = document.createElement('div');
@@ -326,7 +326,6 @@
       <div class="dialog-box image-skill-dialog" role="dialog" aria-modal="true" aria-labelledby="image-skill-modal-title" tabindex="-1">
         <div class="image-skill-modal-header">
           <div class="image-skill-modal-heading">
-            <p class="image-skill-modal-eyebrow">Skill 管理 · 影像修補技能</p>
             <h3 id="image-skill-modal-title">修正技能詳細資訊</h3>
           </div>
           <div class="image-skill-modal-header-actions">
@@ -347,16 +346,21 @@
                 <div class="image-skill-prompt-meta"><span>支援中文與英文</span><span id="image-skill-prompt-count"></span></div>
               </section>
               <section class="image-skill-card image-skill-model-card" aria-labelledby="image-skill-model-heading">
-                <div class="image-skill-card-heading"><h4 id="image-skill-model-heading">模型 <span>Model</span></h4><span class="image-skill-badge" id="image-skill-model-status"></span></div>
+                <div class="image-skill-card-heading"><h4 id="image-skill-model-heading">指定執行模型</h4><span class="image-skill-badge" id="image-skill-model-status"></span></div>
                 <label>模型系列<select class="select-box" id="image-skill-profile"><option value="wai_illustrious">WAI-NSFW-illustrious-SDXL v17.0</option></select></label>
                 <label>GGUF 模型檔<select class="select-box" id="image-skill-model"></select></label>
-                <div class="image-skill-model-help"><p class="settings-note">套用技能後，至 AI 模型頁載入模型。</p><button class="btn btn-text" type="button" id="image-skills-models">管理 GGUF 模型 <span aria-hidden="true">↗</span></button></div>
+                <div class="image-skill-model-help"><p class="settings-note">此 Skill 一律使用指定模型；執行修補時自動載入。模型須先下載。</p><button class="btn btn-text" type="button" id="image-skills-models">管理 GGUF 模型</button></div>
               </section>
             </div>
             <details class="image-skill-details" id="image-skill-info"><summary><span>技能資訊</span><span class="image-skill-detail-summary" id="image-skill-info-summary"></span></summary>
               <div class="image-skill-details-body"><label>技能名稱<input class="search-input" id="image-skill-name" required maxlength="100" placeholder="為這份技能命名"></label><label><span>用途說明 <span class="image-skill-optional">選填</span></span><input class="search-input" id="image-skill-description" maxlength="1000" placeholder="簡述適合使用的情境"></label>
               <div class="settings-actions image-skill-management"><button class="btn" type="button" id="image-skill-duplicate">複製為新技能</button><button class="btn" type="button" id="image-skill-discard">放棄修改</button></div></div>
             </details>
+            <details class="image-skill-details"><summary>Agent 工作流程</summary><div class="image-skill-details-body">
+              <label for="image-skill-instructions">SKILL.md 工作指示</label>
+              <textarea id="image-skill-instructions" rows="6" maxlength="60000" spellcheck="false" placeholder="描述使用此技能的時機、工作步驟與輸出要求。留白時使用預設修補流程。"></textarea>
+              <p class="settings-note">工作流程、Prompt 與指定模型保存在同一份 Agent Skill。</p>
+            </div></details>
             <details class="image-skill-details"><summary><span>進階設定</span><span class="image-skill-detail-summary" id="image-skill-advanced-summary"></span></summary>
               <div class="image-skill-details-body"><div class="image-skills-grid"><label>推論步數<input class="search-input" type="number" id="image-skill-steps" min="1" max="100" required></label><label>隨機種子<input class="search-input" type="number" id="image-skill-seed" min="-1" max="2147483647" required><span class="settings-note">設為 -1 時，每次使用隨機種子。</span></label></div>
               <p class="settings-note">修補結果另存副本。</p></div>
@@ -466,10 +470,13 @@
         previousSelected = selected;
         dirty = false;
         await refresh();
+        app.emit('skills:changed');
         feedback(response.message);
       });
     });
     byId('image-skill-apply').addEventListener('click', () => activateSkill(selected));
+    byId('agent-skills-refresh').addEventListener('click', () => void refresh());
+    app.on('skills:changed', () => void refresh());
     app.on('workspace:change', () => {
       if (app.runtime.navigation?.workspace !== 'ai') modalWanted = false;
       syncModalVisibility();

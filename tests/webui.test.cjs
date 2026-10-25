@@ -9,6 +9,72 @@ const path = require('node:path');
 const html = fs.readFileSync(path.join(__dirname, '../static/index.html'), 'utf8');
 const source = fs.readFileSync(path.join(__dirname, '../static/gallery-app.js'), 'utf8');
 
+test('duplicate preview labels exact pixels and selects byte copies within a mixed group', () => {
+  const f = fixture();
+  f.run(`currentDedupPreview = {
+    total_scanned: 3, total_groups: 1, exact_duplicate_images: 1, visual_duplicate_images: 1,
+    total_duplicate_images: 2, all_delete_ids: [2, 3], groups: [{
+      group_id: 1, match_type: 'visual', folder: 'artist', reclaim_bytes: 300,
+      keep: {id: 1, filename: 'master.png', folder: 'artist', width: 64, height: 64},
+      duplicates: [
+        {id: 2, filename: 'copy.png', folder: 'artist', size_bytes: 100, metrics: {method: 'exact_bytes'}},
+        {id: 3, filename: 'lossless.webp', folder: 'artist', size_bytes: 200, metrics: {method: 'opencv_exact_pixels'}}
+      ]
+    }]
+  }; selectedDedupIds = new Set([2, 3]); renderDedupPreview();`);
+  assert.match(f.element('dedup-preview-box').innerHTML, /原尺寸像素完全相同/);
+  assert.doesNotMatch(f.element('dedup-summary-bar').innerHTML, /視覺相似/);
+  f.run("selectDedupFilter('exact')");
+  assert.equal(f.run('[...selectedDedupIds].join()'), '2');
+  assert.match(f.element('btn-dedup-exec').textContent, /1 張/);
+});
+
+test('rescanning clears the previous duplicate deletion selection even on failure', async () => {
+  const f = fixture();
+  f.run('currentDedupPreview = {groups: []}; selectedDedupIds = new Set([99]);');
+  f.context.fetch = async () => ({ok: false, json: async () => ({detail: 'scan failed'})});
+  await f.run('loadDedupPreview()');
+  assert.equal(f.run('currentDedupPreview'), null);
+  assert.equal(f.run('selectedDedupIds.size'), 0);
+  assert.equal(f.element('btn-dedup-exec').disabled, true);
+});
+
+test('duplicate scans poll progress and closing stops polling without accepting a late result', async () => {
+  const f = fixture();
+  let requests = 0;
+  f.context.fetch = async () => {
+    requests++;
+    return {ok: true, json: async () => ({scan_id: 'shared', status: 'running', elapsed_seconds: 2,
+      progress: {stage: '建立候選圖像素索引', processed_count: 25, total_target: 100, cached_images: 20}})};
+  };
+  const pending = f.run('loadDedupPreview()');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.element('dedup-progress').hidden, false);
+  assert.match(f.element('dedup-progress-stage').textContent, /建立候選/);
+  assert.equal(f.element('dedup-progress-bar').value, 25);
+  f.run('closeDedupModal()');
+  f.tick();
+  await pending;
+  assert.equal(requests, 1);
+  assert.equal(f.run('currentDedupPreview'), null);
+});
+
+test('a completed duplicate scan replaces progress with verified results', async () => {
+  const f = fixture();
+  let requestCount = 0;
+  f.context.fetch = async () => ({ok: true, json: async () => ++requestCount === 1
+    ? {scan_id: 'scan-1', status: 'running', progress: {stage: '檢查尺寸與快取', processed_count: 1, total_target: 2}}
+    : {scan_id: 'scan-1', status: 'completed', result: {total_scanned: 2, total_groups: 0, groups: [], all_delete_ids: []}}});
+  const pending = f.run('loadDedupPreview()');
+  await new Promise(resolve => setImmediate(resolve));
+  f.tick();
+  await pending;
+  assert.equal(f.element('dedup-progress').hidden, true);
+  assert.equal(f.element('dedup-preview-box').style.display, 'flex');
+  assert.equal(f.run('currentDedupPreview.total_scanned'), 2);
+  assert.equal(f.element('btn-dedup-exec').disabled, true);
+});
+
 test('tag selection updates the cached sidebar without another tag request', async () => {
   const f = fixture();
   let requests = 0;
@@ -128,7 +194,7 @@ function fixture(saved = '{}') {
     if (!elements.has(id)) {
       const classes = new Set();
       elements.set(id, {
-        value: '', checked: false, hidden: true, disabled: false, textContent: '', innerHTML: '', style: {},
+        value: '', checked: false, hidden: true, disabled: false, textContent: '', innerHTML: '', style: {}, dataset: {},
         classList: { contains: c => classes.has(c), add: c => classes.add(c), remove: c => classes.delete(c),
           toggle(c, value) { if (value) classes.add(c); else classes.delete(c); } },
         setAttribute() {}, removeAttribute() {}, reportValidity: () => true,

@@ -313,10 +313,10 @@ def refresh_tag_counts(conn: sqlite3.Connection):
 
 
 
-@exclusive_job("圖庫索引掃描")
+@exclusive_job("圖庫索引同步")
 def scan_library() -> Dict[str, Any]:
     """
-    掃描 D:\\圖檔\\twitter 下所有檔案並同步至 SQLite，
+    初次啟動或排程匯入後，將圖庫檔案同步至 SQLite，
     同時自動從「子資料夾名稱」與「檔名規則」提取畫師與來源標籤。
     """
     if not GALLERY_ROOT.is_dir():
@@ -544,7 +544,7 @@ def _scan_library(conn, t0):
     }
     log_operation(
         category="scan",
-        action="重新掃描圖庫檔案變動",
+        action="同步圖庫索引",
         summary=f"掃描{'完成' if not errors else '不完整，保留索引'}：新增 {len(new_images):,} 張、標記遺失 {res_data['missing_marked']:,} 張、更新 {len(changed_ids):,} 張",
         status="success" if not errors else "warning",
         affected_count=len(new_images) + len(removed_paths),

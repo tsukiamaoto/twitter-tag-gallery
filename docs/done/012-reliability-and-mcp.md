@@ -74,11 +74,10 @@
 
 ## 圖庫 MCP 流程工具（2026-10-21）
 
-使用者釐清需要新增掃描、搜尋、打標、歸檔、復原等實際圖庫工具。新增以下 12 個，與既有 12 個工具共存，Settings 會自動列出並可逐一停用。
+提供搜尋、打標、歸檔、復原等實際圖庫工具，Settings 會自動列出並可逐一停用。2026-10-24 移除獨立手動掃描工具；圖庫索引仍在初次啟動與排程匯入後自動同步。
 
 | 工具 | 用途 | MCP 回應 |
 | --- | --- | --- |
-| `gallery_scan_library` | 掃描目前設定的圖庫並同步索引 | 背景任務 ID |
 | `gallery_search_images` | 關鍵字／標籤／資料夾／AI 狀態與分頁搜尋 | 圖片清單及 ID |
 | `gallery_get_image_details` | 圖片詳細標籤、處理階段、錯誤及版本 | 詳情，標籤最多 500 筆 |
 | `gallery_update_image_tags` | 明確指定圖片 ID 批次編輯核心模型標籤，保護人工標籤 | 更新數量 |
@@ -94,11 +93,10 @@
 
 建議順序：
 
-1. `gallery_scan_library` 傳 `{}`，取得 `run_id`；使用 `gallery_get_tool_run` 傳 `{"run_id":"實際回傳的 ID"}` 每 1–2 秒查詢，直到 `run.status` 不再是 `running`。
-2. `gallery_search_images` 傳 `{"q":"風景","page_size":20}`，或 `{"include_tags":["landscape"],"folder":"__ROOT__"}`。`include_tags` 使用原始標籤名稱；中文關鍵字使用 `q`。
-3. `gallery_update_image_tags` 傳 `{"image_ids":[實際圖片ID],"add_tags":[{"name":"artist_name","category":"artist"}]}`；或使用 `gallery_analyze_images` 讓本機 AI 分析。模型目前只可新增畫師、角色、作品、來源，不能覆蓋或移除人工標籤，詳見 [018 分類限制](018-core-generated-tags.md)。相同模型與檔案版本已完成時預設略過；`skip_completed=false` 可重新分析。
-4. `gallery_move_images` 先傳 `{"image_ids":[實際圖片ID],"target_folder":"畫師名稱","execute_move":false}`；查看結果內 `entries`，確認後以相同條件傳 `execute_move=true`。執行會重新建立計畫並再次檢查檔案衝突。
-5. 需要停止時，使用啟動回應的 `cancel_tool` 與 `cancel_arguments`。共用圖庫作業的非空 `job_id`（亦即 `gallery_get_jobs` 的 `active.id`）傳給 `gallery_cancel_job`；桌面查證工作的 `agent_job_id` 傳給 `gallery_cancel_agent_job`。兩者不可混用，`run_id` 僅用於讀取工具結果。`job_id=null` 的背景工具可能屬於桌面查證工作，不能因此推定沒有停止入口。
+1. `gallery_search_images` 傳 `{"q":"風景","page_size":20}`，或 `{"include_tags":["landscape"],"folder":"__ROOT__"}`。`include_tags` 使用原始標籤名稱；中文關鍵字使用 `q`。
+2. `gallery_update_image_tags` 傳 `{"image_ids":[實際圖片ID],"add_tags":[{"name":"artist_name","category":"artist"}]}`；或使用 `gallery_analyze_images` 讓本機 AI 分析。模型目前只可新增畫師、角色、作品、來源，不能覆蓋或移除人工標籤，詳見 [018 分類限制](018-core-generated-tags.md)。相同模型與檔案版本已完成時預設略過；`skip_completed=false` 可重新分析。背景工具回傳 `run_id` 後，使用 `gallery_get_tool_run` 每 1–2 秒查詢，直到 `run.status` 不再是 `running`。
+3. `gallery_move_images` 先傳 `{"image_ids":[實際圖片ID],"target_folder":"畫師名稱","execute_move":false}`；查看結果內 `entries`，確認後以相同條件傳 `execute_move=true`。執行會重新建立計畫並再次檢查檔案衝突。
+4. 需要停止時，使用啟動回應的 `cancel_tool` 與 `cancel_arguments`。共用圖庫作業的非空 `job_id`（亦即 `gallery_get_jobs` 的 `active.id`）傳給 `gallery_cancel_job`；桌面查證工作的 `agent_job_id` 傳給 `gallery_cancel_agent_job`。兩者不可混用，`run_id` 僅用於讀取工具結果。`job_id=null` 的背景工具可能屬於桌面查證工作，不能因此推定沒有停止入口。
 
 操作預設值與限制：`gallery_batch_tag_or_move.include_tags` 至少一個標籤，指定資料夾即實際搬移，需要預覽改用 `gallery_move_images`。批次反查的 `auto_move_verified`、畫師校正的 `move_to_artist_folder` 與 `purge_ai_artist_tags`、清理畫師的 `revert_unverified_ai_folders` 均預設 `false`。畫師查證證據使用具名的 `source_url`、`linked_url`；`confirmed=true` 必須附非空標準名稱、至少兩個平台帳號與證據。背景工具說明會附上共用執行契約，即使使用者自訂用途說明，仍會保留輪詢與停止方式。
 

@@ -5,9 +5,9 @@
   if (app.runtime.integrationsInstalled) return;
   app.runtime.integrationsInstalled = true;
   let configuration = null, servers = [], selectedId = 'gallery', isNew = false;
-  let dirty = false, busy = false, modalWanted = false, returnFocus = null;
+  let dirty = false, busy = false, modalWanted = false, returnFocus = null, newServerId = '';
   let jobsSignature = '', loading = null;
-  const labels = { mcp: 'MCP 管理', tools: 'Tool 設定', tasks: '背景任務與復原', artists: '畫師身分' };
+  const labels = { mcp: 'MCP 管理', tools: 'Tool 設定', tasks: '背景任務與復原', artists: '畫師身分', dedup: '清除重複圖片' };
 
   function feedback(id, text, error = false) {
     const node = byId(id);
@@ -118,12 +118,6 @@
     return String(text || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
   }
 
-  function endpointSummary(server) {
-    const transport = (server.transport || 'stdio').toLowerCase();
-    if (transport === 'http' || transport === 'sse') return server.url || '(尚未設定連線 URL)';
-    return [server.command || 'python', ...(server.args || [])].join(' ').trim();
-  }
-
   function isMcpSectionVisible() {
     if (app.runtime.navigation) return app.runtime.navigation.isVisible('mcp');
     return Boolean(byId('settings-mcp') && !byId('settings-mcp').hidden && byId('schedule-modal')?.classList.contains('open'));
@@ -138,13 +132,6 @@
   }
 
   function updatePermissions() {
-    const enabled = configuration?.mcp_enabled, readOnly = configuration?.mcp_read_only;
-    const toolList = byId('mcp-tool-list');
-    if (toolList) {
-      for (const input of toolList.querySelectorAll('input')) {
-        input.disabled = !enabled || (readOnly && input.dataset.writes === 'true');
-      }
-    }
     const modalToolList = byId('mcp-modal-tool-list');
     if (modalToolList && byId('mcp-enabled') && byId('mcp-readonly')) {
       const modalEnabled = byId('mcp-enabled').checked;
@@ -176,53 +163,47 @@
     const builtin = Boolean(current?.builtin);
     const transport = (byId('mcp-server-transport').value || 'stdio').toLowerCase();
     const stateNode = byId('mcp-draft-state');
-    stateNode.textContent = busy ? '處理中…' : dirty ? '尚未儲存' : isNew ? '新 MCP 卡片' : '已儲存';
+    stateNode.textContent = busy ? '處理中…' : dirty ? '尚未儲存' : isNew ? '尚未建立' : '已儲存';
     stateNode.dataset.state = dirty ? 'dirty' : 'saved';
 
-    const titleText = byId('mcp-server-name').value.trim() || (isNew ? '新增自訂 MCP 服務' : current?.name || '調整 MCP 設定');
-    byId('mcp-modal-title').textContent = titleText;
-    byId('mcp-modal-eyebrow').textContent = builtin ? 'MCP 管理 · 專案內建 Antigravity MCP' : 'MCP 管理 · 自訂擴充 MCP 服務';
-
-    const kindBadge = byId('mcp-modal-kind-badge');
-    kindBadge.textContent = builtin ? '專案內建' : '自訂擴充';
-    kindBadge.dataset.state = builtin ? 'builtin' : 'custom';
-
-    const transportBadge = byId('mcp-modal-transport-badge');
-    transportBadge.textContent = transport.toUpperCase();
-
-    byId('mcp-server-id').readOnly = !isNew;
+    byId('mcp-modal-title').textContent = isNew ? '新增 MCP 服務' : current?.name || 'MCP 設定';
+    byId('mcp-modal-eyebrow').textContent = builtin ? '內建服務 · MCP 設定' : '自訂服務 · MCP 設定';
+    byId('mcp-modal-description').textContent = builtin ? current.description || '調整此服務的存取權限。' : isNew ? '設定服務名稱與連線方式，即可加入 MCP。' : '調整此服務的連線與存取權限。';
+    byId('mcp-name-field').hidden = builtin;
+    byId('mcp-custom-fields').hidden = builtin;
+    byId('mcp-transport-field').hidden = builtin;
+    byId('mcp-connection-note').hidden = !builtin;
+    byId('mcp-readonly-note').textContent = builtin ? '只允許查詢，不允許修改圖庫。' : '限制為唯讀工具，實際支援依服務而定。';
+    byId('mcp-advanced-summary').textContent = builtin ? '啟動路徑、環境變數' : '環境與擴充參數';
+    const connection = byId('mcp-connection-settings');
+    const destination = byId(builtin ? 'mcp-advanced-connection' : 'mcp-custom-connection');
+    if (connection.parentElement !== destination) destination.append(connection);
+    byId('mcp-custom-connection').hidden = builtin;
     byId('mcp-server-transport').disabled = busy || builtin;
     byId('mcp-stdio-fields').hidden = transport !== 'stdio';
     byId('mcp-http-fields').hidden = transport === 'stdio';
+    byId('mcp-stdio-options').hidden = transport !== 'stdio';
+    byId('mcp-http-options').hidden = transport === 'stdio';
     byId('mcp-sidecar-fields').hidden = selectedId !== 'gallerypub' || isNew;
     byId('mcp-modal-tools-builtin').hidden = !builtin;
     byId('mcp-modal-tools-custom').hidden = builtin;
     byId('mcp-delete').hidden = isNew || builtin;
     byId('mcp-delete').disabled = busy;
     byId('mcp-test').disabled = busy || isNew;
+    byId('mcp-test').hidden = isNew;
+    byId('mcp-modal-client-details').hidden = isNew;
     byId('mcp-export').disabled = busy || isNew;
     byId('mcp-sync-client').disabled = busy || isNew;
     byId('mcp-save').disabled = busy;
-    byId('mcp-save').textContent = isNew ? '建立 MCP 卡片' : '儲存 MCP 設定';
-
-    const customCount = Object.keys(parseKeyValue(byId('mcp-server-custom-config').value, '=')).length;
-    byId('mcp-modal-custom-summary').textContent = customCount ? `${customCount} 項擴充屬性` : '可選填擴充參數';
+    byId('mcp-save').textContent = isNew ? '新增服務' : '儲存變更';
     updatePermissions();
   }
 
   function populateModal(server, preserveDraft = false) {
     isNew = !server;
     selectedId = server?.id || '';
-    const picker = byId('mcp-modal-picker');
-    if (picker) {
-      picker.replaceChildren();
-      for (const item of servers) {
-        picker.add(new Option(`${item.name} (${item.id})`, item.id));
-      }
-      if (isNew) picker.add(new Option('＋ 新增自訂 MCP 服務', '__new__'));
-      picker.value = isNew ? '__new__' : selectedId;
-    }
     if (!preserveDraft) {
+      newServerId = server ? '' : `mcp-${[...crypto.getRandomValues(new Uint32Array(2))].map(value => value.toString(16).padStart(8, '0')).join('')}`;
       const value = server || {
         id: '',
         name: '',
@@ -243,9 +224,7 @@
       };
       byId('mcp-enabled').checked = Boolean(value.enabled);
       byId('mcp-readonly').checked = Boolean(value.read_only);
-      byId('mcp-server-id').value = value.id || '';
       byId('mcp-server-name').value = value.name || '';
-      byId('mcp-server-category').value = value.category || '';
       byId('mcp-server-description').value = value.description || '';
       byId('mcp-server-transport').value = (value.transport || 'stdio').toLowerCase();
       byId('mcp-server-command').value = value.command || '';
@@ -262,6 +241,8 @@
         input.checked = !disabledSet.has(input.dataset.toolName);
       }
       for (const id of ['mcp-client-config', 'mcp-copy', 'mcp-export-note']) byId(id).hidden = true;
+      for (const id of ['mcp-modal-tools-details', 'mcp-modal-advanced-details', 'mcp-modal-client-details']) byId(id).open = false;
+      byId('mcp-modal-body').scrollTop = 0;
       dirty = false;
     }
     syncModalControls();
@@ -281,7 +262,7 @@
     else syncModalControls();
     modalWanted = true;
     syncModalVisibility();
-    const focusTarget = isNew ? byId('mcp-server-id') : byId('mcp-modal-close');
+    const focusTarget = isNew ? byId('mcp-server-name') : byId('mcp-modal-close');
     focusTarget?.focus({ preventScroll: true });
   }
 
@@ -289,20 +270,24 @@
     modalWanted = false;
     syncModalVisibility();
     renderCards();
-    if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
+    const triggerCard = [...byId('mcp-cards').children].find(card => card.dataset.serverId === returnFocus?.dataset.serverId);
+    const focusTarget = returnFocus?.isConnected ? returnFocus : triggerCard?.querySelector('.mcp-card-edit');
+    focusTarget?.focus({ preventScroll: true });
   }
 
   function collectModalDraft() {
     const current = isNew ? null : servers.find(item => item.id === selectedId);
     const builtin = Boolean(current?.builtin);
+    const customConfigText = byId('mcp-server-custom-config').value;
+    const preserveCustomConfig = builtin || (current && customConfigText === formatKeyValue(current.custom_config, '='));
     const disabledTools = builtin
       ? [...byId('mcp-modal-tool-list').querySelectorAll('input')].filter(input => !input.checked).map(input => input.dataset.toolName)
       : parseLines(byId('mcp-server-disabled-tools').value);
     return {
-      id: (isNew ? byId('mcp-server-id').value : selectedId).trim(),
-      name: byId('mcp-server-name').value.trim(),
-      category: byId('mcp-server-category').value.trim() || (builtin ? 'Antigravity 內建 MCP' : '自訂擴充 MCP'),
-      description: byId('mcp-server-description').value.trim(),
+      id: isNew ? newServerId : selectedId,
+      name: builtin ? current.name : byId('mcp-server-name').value.trim(),
+      category: current?.category || (builtin ? 'Antigravity 內建 MCP' : '自訂擴充 MCP'),
+      description: builtin ? current.description || '' : byId('mcp-server-description').value.trim(),
       transport: builtin ? 'stdio' : byId('mcp-server-transport').value,
       command: byId('mcp-server-command').value.trim(),
       args: parseLines(byId('mcp-server-args').value),
@@ -313,7 +298,7 @@
       enabled: byId('mcp-enabled').checked,
       read_only: byId('mcp-readonly').checked,
       disabled_tools: disabledTools,
-      custom_config: parseKeyValue(byId('mcp-server-custom-config').value, '='),
+      custom_config: preserveCustomConfig ? { ...(current.custom_config || {}) } : parseKeyValue(customConfigText, '='),
     };
   }
 
@@ -333,10 +318,9 @@
     const enabledCount = servers.filter(item => item.enabled).length;
     const summaryNode = byId('mcp-active-summary');
     if (summaryNode) {
-      summaryNode.textContent = `目前共納管 ${servers.length} 個 MCP 服務（專案內建 ${builtinCount} · 自訂擴充 ${customCount}）· 啟用中 ${enabledCount} 個`;
+      summaryNode.textContent = `${servers.length} 個服務 · ${enabledCount} 個已啟用 · 內建 ${builtinCount} / 自訂 ${customCount}`;
     }
 
-    const totalTools = (configuration?.tools || []).length;
     for (const server of servers) {
       const isSelectedDirty = dirty && !isNew && server.id === selectedId;
       const card = document.createElement('article');
@@ -347,37 +331,18 @@
 
       const top = document.createElement('div');
       top.className = 'mcp-list-card-top';
-      const heading = document.createElement('div');
-      heading.className = 'mcp-list-card-heading';
-      const category = document.createElement('span');
-      category.className = 'mcp-list-card-category';
-      category.textContent = server.category || (server.builtin ? 'Antigravity 內建 MCP' : '自訂擴充 MCP');
       const title = document.createElement('h4');
       title.className = 'mcp-list-card-title';
       title.textContent = server.name;
-      const key = document.createElement('span');
-      key.className = 'mcp-list-card-key';
-      key.textContent = `Server Key: ${server.server_name || server.id}`;
-      heading.append(category, title, key);
 
       const badges = document.createElement('div');
       badges.className = 'mcp-list-card-badges';
-      const kindBadge = document.createElement('span');
-      kindBadge.className = 'mcp-badge';
-      kindBadge.dataset.state = server.builtin ? 'builtin' : 'custom';
-      kindBadge.textContent = server.builtin ? '專案內建' : '自訂擴充';
-      badges.append(kindBadge);
 
       const statusBadge = document.createElement('span');
       statusBadge.className = 'mcp-badge';
       statusBadge.dataset.state = !server.enabled ? 'disabled' : server.read_only ? 'readonly' : 'enabled';
-      statusBadge.textContent = !server.enabled ? '已停用' : server.read_only ? '唯讀模式' : '已啟用';
+      statusBadge.textContent = !server.enabled ? '已停用' : server.read_only ? '已啟用 · 唯讀' : '已啟用';
       badges.append(statusBadge);
-
-      const transportBadge = document.createElement('span');
-      transportBadge.className = 'mcp-badge';
-      transportBadge.textContent = (server.transport || 'stdio').toUpperCase();
-      badges.append(transportBadge);
 
       if (isSelectedDirty) {
         const dirtyBadge = document.createElement('span');
@@ -386,44 +351,26 @@
         dirtyBadge.textContent = '尚未儲存';
         badges.append(dirtyBadge);
       }
-      top.append(heading, badges);
+      top.append(title, badges);
 
       const desc = document.createElement('p');
       desc.className = 'mcp-list-card-desc';
       desc.textContent = server.description || '未填寫用途說明';
-
-      const endpointBox = document.createElement('div');
-      endpointBox.className = 'mcp-list-card-endpoint';
-      const endpointLabel = document.createElement('span');
-      endpointLabel.className = 'mcp-list-card-endpoint-label';
-      endpointLabel.textContent = (server.transport === 'http' || server.transport === 'sse') ? '連線位址 Endpoint URL' : '啟動指令 Command / Args';
-      const endpointText = document.createElement('p');
-      endpointText.className = 'mcp-list-card-endpoint-text';
-      endpointText.textContent = endpointSummary(server);
-      endpointBox.append(endpointLabel, endpointText);
+      desc.title = desc.textContent;
 
       const meta = document.createElement('div');
       meta.className = 'mcp-list-card-meta';
-      if (server.builtin) {
-        const disabledSet = new Set(server.disabled_tools || []);
-        const enabledToolCount = (configuration?.tools || []).filter(tool => {
-          if (!server.enabled) return false;
-          if (server.read_only && tool.writes) return false;
-          return !disabledSet.has(tool.name);
-        }).length;
-        const toolSpan = document.createElement('span');
-        toolSpan.textContent = totalTools ? `${enabledToolCount} / ${totalTools} 個工具可呼叫` : (server.read_only ? '唯讀工具模式' : '完整工具權限');
-        meta.append(toolSpan);
-        const clientSpan = document.createElement('span');
-        clientSpan.textContent = server.id === 'gallerypub' ? '固定模型：Gemini 3.8 Flash' : '連線客戶端：Antigravity';
-        meta.append(clientSpan);
-      } else {
-        const customSpan = document.createElement('span');
-        customSpan.textContent = `擴充參數 ${Object.keys(server.custom_config || {}).length} 項`;
-        const disabledSpan = document.createElement('span');
-        disabledSpan.textContent = (server.disabled_tools || []).length ? `停用 ${server.disabled_tools.length} 個工具` : '全部工具啟用';
-        meta.append(customSpan, disabledSpan);
-      }
+      const tools = server.tools || server.discovered_tools || (server.builtin ? configuration?.tools || [] : []);
+      const totalTools = server.tool_count ?? tools.length;
+      const disabledSet = new Set(server.disabled_tools || []);
+      const enabledToolCount = !server.enabled ? 0 : tools.length
+        ? tools.filter(tool => !disabledSet.has(tool.name) && !(server.read_only && tool.writes)).length
+        : server.enabled_tool_count ?? 0;
+      const toolSpan = document.createElement('span');
+      toolSpan.textContent = totalTools || server.builtin || server.last_test?.ok
+        ? `${enabledToolCount} / ${totalTools} 個工具可用`
+        : '工具數量待確認';
+      meta.append(toolSpan);
 
       const actions = document.createElement('div');
       actions.className = 'mcp-list-card-actions';
@@ -434,10 +381,12 @@
       switchInput.type = 'checkbox';
       switchInput.className = 'mcp-card-toggle';
       switchInput.dataset.serverId = server.id;
+      switchInput.setAttribute('role', 'switch');
+      switchInput.setAttribute('aria-label', `啟用 ${server.name}`);
       switchInput.checked = Boolean(server.enabled);
       switchInput.disabled = busy;
       const switchText = document.createElement('span');
-      switchText.textContent = server.enabled ? '啟用中' : '已停用';
+      switchText.textContent = '啟用服務';
       switchLabel.append(switchInput, switchText);
       switchInput.addEventListener('change', event => {
         event.stopPropagation();
@@ -446,13 +395,14 @@
       switchLabel.addEventListener('click', event => event.stopPropagation());
 
       const btnGroup = document.createElement('div');
-      btnGroup.className = 'settings-actions';
+      btnGroup.className = 'settings-actions mcp-card-buttons';
 
       const testBtn = document.createElement('button');
       testBtn.type = 'button';
       testBtn.className = 'btn mcp-card-test';
       testBtn.dataset.serverId = server.id;
       testBtn.textContent = '測試連線';
+      testBtn.setAttribute('aria-label', `測試連線：${server.name}`);
       testBtn.disabled = busy;
       testBtn.addEventListener('click', event => {
         event.stopPropagation();
@@ -463,7 +413,8 @@
       editBtn.type = 'button';
       editBtn.className = 'btn btn-primary mcp-card-edit';
       editBtn.dataset.serverId = server.id;
-      editBtn.textContent = '詳細設定與調整';
+      editBtn.textContent = '詳細設定';
+      editBtn.setAttribute('aria-label', `詳細設定：${server.name}`);
       editBtn.addEventListener('click', event => {
         event.stopPropagation();
         mcpFeedback('');
@@ -472,9 +423,9 @@
 
       btnGroup.append(testBtn, editBtn);
       actions.append(switchLabel, btnGroup);
-      card.append(top, desc, endpointBox, meta, actions);
+      card.append(top, desc, meta, actions);
       card.addEventListener('click', event => {
-        if (event.target.closest('button, input, label')) return;
+        if (event.target.closest('button, input, label, code')) return;
         editBtn.click();
       });
       container.append(card);
@@ -504,12 +455,6 @@
             disabled_tools: [...(configuration.disabled_tools || [])],
           }
         : item);
-    }
-    const toolList = byId('mcp-tool-list');
-    if (toolList && configuration.disabled_tools) {
-      for (const input of toolList.querySelectorAll('input')) {
-        input.checked = !configuration.disabled_tools.includes(input.dataset.name);
-      }
     }
     updatePermissions();
     renderCards();
@@ -581,6 +526,27 @@
     } catch (error) { feedback('artist-model-feedback', `畫師身分設定讀取失敗：${error.message}`, true); }
   }
 
+  async function loadDedupSettings() {
+    const statusNode = byId('dedup-model-status');
+    if (!statusNode) return;
+    try {
+      const latest = await app.api('/api/dedup/scans/latest');
+      const data = latest.scan?.result;
+      if (latest.scan?.status === 'running' || latest.scan?.status === 'queued') {
+        const p = latest.scan.progress || {};
+        statusNode.textContent = `掃描進行中：${p.stage || '準備中'} · ${p.processed_count || 0} / ${p.total_target || 0}，開啟清理視窗可接續查看。`;
+        return;
+      }
+      if (typeof data?.total_groups === 'number') {
+        statusNode.textContent = `最近掃描結果：共 ${data.total_groups} 組完全重複圖片（完全重複 ${data.exact_groups_count || 0} 組 · 像素完全相同 ${data.visual_groups_count || 0} 組 · 可清理 ${data.total_duplicate_images || 0} 張 · 預計釋放 ${data.total_reclaim_mb || 0} MB） · MCP 工具：gallery_clean_duplicates`;
+      } else {
+        statusNode.textContent = 'MCP 工具：gallery_clean_duplicates · 可直接開啟預覽與清理視窗';
+      }
+    } catch (error) {
+      statusNode.textContent = 'MCP 工具：gallery_clean_duplicates · 可直接開啟預覽與清理視窗';
+    }
+  }
+
   async function loadSettings(force = false) {
     if (loading) return loading;
     if (configuration && !force) return configuration;
@@ -596,18 +562,10 @@
       };
       servers = normalizeServers(configuration);
 
-      const list = byId('mcp-tool-list');
-      list.replaceChildren();
       const modalList = byId('mcp-modal-tool-list');
       modalList.replaceChildren();
 
       for (const tool of configuration.tools) {
-        const label = document.createElement('label'); label.className = 'settings-check';
-        const input = document.createElement('input'); input.type = 'checkbox'; input.dataset.name = tool.name; input.dataset.writes = String(tool.writes);
-        input.checked = !configuration.disabled_tools.includes(tool.name);
-        const text = document.createElement('span'); text.textContent = `${tool.label} · ${tool.writes ? '可修改圖庫' : '唯讀'}`;
-        label.append(input, text); list.append(label);
-
         const mLabel = document.createElement('label'); mLabel.className = 'settings-check';
         const mInput = document.createElement('input'); mInput.type = 'checkbox'; mInput.dataset.toolName = tool.name; mInput.dataset.writes = String(tool.writes);
         mInput.checked = !configuration.disabled_tools.includes(tool.name);
@@ -628,14 +586,12 @@
       if (data.config_error) mcpFeedback(data.config_error, true);
     }).catch(error => {
       mcpFeedback(`設定讀取失敗：${error.message}，請重新進入此頁重試。`, true);
-      feedback('tools-permission-feedback', `設定讀取失敗：${error.message}，請重新進入此頁重試。`, true);
     }).finally(() => {
       loading = null;
       for (const control of byId('settings-mcp').querySelectorAll('input, button, select')) control.disabled = !configuration;
       if (byId('mcp-modal')) {
         for (const control of byId('mcp-modal').querySelectorAll('input, button, select, textarea')) control.disabled = !configuration;
       }
-      byId('tools-permission-save').disabled = !configuration;
       syncModalControls();
       renderCards();
     });
@@ -653,14 +609,19 @@
   async function save(button) {
     const draft = collectModalDraft();
     const current = isNew ? null : servers.find(item => item.id === selectedId);
-    if (!draft.id) {
-      mcpFeedback('請填寫 MCP 識別代號 ID。', true);
-      byId('mcp-server-id').focus();
-      return;
-    }
     if (!draft.name) {
       mcpFeedback('請填寫 MCP 顯示名稱。', true);
       byId('mcp-server-name').focus();
+      return;
+    }
+    if (!current?.builtin && draft.transport === 'stdio' && !draft.command) {
+      mcpFeedback('請填寫啟動指令。', true);
+      byId('mcp-server-command').focus();
+      return;
+    }
+    if (!current?.builtin && draft.transport !== 'stdio' && !/^https?:\/\//i.test(draft.url)) {
+      mcpFeedback('請填寫 http:// 或 https:// 開頭的連線網址。', true);
+      byId('mcp-server-url').focus();
       return;
     }
 
@@ -752,20 +713,6 @@
     }
   }
 
-  async function saveTools(button) {
-    const value = { disabled_tools: [...byId('mcp-tool-list').querySelectorAll('input')].filter(input => !input.checked).map(input => input.dataset.name) };
-    const result = await action(button, 'tools-permission-feedback', () => app.api('/api/settings/integrations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) }));
-    if (result) {
-      applyConfigUpdate(result);
-      for (const input of byId('mcp-modal-tool-list').querySelectorAll('input')) {
-        input.checked = !configuration.disabled_tools.includes(input.dataset.toolName);
-      }
-      updatePermissions();
-      feedback('tools-permission-feedback', '工具權限已儲存並立即套用。客戶端請重新整理 MCP 工具清單。');
-      app.emit('tools:permissions');
-    }
-  }
-
   function renderJobs(runtime) {
     const jobs = runtime.jobs || [], active = runtime.active_job;
     const health = runtime.library_health;
@@ -795,16 +742,18 @@
     addPanel('mcp', `
       <div class="mcp-header">
         <div class="mcp-heading">
-          <h3>MCP 管理</h3>
-          <p class="settings-note">由 Antigravity 呼叫圖庫工具。專案使用的所有 MCP 服務皆集中於此以卡片列表管理；點選卡片即可彈出視窗調整連線、唯讀模式與工具權限，亦可新增自訂 MCP 或供 AI 透過 API／MCP 工具調用。</p>
-          <p id="mcp-active-summary" class="settings-note">讀取中…</p>
-          <p id="mcp-session-status" class="settings-note"></p>
+          <h3>服務連線</h3>
+          <p class="settings-note">管理 Antigravity 與自訂 MCP 的連線、存取模式及工具權限。</p>
         </div>
         <div class="mcp-toolbar">
           <button id="mcp-page-export" type="button" class="btn">匯出全部連線設定</button>
           <button id="mcp-page-sync" type="button" class="btn">同步寫入 Antigravity</button>
           <button id="mcp-card-new" type="button" class="btn btn-primary"><span aria-hidden="true">＋</span> 新增 MCP</button>
         </div>
+      </div>
+      <div class="mcp-overview">
+        <p id="mcp-active-summary" class="mcp-summary-line">讀取中…</p>
+        <p id="mcp-session-status" class="settings-note"></p>
       </div>
       <p id="mcp-page-feedback" class="settings-feedback" role="status" aria-live="polite"></p>
       <div id="mcp-cards" class="mcp-cards" role="list" aria-label="MCP 服務卡片列表"></div>`);
@@ -821,91 +770,89 @@
             <h3 id="mcp-modal-title">調整 MCP 設定</h3>
           </div>
           <div class="mcp-modal-header-actions">
-            <select id="mcp-modal-picker" class="select-box" aria-label="切換 MCP 服務"></select>
             <button id="mcp-modal-close" type="button" class="btn" aria-label="關閉 MCP 設定視窗">✕</button>
           </div>
         </div>
-        <div class="mcp-modal-body">
-          <form id="mcp-form" novalidate style="display:grid; gap:14px;">
-            <div class="mcp-modal-grid">
-              <section class="mcp-section-card" aria-labelledby="mcp-policy-heading">
-                <div class="mcp-section-heading">
-                  <h4 id="mcp-policy-heading">基本資訊與存取權限 <span>Policy</span></h4>
-                  <span class="mcp-badge" id="mcp-modal-kind-badge" data-state="builtin">專案內建</span>
-                </div>
-                <label class="settings-check"><input id="mcp-enabled" type="checkbox"><span>啟用圖庫 MCP</span></label>
-                <label class="settings-check"><input id="mcp-readonly" type="checkbox"><span>唯讀模式：停用所有會修改圖庫的工具</span></label>
-                <div class="mcp-field-grid">
-                  <label>識別代號 ID<input id="mcp-server-id" class="search-input" required maxlength="48" placeholder="例如：comfyui-mcp"></label>
-                  <label>服務分類<input id="mcp-server-category" class="search-input" maxlength="60" placeholder="例如：外部影像工作流"></label>
-                </div>
-                <label>卡片顯示名稱<input id="mcp-server-name" class="search-input" required maxlength="100" placeholder="為這個 MCP 服務命名"></label>
-                <label>用途與整合說明<textarea id="mcp-server-description" class="search-input" rows="2" maxlength="1000" placeholder="說明此 MCP 在專案中的角色與串接內容"></textarea></label>
-              </section>
-              <section class="mcp-section-card" aria-labelledby="mcp-transport-heading">
-                <div class="mcp-section-heading">
-                  <h4 id="mcp-transport-heading">連線方式與啟動參數 <span>Transport</span></h4>
-                  <span class="mcp-badge" id="mcp-modal-transport-badge">STDIO</span>
-                </div>
-                <label>傳輸協定 Transport
-                  <select id="mcp-server-transport" class="select-box">
-                    <option value="stdio">本機程序 (stdio)</option>
-                    <option value="http">HTTP (Streamable HTTP / JSON-RPC)</option>
-                    <option value="sse">SSE (Server-Sent Events)</option>
-                  </select>
-                </label>
-                <div id="mcp-stdio-fields" style="display:grid; gap:10px;">
-                  <label>執行檔 Command<input id="mcp-server-command" class="search-input" placeholder="例如：python、node、npx"></label>
-                  <label>啟動參數 Args（每行一個參數）<textarea id="mcp-server-args" class="search-input" rows="2" spellcheck="false" placeholder="mcp_server.py"></textarea></label>
-                  <div class="mcp-field-grid">
-                    <label>工作目錄 CWD（選填）<input id="mcp-server-cwd" class="search-input" placeholder="預設為專案根目錄"></label>
-                    <label>環境變數 Env（每行 KEY=VALUE）<textarea id="mcp-server-env" class="search-input" rows="2" spellcheck="false" placeholder="PYTHONIOENCODING=utf-8"></textarea></label>
-                  </div>
-                </div>
-                <div id="mcp-http-fields" style="display:grid; gap:10px;" hidden>
-                  <label>連線網址 Endpoint URL<input id="mcp-server-url" class="search-input" placeholder="http://127.0.0.1:8188/mcp"></label>
-                  <label>HTTP Headers（每行 Header-Name: Value，選填）<textarea id="mcp-server-headers" class="search-input" rows="2" spellcheck="false" placeholder="Authorization: Bearer ..."></textarea></label>
-                </div>
-                <div id="mcp-sidecar-fields" style="display:grid; gap:8px;" hidden>
-                  <p class="settings-note">桌面背景佇列專用通道 · 固定模型：Gemini 3.8 Flash · 可一鍵安裝或更新 Antigravity Sidecar 規則與 MCP 設定。</p>
-                  <div class="settings-actions"><button id="mcp-sidecar-install" type="button" class="btn">安裝／更新 Sidecar 設定</button></div>
-                </div>
-              </section>
-            </div>
+        <div id="mcp-modal-body" class="mcp-modal-body">
+          <form id="mcp-form" class="mcp-editor" novalidate>
+            <p id="mcp-modal-description" class="settings-note"></p>
+            <label id="mcp-name-field">服務名稱<input id="mcp-server-name" class="search-input" required maxlength="100" placeholder="例如：ComfyUI 工作流"></label>
+            <section class="mcp-access" aria-label="存取權限">
+              <label class="mcp-toggle-row">
+                <span><strong>啟用服務</strong><small>允許客戶端呼叫此 MCP。</small></span>
+                <input id="mcp-enabled" type="checkbox" role="switch" aria-label="啟用服務">
+              </label>
+              <label class="mcp-toggle-row">
+                <span><strong>唯讀模式</strong><small id="mcp-readonly-note">只允許查詢，不允許修改圖庫。</small></span>
+                <input id="mcp-readonly" type="checkbox" role="switch" aria-label="唯讀模式">
+              </label>
+            </section>
+            <div id="mcp-custom-connection" class="mcp-section-card" hidden></div>
             <details class="mcp-details" id="mcp-modal-tools-details">
-              <summary><span>個別工具權限與停用清單</span><span class="mcp-detail-summary" id="mcp-modal-tools-summary"></span></summary>
+              <summary><span>工具權限</span><span class="mcp-detail-summary" id="mcp-modal-tools-summary"></span></summary>
               <div class="mcp-details-body">
-                <div id="mcp-modal-tools-builtin" style="display:grid; gap:8px;">
-                  <p class="settings-note">設定儲存於圖庫；停用會阻擋現有連線的工具呼叫。唯讀模式會自動鎖定寫入型工具。</p>
+                <div id="mcp-modal-tools-builtin" class="mcp-field-stack">
+                  <p class="settings-note">取消勾選即可停用工具。唯讀模式會自動停用修改圖庫的工具。</p>
                   <div id="mcp-modal-tool-list" class="mcp-modal-tool-list"></div>
                 </div>
-                <div id="mcp-modal-tools-custom" style="display:grid; gap:8px;" hidden>
-                  <label>停用的工具名稱（每行一個 tool name）<textarea id="mcp-server-disabled-tools" class="search-input" rows="3" spellcheck="false" placeholder="例如：external_write_tool"></textarea></label>
+                <div id="mcp-modal-tools-custom" hidden>
+                  <label>停用工具<textarea id="mcp-server-disabled-tools" class="search-input" rows="3" spellcheck="false" placeholder="每行一個工具名稱"></textarea></label>
                 </div>
               </div>
             </details>
-            <details class="mcp-details" id="mcp-modal-custom-details">
-              <summary><span>自訂擴充屬性與 AI 調用 API</span><span class="mcp-detail-summary" id="mcp-modal-custom-summary"></span></summary>
+            <details class="mcp-details" id="mcp-modal-advanced-details">
+              <summary><span>進階設定</span><span class="mcp-detail-summary" id="mcp-advanced-summary">啟動路徑、環境變數</span></summary>
               <div class="mcp-details-body">
-                <label>自訂擴充屬性 Custom Config（每行 key=value，供後續串接其他服務或 AI 讀取）
-                  <textarea id="mcp-server-custom-config" class="search-input" rows="3" spellcheck="false" placeholder="workflow=custom&#10;timeout_ms=15000"></textarea>
-                </label>
-                <p class="settings-note">AI 可呼叫 MCP 工具 <code>gallery_list_mcp_servers</code>、<code>gallery_save_mcp_server</code>、<code>gallery_test_mcp_server</code>、<code>gallery_delete_mcp_server</code> 或 HTTP API <code>/api/settings/mcp/servers</code> 查詢、新增與調整卡片。</p>
+                <div id="mcp-advanced-connection">
+                  <section id="mcp-connection-settings" class="mcp-field-stack" aria-label="連線設定">
+                    <p id="mcp-connection-note" class="settings-note">本機連線已自動配置；路徑變更時才需調整。</p>
+                    <label id="mcp-transport-field">連線方式
+                      <select id="mcp-server-transport" class="select-box">
+                        <option value="stdio">本機程式（stdio）</option>
+                        <option value="http">HTTP</option>
+                        <option value="sse">SSE</option>
+                      </select>
+                    </label>
+                    <div id="mcp-stdio-fields" class="mcp-field-stack">
+                      <label>啟動指令<input id="mcp-server-command" class="search-input" spellcheck="false" placeholder="例如：python、node、npx"></label>
+                      <label>啟動參數<textarea id="mcp-server-args" class="search-input" rows="2" spellcheck="false" placeholder="每行一個參數，例如 mcp_server.py"></textarea></label>
+                    </div>
+                    <div id="mcp-http-fields" hidden>
+                      <label>連線網址<input id="mcp-server-url" class="search-input" type="url" spellcheck="false" placeholder="http://127.0.0.1:8188/mcp"></label>
+                    </div>
+                  </section>
+                </div>
+                <div id="mcp-stdio-options" class="mcp-field-stack">
+                  <label>工作目錄（選填）<input id="mcp-server-cwd" class="search-input" spellcheck="false" placeholder="使用預設工作目錄"></label>
+                  <label>環境變數（選填）<textarea id="mcp-server-env" class="search-input" rows="2" spellcheck="false" placeholder="每行 KEY=VALUE"></textarea></label>
+                </div>
+                <div id="mcp-http-options" hidden>
+                  <label>請求標頭（選填）<textarea id="mcp-server-headers" class="search-input" rows="2" spellcheck="false" placeholder="每行 Header-Name: Value"></textarea></label>
+                </div>
+                <div id="mcp-custom-fields" class="mcp-field-stack" hidden>
+                  <label>用途說明（選填）<textarea id="mcp-server-description" class="search-input" rows="2" maxlength="1000" placeholder="簡短說明服務用途"></textarea></label>
+                  <label>擴充參數（選填）<textarea id="mcp-server-custom-config" class="search-input" rows="3" spellcheck="false" placeholder="每行 key=value，例如 timeout_ms=15000"></textarea></label>
+                </div>
+                <div id="mcp-sidecar-fields" class="mcp-field-stack" hidden>
+                  <p class="settings-note">背景查證使用 Gemini 3.8 Flash。需要重新配置時，可更新 Sidecar 設定。</p>
+                  <div class="settings-actions"><button id="mcp-sidecar-install" type="button" class="btn">更新 Sidecar 設定</button></div>
+                </div>
+                <button id="mcp-delete" type="button" class="btn btn-danger" hidden>刪除此服務</button>
               </div>
             </details>
-            <section class="mcp-section-card" aria-labelledby="mcp-export-heading">
-              <div class="mcp-section-heading">
-                <h4 id="mcp-export-heading">連線客戶端：Antigravity <span>mcp_config.json</span></h4>
+            <details class="mcp-details" id="mcp-modal-client-details">
+              <summary><span>連接 Antigravity</span><span class="mcp-detail-summary">同步與匯出</span></summary>
+              <div class="mcp-details-body">
+                <p class="settings-note">將此服務加入本機 Antigravity，或複製設定手動匯入。同步時會自動備份設定檔。</p>
                 <div class="settings-actions">
-                  <button id="mcp-export" type="button" class="btn">產生連線設定</button>
-                  <button id="mcp-sync-client" type="button" class="btn">同步寫入本機設定檔</button>
+                  <button id="mcp-sync-client" type="button" class="btn">同步至 Antigravity</button>
+                  <button id="mcp-export" type="button" class="btn">匯出連線設定</button>
                   <button id="mcp-copy" type="button" class="btn" hidden>複製設定</button>
                 </div>
+                <textarea id="mcp-client-config" class="search-input" rows="6" readonly aria-label="MCP 客戶端連線設定" hidden></textarea>
+                <p id="mcp-export-note" class="settings-note" hidden></p>
               </div>
-              <p class="settings-note">診斷只測試握手及工具清單。可產生 JSON 貼上或直接同步寫入本機 Antigravity 設定檔（自動建立 .bak 備份）。</p>
-              <textarea id="mcp-client-config" class="search-input" rows="8" readonly aria-label="MCP 客戶端連線設定" hidden></textarea>
-              <p id="mcp-export-note" class="settings-note" hidden></p>
-            </section>
+            </details>
           </form>
         </div>
         <div id="mcp-modal-footer" class="mcp-modal-footer">
@@ -914,46 +861,44 @@
             <p id="mcp-feedback" class="settings-feedback" role="status" aria-live="polite"></p>
           </div>
           <div class="settings-actions">
-            <button id="mcp-delete" type="button" class="btn btn-danger" hidden>刪除卡片</button>
-            <button id="mcp-modal-close-footer" type="button" class="btn">關閉</button>
-            <button id="mcp-test" type="button" class="btn">測試本機連線</button>
-            <button id="mcp-save" type="button" class="btn btn-primary">儲存 MCP 設定</button>
+            <button id="mcp-test" type="button" class="btn">測試連線</button>
+            <button id="mcp-save" type="button" class="btn btn-primary">儲存變更</button>
           </div>
         </div>
       </div>`;
     document.body.append(modal);
 
-    addPanel('tools', `<details class="settings-section"><summary>工具權限</summary><div id="mcp-tool-list"></div><div class="settings-actions"><button id="tools-permission-save" class="btn btn-primary" disabled>儲存工具權限</button></div><p id="tools-permission-feedback" class="settings-feedback" role="status"></p></details>`);
+    addPanel('tools', '');
     addPanel('tasks', `<div><h3>背景任務與復原</h3><p id="tasks-current" role="status">讀取中…</p><p id="tasks-library-health" class="settings-note"></p><p class="settings-note">任務狀態跨 Web、Windows 排程與 MCP 共用。重試會依處理狀態選擇未完成項目。</p></div>
       <div class="settings-actions"><button id="tasks-recover" class="btn">檢查並復原中斷的檔案操作</button><button id="tasks-backup" class="btn">備份資料庫</button></div><p id="tasks-feedback" class="settings-feedback" role="status"></p><div id="tasks-history"></div>`);
     addPanel('artists', `<div><h3>畫師跨平台身分</h3><p class="settings-note">智慧標籤先查 Danbooru；查不到時列入 MCP 待補查佇列。由 Antigravity 搜尋作者頁面並回寫查證結果，確認後記住別名，使用同一個資料夾。未確認的圖片暫緩自動歸檔。</p></div>
       <p class="settings-note">模型登入與選擇在 Antigravity 管理。圖庫不啟動模型 CLI，也不需要 API 金鑰。請先在「MCP 管理」產生 Antigravity 連線設定，再將下方指令貼到已連線的 Antigravity 對話。</p>
-      <label>Antigravity 補查指令<textarea id="artist-mcp-prompt" class="search-input" rows="5" readonly>請使用圖庫 MCP 的 gallery_get_artist_identity_status 讀取待補查畫師。搜尋並閱讀作者首頁，確認各平台帳號之間的明確連結；確認後呼叫 gallery_confirm_artist_identity，提交 request_key、canonical_name、aliases、profile_urls 及 evidence（source_url、linked_url）。沒有足夠依據就保留待查，不以名稱或畫風猜測，不啟動其他 CLI，也不要搬移圖片。完成後回報確認與略過數量。</textarea></label>
+      <label>Antigravity 任務請求<textarea id="artist-mcp-prompt" class="search-input" rows="5" readonly>請處理本圖庫的待補查畫師身分，完成後回報確認與略過數量。</textarea></label>
       <div class="settings-actions"><button id="artist-model-copy" class="btn btn-primary">複製補查指令</button><button id="artist-model-refresh" class="btn">重新整理查證狀態</button></div>
       <p id="artist-model-feedback" class="settings-feedback" role="status"></p><p id="artist-model-status" class="settings-note"></p><div id="artist-model-requests"></div>`);
+    addPanel('dedup', `<div><h3>完全重複圖片清理</h3><p class="settings-note">支援「完全重複檔案（SHA-256 100% 相同＋位元組驗證）」與「靜態圖像素完全比對（OpenCV 原尺寸、所有色彩通道與透明度逐像素一致，差異像素須為 0，排除動圖）」。清理時依像素數、格式與檔案大小等固定排序保留版本、繼承全部核心與人工標籤，先備份資料庫再將重複圖片移至資源回收桶。</p></div>
+      <p class="settings-note">可直接點擊下方按鈕開啟圖庫內建預覽與清理視窗，或將指令貼到已連線圖庫 MCP 的 Antigravity 對話執行。</p>
+      <label>Antigravity 預覽請求<textarea id="dedup-mcp-prompt" class="search-input" rows="5" readonly>請預覽本圖庫同資料夾內檔案或原尺寸像素完全相同的圖片，回報候選數量與預計可釋放空間。</textarea></label>
+      <div class="settings-actions"><button id="dedup-open-modal" type="button" class="btn btn-primary">🧹 開啟清除重複圖片視窗（預覽與執行）</button><button id="dedup-model-copy" type="button" class="btn">複製清理指令</button><button id="dedup-model-refresh" type="button" class="btn">重新整理重複統計</button></div>
+      <p id="dedup-model-feedback" class="settings-feedback" role="status"></p><p id="dedup-model-status" class="settings-note">MCP 工具：gallery_clean_duplicates</p>`);
 
     window.openMcpModal = serverId => openModal(serverId === null ? null : (serverId || 'gallery'));
     window.closeMcpModal = closeModal;
+    window.loadArtistSettings = loadArtistSettings;
+    window.loadDedupSettings = loadDedupSettings;
 
     modal.addEventListener('click', event => { if (event.target === modal) closeModal(); });
     byId('mcp-modal-close').addEventListener('click', closeModal);
-    byId('mcp-modal-close-footer').addEventListener('click', closeModal);
-
-    byId('mcp-modal-picker').addEventListener('change', () => {
-      const val = byId('mcp-modal-picker').value;
-      mcpFeedback('');
-      if (val === '__new__') populateModal(null, false);
-      else populateModal(servers.find(item => item.id === val) || servers[0], false);
-    });
 
     byId('mcp-card-new').addEventListener('click', event => {
-      mcpFeedback('請填寫識別代號、顯示名稱與連線方式後儲存。');
+      mcpFeedback('');
       openModal(null, event.currentTarget);
     });
 
     byId('mcp-page-export').addEventListener('click', event => {
       const trigger = event.currentTarget;
       openModal(selectedId || 'gallery', trigger);
+      byId('mcp-modal-client-details').open = true;
       void action(byId('mcp-export'), 'mcp-feedback', async () => {
         const value = await app.api('/api/settings/mcp/client_config?include_all=true');
         byId('mcp-client-config').value = JSON.stringify(value, null, 2);
@@ -994,9 +939,15 @@
       await navigator.clipboard.writeText(byId('artist-mcp-prompt').value); return { message: '已複製，請貼到已連線圖庫 MCP 的 Antigravity 對話。' };
     }));
     byId('artist-model-refresh').addEventListener('click', () => { void loadArtistSettings(); });
+    byId('dedup-open-modal').addEventListener('click', () => {
+      if (typeof window.openDedupModal === 'function') window.openDedupModal();
+    });
+    byId('dedup-model-copy').addEventListener('click', event => action(event.currentTarget, 'dedup-model-feedback', async () => {
+      await navigator.clipboard.writeText(byId('dedup-mcp-prompt').value); return { message: '已複製清理指令，請貼到已連線圖庫 MCP 的 Antigravity 對話。' };
+    }));
+    byId('dedup-model-refresh').addEventListener('click', () => { void loadDedupSettings(); });
     byId('mcp-save').addEventListener('click', event => save(event.currentTarget));
     byId('mcp-delete').addEventListener('click', event => deleteCurrentServer(event.currentTarget));
-    byId('tools-permission-save').addEventListener('click', event => saveTools(event.currentTarget));
     byId('mcp-test').addEventListener('click', event => testServer(selectedId, event.currentTarget));
     byId('mcp-export').addEventListener('click', event => action(event.currentTarget, 'mcp-feedback', async () => {
       const url = (!selectedId || selectedId === 'gallery')
@@ -1065,8 +1016,17 @@
     app.use('switchSettingsTab', (next, section) => {
       const result = next(section);
       syncModalVisibility();
-      if (section === 'mcp' || section === 'tools') void loadSettings();
-      if (section === 'artists') void loadArtistSettings();
+      if (section === 'mcp' || section === 'tools' || section === 'artists' || section === 'dedup') void loadSettings();
+      if (section === 'tools' || section === 'artists') {
+        if (byId('artist-workflow-details') && section === 'artists') byId('artist-workflow-details').open = true;
+        if (byId('settings-artists')) byId('settings-artists').hidden = false;
+        void loadArtistSettings();
+      }
+      if (section === 'tools' || section === 'dedup') {
+        if (byId('dedup-workflow-details') && section === 'dedup') byId('dedup-workflow-details').open = true;
+        if (byId('settings-dedup')) byId('settings-dedup').hidden = false;
+        void loadDedupSettings();
+      }
       if (section === 'tasks') { void app.refreshRuntime().catch(error => feedback('tasks-feedback', error.message, true)); byId('settings-footer-note').textContent = '檔案復原與備份會取得共用作業鎖。'; }
       return result;
     });
@@ -1078,9 +1038,23 @@
       if (app.runtime.navigation && app.runtime.navigation.workspace !== 'ai') modalWanted = false;
       syncModalVisibility();
       if (app.runtime.navigation.isVisible('artists')) void loadArtistSettings();
+      if (app.runtime.navigation.isVisible('dedup')) void loadDedupSettings();
       if (app.runtime.navigation.isVisible('mcp') || app.runtime.navigation.isVisible('tools')) void loadSettings();
     });
     app.on('runtime', renderJobs);
+    app.on('tools:permissions', config => {
+      if (!config) return;
+      const previousDisabled = configuration?.disabled_tools || [];
+      const unchangedInputs = [...byId('mcp-modal-tool-list').querySelectorAll('input')]
+        .filter(input => input.checked === !previousDisabled.includes(input.dataset.toolName));
+      applyConfigUpdate(config);
+      if (selectedId === 'gallery') {
+        for (const input of unchangedInputs) {
+          input.checked = !configuration.disabled_tools.includes(input.dataset.toolName);
+        }
+        updatePermissions();
+      }
+    });
     app.on('runtime:error', message => { byId('tasks-current').textContent = `任務狀態暫時無法讀取：${message}`; });
     renderCards();
   }

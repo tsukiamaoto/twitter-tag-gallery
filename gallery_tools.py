@@ -15,7 +15,7 @@ from typing import Dict, Any, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from database import GALLERY_ROOT, NON_ARTIST_FOLDERS, get_db, ensure_tag, refresh_tag_counts, scan_library
+from database import GALLERY_ROOT, NON_ARTIST_FOLDERS, get_db, ensure_tag, refresh_tag_counts
 from semantic_engine import (
     compute_tag_correlations,
     semantic_search_expand,

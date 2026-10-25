@@ -265,44 +265,35 @@ class AnimeDecensorEngine:
         skill_profile = None
         preferred_model_id = None
 
-        try:
-            skills_state = image_skills.status()
-            active_id = skills_state.get("active_id")
-            skills_list = skills_state.get("skills") or []
-            active_skill = next((s for s in skills_list if s.get("id") == active_id), None)
-            if not active_skill and skills_list:
-                active_skill = skills_list[0]
-            if active_skill:
-                prompt_text = (active_skill.get("prompt") or "").strip()
-                if prompt_text:
-                    skill_prompt = prompt_text
-                model_cfg = active_skill.get("model") or active_skill
-                skill_seed = int(model_cfg.get("seed", 42))
-                skill_steps = int(model_cfg.get("steps", 0)) or None
-                skill_cfg = float(model_cfg.get("cfg_scale", 6.0))
-                skill_profile = model_cfg.get("profile")
-                cand_model = (model_cfg.get("model_id") or "").strip() or None
-                if cand_model and (gguf_models.model_root() / cand_model).is_file():
-                    preferred_model_id = cand_model
-        except Exception:
-            pass
-
-        # 優先尊重使用者在「模型管理 (selection.json)」中選取的模型
-        user_sel = gguf_models.manager.settings()
-        sel_model = (user_sel.get("model_id") or "").strip()
-        sel_profile = (user_sel.get("profile") or "").strip()
-        if sel_model and (gguf_models.model_root() / sel_model).is_file():
-            preferred_model_id = sel_model
-            skill_profile = sel_profile or gguf_models.profile_for(sel_model)
+        skills_state = image_skills.status()
+        active_id = skills_state.get("active_id")
+        skills_list = skills_state.get("skills") or []
+        active_skill = next((s for s in skills_list if s.get("id") == active_id), None)
+        if active_id and not active_skill:
+            raise ValueError("套用中的影像修補 Skill 遺失或格式錯誤，請至 Skill 管理檢查")
+        if not active_skill and skills_list:
+            active_skill = skills_list[0]
+        if active_skill:
+            skill_prompt = active_skill["prompt"]
+            skill_seed = active_skill["seed"]
+            skill_steps = active_skill["steps"]
+            skill_profile = active_skill["profile"]
+            preferred_model_id = active_skill["model_id"]
+        else:
+            user_sel = gguf_models.manager.settings()
+            preferred_model_id = user_sel.get("model_id") or None
+            skill_profile = user_sel.get("profile") or None
 
         runtime = gguf_models.manager.ensure_loaded(model_id=preferred_model_id, profile=skill_profile)
         port = int(runtime["port"])
         loaded_model = runtime.get("loaded_model") or ""
-        loaded_profile = gguf_models.profile_for(loaded_model) or gguf_models.manager.settings().get("profile") or "wai_illustrious"
+        if preferred_model_id and loaded_model != preferred_model_id:
+            raise RuntimeError("載入的模型與 Skill 指定的模型不符，請稍後重試")
+        loaded_profile = skill_profile or gguf_models.profile_for(loaded_model) or gguf_models.manager.settings().get("profile") or "wai_illustrious"
         profile_spec = gguf_models.CATALOG["profiles"].get(loaded_profile) or {"steps": 20, "label": loaded_profile}
 
         if skill_steps and skill_profile == loaded_profile:
-            steps = max(1, min(50, skill_steps))
+            steps = max(1, min(100, skill_steps))
         else:
             steps = int(profile_spec.get("steps", 20))
 

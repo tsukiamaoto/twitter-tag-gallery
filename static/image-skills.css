@@ -26,6 +26,31 @@
 .image-skill-list-card-meta > span { overflow-wrap: anywhere; }
 .image-skill-list-card-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; padding-top: 12px; border-top: 1px solid var(--border); }
 .image-skill-list-card-actions .btn { min-height: 34px; font-size: 12px; }
+#agent-skills-feedback:empty { display: none; }
+#image-skill-instructions { width: 100%; min-height: 130px; resize: vertical; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-main); color: var(--text-main); font: 13px/1.7 Consolas, monospace; }
+.image-skills-toolbar { flex-wrap: wrap; }
+.agent-skill-card { display: flex; flex-direction: column; gap: 12px; min-width: 0; padding: 18px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-panel); transition: border-color .16s, background .16s; }
+.agent-skill-card:hover { border-color: #554c7a; background: #1b1d27; }
+.agent-skill-card > .image-skill-badge { align-self: flex-start; }
+.agent-skill-card > .btn { margin-top: auto; align-self: flex-start; }
+#agent-skill-modal { z-index: 125; padding: 16px; }
+.agent-skill-dialog { display: flex; flex-direction: column; width: min(100%, 1000px); max-width: 1000px; height: min(90dvh, 900px); padding: 0; overflow: hidden; }
+.agent-skill-dialog-header, .agent-skill-dialog-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 16px 20px; flex-shrink: 0; }
+.agent-skill-dialog-header { border-bottom: 1px solid var(--border); }
+.agent-skill-dialog-header > div { min-width: 0; flex: 1; }
+.agent-skill-dialog-header h3 { margin: 0; overflow-wrap: anywhere; }
+.agent-skill-dialog-body { display: flex; flex-direction: column; flex: 1; min-height: 0; gap: 8px; padding: 16px 20px; overflow-y: auto; }
+#agent-skill-path, #agent-skill-feedback { overflow-wrap: anywhere; white-space: pre-wrap; }
+#agent-skill-content { flex: 1; min-height: 150px; width: 100%; resize: none; font: 13px/1.7 Consolas, monospace; tab-size: 2; }
+.agent-skill-dialog-footer { border-top: 1px solid var(--border); }
+#agent-skill-draft[data-state="dirty"] { color: #f3c678; }
+@media (max-width: 600px) {
+  #agent-skill-modal { padding: 8px; }
+  .agent-skill-dialog { height: calc(100dvh - 16px); max-height: calc(100dvh - 16px); }
+  .agent-skill-dialog-header, .agent-skill-dialog-body, .agent-skill-dialog-footer { padding: 12px; }
+  .agent-skill-dialog-footer .settings-actions { width: 100%; display: flex; flex-wrap: wrap; }
+  .agent-skill-dialog-footer .btn { flex: 1; }
+}
 
 /* Pop-up Modal Dialog for editing skill details */
 #image-skill-modal { z-index: 120; }
@@ -83,8 +108,8 @@
 #image-skills-feedback:empty { display: none; }
 .image-skill-footer > .settings-actions { flex-shrink: 0; }
 .image-skill-footer .btn { min-height: 36px; justify-content: center; font-size: 12px; transition: background .15s, border-color .15s, color .15s, opacity .15s; }
-#settings-image-skills :is(button, select, input, summary):focus-visible,
-#image-skill-modal :is(button, select, input, summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+#settings-image-skills :is(button, select, input, textarea, summary):focus-visible,
+#image-skill-modal :is(button, select, input, textarea, summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 #settings-image-skills button:disabled, #image-skill-modal button:disabled { opacity: .45; cursor: not-allowed; }
 
 @media (max-width: 760px) {

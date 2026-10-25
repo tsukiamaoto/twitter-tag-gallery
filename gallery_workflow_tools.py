@@ -18,15 +18,6 @@ def _images(image_ids, *, present=False):
     return [by_id[iid] for iid in ids]
 
 
-def tool_gallery_scan_library():
-    update_job(stage="掃描圖庫索引")
-    result = database.scan_library()
-    if not result["scan_complete"]:
-        result.update(status="failed", message="掃描不完整，已保留未出現的索引；請處理 errors 後重試")
-    update_job(stage="掃描完成" if result["scan_complete"] else "掃描不完整")
-    return result
-
-
 def tool_gallery_search_images(**options):
     from gallery_query import search_images
     return search_images(**options)

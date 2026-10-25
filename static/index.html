@@ -16,8 +16,11 @@
   <script defer src="/static/gguf-models.js"></script>
   <link rel="stylesheet" href="/static/image-skills.css" />
   <script defer src="/static/image-skills.js"></script>
+  <script defer src="/static/agent-skills.js"></script>
   <link rel="stylesheet" href="/static/workspace-navigation.css" />
   <script defer src="/static/workspace-navigation.js"></script>
+  <link rel="stylesheet" href="/static/schedule-workspace.css" />
+  <script defer src="/static/schedule-workspace.js"></script>
 </head>
 <body>
 
@@ -51,11 +54,9 @@
       <button class="btn btn-danger" id="btn-top-unload-model" style="display:none; background:#dc2626; border-color:#dc2626;" onclick="unloadAiModel(false)" title="目前 AI 模型已載入於顯卡記憶體中，點擊立即卸載並釋放 VRAM">⏏️ 卸載模型 (釋放 VRAM)</button>
       <button class="btn btn-warn" onclick="openRenameModal()">✏️ 批次改名 (鎖定順序)</button>
       <button class="btn" onclick="openOrganizeModal()">📂 資料夾歸檔精靈</button>
-      <button class="btn" onclick="openSettings('history')" title="檢視所有處理功能的完整歷史操作日誌">📋 操作日誌</button>
-      <button class="btn" onclick="rescanLibrary()" title="重新掃描 D:\圖檔\twitter 檔案變動">🔄 重新掃描</button>
-      <button class="btn" onclick="openDedupModal()" title="比對並清除完全重複或視覺高度相似圖片">🧹 清除重複圖片</button>
+      <button class="btn" onclick="openDedupModal()" title="比對並清除檔案或原尺寸像素完全相同的圖片">🧹 清除重複圖片</button>
 
-      <button class="btn" id="btn-settings" onclick="openSettings()" title="瀏覽偏好、匯入排程與執行紀錄">⚙ 設定</button>
+      <button class="btn" id="btn-settings" onclick="openSettings()" title="瀏覽偏好、操作日誌與背景任務">⚙ 設定</button>
     </div>
   </header>
 
@@ -563,22 +564,22 @@
   <div class="modal-backdrop" id="dedup-modal" onclick="if(event.target===this) closeDedupModal()">
     <div class="dialog-box" style="max-width:960px; max-height:90vh; overflow:hidden; display:flex; flex-direction:column;">
       <div style="display:flex; justify-content:space-between; align-items:center;">
-        <h3>🧹 清除重複與相似圖片</h3>
+        <h3>🧹 清除重複圖片</h3>
         <button class="btn" onclick="closeDedupModal()">✖</button>
       </div>
 
       <p style="font-size:13px; color:var(--text-muted); line-height:1.5;">
-        結合 <b>SHA-256 位元組完全比對</b> 與 <b>dHash/pHash + 512×512 SSIM/MAE 像素結構比對</b>，自動找出完全重複、重壓縮或縮圖副本。
-        依<b>像素數、PNG 格式、檔案大小</b>等順序保留並合併核心與手動標籤。視覺比對僅處理靜態圖，細微表情、文字等差分仍可能通過，請先檢視候選。動畫只參與完全重複比對。
+        以 <b>SHA-256 與完整位元組驗證</b>，以及 <b>OpenCV 原尺寸逐像素完全比對</b>，找出檔案或像素完全相同的副本。
+        原尺寸、所有色彩通道與透明度皆須一致，差異像素必須為 0；表情、服裝、文字差分、縮圖與有損壓縮造成的像素差異都保留。依<b>PNG 格式、檔案大小</b>等順序保留副本並合併核心與手動標籤。動畫只參與檔案完全重複比對。
       </p>
 
       <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; background:var(--bg-main); padding:10px 12px; border-radius:8px; border:1px solid var(--border);">
         <label style="flex:1.4; min-width:220px; font-size:12px;">
           <b>比對模式：</b>
           <select id="dedup-mode" class="select-box" style="width:100%; margin-top:4px;" onchange="loadDedupPreview()">
-            <option value="both" selected>🔍 完全重複 + 靜態圖視覺相似比對 (需檢視細微差分)</option>
+            <option value="both" selected>🔍 檔案完全重複 + 原尺寸像素完全相同</option>
             <option value="exact">⚡ 僅完全重複檔案 (SHA-256 與位元組 100% 相同)</option>
-            <option value="visual">👁️ 僅視覺相似與縮圖比對 (dHash/pHash + SSIM ≥ 0.95)</option>
+            <option value="visual">👁️ 僅像素完全相同 (OpenCV，差異像素 0)</option>
           </select>
         </label>
         <label style="flex:1; min-width:180px; font-size:12px;">
@@ -599,7 +600,13 @@
       </div>
 
       <div id="dedup-summary-bar" style="font-size:13px; font-weight:600; color:#6ee7b7; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-        <span>準備掃描重複與相似圖片...</span>
+        <span>準備掃描完全重複圖片...</span>
+      </div>
+
+      <div id="dedup-progress" hidden aria-busy="false">
+        <p id="dedup-progress-stage" role="status" aria-live="polite" style="margin:0 0 6px; font-size:14px;"></p>
+        <progress id="dedup-progress-bar" aria-label="目前掃描階段進度" max="100" style="width:100%; height:12px; accent-color:var(--accent);"></progress>
+        <p id="dedup-progress-detail" style="margin:6px 0 0; font-size:13px; color:var(--text-muted); font-variant-numeric:tabular-nums; overflow-wrap:anywhere;"></p>
       </div>
 
       <div id="dedup-preview-box" style="flex:1; overflow-y:auto; background:var(--bg-main); border:1px solid var(--border); border-radius:8px; padding:10px; min-height:280px; font-size:12px; display:flex; flex-direction:column; gap:10px;">
@@ -625,7 +632,6 @@
       </div>
       <div class="settings-tabs" role="tablist" aria-label="設定分類">
         <button class="btn settings-tab" id="settings-tab-browse" role="tab" aria-selected="true" aria-controls="settings-browse" onclick="switchSettingsTab('browse')">瀏覽偏好</button>
-        <button class="btn settings-tab" id="settings-tab-schedule" role="tab" aria-selected="false" aria-controls="settings-schedule" tabindex="-1" onclick="switchSettingsTab('schedule')">匯入排程</button>
         <button class="btn settings-tab" id="settings-tab-history" role="tab" aria-selected="false" aria-controls="settings-history" tabindex="-1" onclick="switchSettingsTab('history')">操作日誌與紀錄</button>
       </div>
       <div class="settings-content">
@@ -649,71 +655,67 @@
           <p id="preferences-status" class="settings-feedback" role="status"></p>
         </section>
 
-        <section class="settings-panel" id="settings-schedule" role="tabpanel" aria-labelledby="settings-tab-schedule" hidden>
-          <div><h3>匯入排程</h3><p class="settings-note">在指定時間，將來源資料夾的圖片與影片搬入圖庫。</p></div>
-          <div class="settings-section">
-            <label class="settings-check"><input type="checkbox" id="sch-enabled" /><span>啟用每日排程</span></label>
-            <div class="settings-row">
-              <span class="muted">執行時間</span>
-              <div class="settings-actions">
-                <div class="time-picker-wrap">
-                  <input type="hidden" id="sch-time-1" value="03:00" />
-                  <button type="button" class="time-picker-trigger" id="picker-btn-1" onclick="openTimePicker(1, event)">
-                    <span id="picker-label-1">03:00</span><span aria-hidden="true">▾</span>
-                  </button>
-                </div>
-                <div class="time-picker-wrap">
-                  <input type="hidden" id="sch-time-2" value="" />
-                  <button type="button" class="time-picker-trigger empty-slot" id="picker-btn-2" onclick="openTimePicker(2, event)">
-                    <span id="picker-label-2">新增第二時段</span><span aria-hidden="true">▾</span>
-                  </button>
-                  <button type="button" id="picker-clear-2" class="btn" style="display:none;" onclick="setSlotTime(2, '')" aria-label="清除第二時段">✕</button>
-                </div>
+        <section id="settings-schedule" class="schedule-grid" aria-label="排程設定與執行紀錄" hidden>
+          <fieldset id="schedule-form" class="schedule-editor" disabled>
+            <section class="schedule-card" aria-labelledby="schedule-time-title">
+              <div class="schedule-card-heading">
+                <div class="schedule-card-title"><span class="schedule-step">01</span><div><h2 id="schedule-time-title">執行時間</h2><p>每天自動整理新加入的圖片與影片</p></div></div>
+                <label class="schedule-switch"><input type="checkbox" id="sch-enabled" role="switch" aria-label="啟用每日排程" /><span aria-hidden="true"></span></label>
               </div>
-            </div>
-            <label class="settings-check"><input type="checkbox" id="sch-win-task" checked /><span>儲存時同步到 Windows 工作排程器</span></label>
-            <p class="settings-note">使用本機時間。Windows 排程可在網頁關閉後執行；未同步時需保持圖庫服務執行。</p>
-          </div>
+              <div class="schedule-times">
+                <label class="schedule-time-field" for="sch-time-1"><span>第一時段</span><input type="time" id="sch-time-1" value="03:00" required step="60" /><small>每日執行</small></label>
+                <div class="schedule-time-field" id="schedule-second-slot" hidden><div class="schedule-time-label"><label for="sch-time-2">第二時段</label><button type="button" class="btn btn-text" id="picker-clear-2" onclick="setSlotTime(2, '')" aria-label="移除第二時段">移除</button></div><input type="time" id="sch-time-2" step="60" /><small>每日額外執行一次</small></div>
+                <button type="button" class="schedule-add-time" id="schedule-add-time" onclick="setSlotTime(2, '22:00')"><span aria-hidden="true">＋</span> 新增第二時段<small>選填，每日最多兩次</small></button>
+              </div>
+              <div class="schedule-timezone"><span class="schedule-dot" aria-hidden="true"></span><span>依本機時間執行 <span id="schedule-timezone"></span></span></div>
+              <div class="schedule-windows-option"><label class="settings-check"><input type="checkbox" id="sch-win-task" checked /><span>同步到 Windows 工作排程器<small>網頁關閉後仍可執行；未同步時需保持圖庫服務運作。</small></span></label></div>
+            </section>
 
-          <div class="settings-section">
-            <h4>來源資料夾</h4>
-            <p class="settings-note">包含子資料夾。檔案會搬移到 D:\圖檔\twitter，來源檔案不會保留。</p>
-            <div id="sch-folder-chips"></div>
-            <div class="settings-actions">
-              <button class="btn" id="btn-pick-source-folder" onclick="pickSourceFolderNative()" title="開啟 Windows 原生資料夾選擇視窗">瀏覽資料夾…</button>
-              <button class="btn btn-text" onclick="previewSourceDirs()">檢查檔案數</button>
-            </div>
-            <p id="sch-folder-picker-status" class="settings-note" role="status">使用 Windows 視窗選擇，可重複加入多個來源。</p>
-            <details>
-              <summary class="settings-note">手動貼上路徑</summary>
-              <label for="sch-source-dirs" class="settings-note">每行一個資料夾路徑</label>
-              <textarea id="sch-source-dirs" class="search-input" rows="3" oninput="renderSourceFolderChips()" placeholder="例如 D:\下載\圖片" style="font-family:Consolas,monospace; resize:vertical;"></textarea>
+            <section class="schedule-card" aria-labelledby="schedule-source-title">
+              <div class="schedule-card-heading"><div class="schedule-card-title"><span class="schedule-step">02</span><div><h2 id="schedule-source-title">來源資料夾 <span class="schedule-count" id="schedule-source-count">0</span></h2><p>自動包含子資料夾，可加入多個來源</p></div></div><button type="button" class="btn" id="btn-pick-source-folder" onclick="pickSourceFolderNative()">＋ 加入資料夾</button></div>
+              <div id="sch-folder-chips"></div>
+              <div class="schedule-source-tools"><button type="button" class="btn btn-text" onclick="previewSourceDirs()">檢查檔案數</button><details id="schedule-manual-paths"><summary>手動貼上路徑</summary><label for="sch-source-dirs" class="settings-note">每行一個資料夾路徑</label><textarea id="sch-source-dirs" class="search-input" rows="3" oninput="renderSourceFolderChips()" placeholder="例如 D:\下載\圖片"></textarea></details></div>
+              <p id="sch-folder-picker-status" class="settings-note" role="status"></p>
+              <div id="sch-source-preview" class="settings-note" role="status" style="display:none;"></div>
+              <div class="schedule-transfer-note"><span aria-hidden="true">↳</span><p>檔案將<strong>搬移</strong>至圖庫，來源不保留副本。<code>D:\圖檔\twitter</code></p></div>
+            </section>
+
+            <details class="schedule-card schedule-advanced" id="schedule-advanced">
+              <summary><span class="schedule-step">03</span><span><strong>匯入後處理</strong><small id="schedule-options-summary">辨識、打標與畫師歸檔</small></span><span class="schedule-disclosure"><span class="schedule-disclosure-open">展開<span class="schedule-toggle-suffix">設定</span></span><span class="schedule-disclosure-close">收合<span class="schedule-toggle-suffix">設定</span></span><svg class="schedule-chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m5 7.5 5 5 5-5" /></svg></span></summary>
+              <div class="schedule-options"><div class="schedule-options-group"><h3>辨識與標籤</h3>
+                <label class="settings-check"><input type="checkbox" id="sch-run-pixiv" checked /><span>Pixiv 畫師查詢<small>從檔名的 Pixiv ID 查詢畫師。</small></span></label>
+                <label class="settings-check"><input type="checkbox" id="sch-run-ai" checked /><span>本機 AI 打標<small>自動產生標籤並辨識畫師。</small></span></label>
+                <label class="settings-check"><input type="checkbox" id="sch-run-rev" /><span>以圖搜圖<small>透過 SauceNAO／IQDB 補充畫師資訊。</small></span></label>
+              </div>
+              <div class="schedule-options-group"><h3>歸檔與整理</h3>
+                <label class="settings-check"><input type="checkbox" id="sch-auto-folder" checked /><span>依畫師建立資料夾並歸檔</span></label>
+                <label class="settings-check"><input type="checkbox" id="sch-auto-rename" checked /><span>歸檔時自動改名<small>格式：日期_流水號_繪師名</small></span></label>
+                <label class="settings-check"><input type="checkbox" id="sch-rm-empty" checked /><span>移除搬空的子資料夾<small>保留來源根資料夾。</small></span></label>
+                <label class="settings-check"><input type="checkbox" id="sch-also-root" /><span>一併整理圖庫根目錄<small>歸檔根目錄中其他已辨識畫師的圖片。</small></span></label>
+              </div></div>
             </details>
-            <div id="sch-source-preview" class="settings-note" role="status" style="display:none;"></div>
-          </div>
-
-          <details class="settings-section">
-            <summary>進階處理選項</summary>
-            <label class="settings-check"><input type="checkbox" id="sch-rm-empty" checked /><span>移除搬空的子資料夾<span class="settings-note">（保留來源根資料夾）</span></span></label>
-            <label class="settings-check"><input type="checkbox" id="sch-run-pixiv" checked /><span>使用 Pixiv ID 查詢畫師</span></label>
-            <label class="settings-check"><input type="checkbox" id="sch-run-ai" checked /><span>使用本機 AI 打標與辨識畫師</span></label>
-            <label class="settings-check"><input type="checkbox" id="sch-run-rev" /><span>透過 SauceNAO／IQDB 以圖搜圖查詢畫師</span></label>
-            <label class="settings-check"><input type="checkbox" id="sch-auto-folder" checked /><span>依畫師建立資料夾並歸檔</span></label>
-            <label class="settings-check"><input type="checkbox" id="sch-auto-rename" checked /><span>歸檔時改名為「日期_流水號_繪師名」</span></label>
-            <label class="settings-check"><input type="checkbox" id="sch-also-root" /><span>一併歸檔圖庫根目錄中已辨識畫師的其他圖片</span></label>
-          </details>
-          <details class="settings-section">
-            <summary>匯入流程說明</summary>
-            <p class="settings-note">依自然順序搬入檔案，再依啟用的處理選項查詢畫師、打標與歸檔。未開啟的選項不執行。排程設定儲存在圖庫的 .tag_gallery/scheduler_config.json。</p>
-          </details>
-          <p id="schedule-feedback" class="settings-feedback" role="status"></p>
+          </fieldset>
+          <aside class="schedule-context" aria-label="排程總覽">
+            <section class="schedule-card schedule-overview">
+              <div class="schedule-card-heading"><h2>排程總覽</h2><span id="schedule-preview-label">目前設定</span></div>
+              <p class="schedule-overline">下次執行</p><p class="schedule-next-time" id="schedule-next-time">—</p><p class="settings-note" id="schedule-next-note">讀取排程設定中…</p>
+              <dl class="schedule-facts"><div><dt>執行頻率</dt><dd id="schedule-frequency">每日</dd></div><div><dt>匯入來源</dt><dd id="schedule-source-summary">尚未設定</dd></div><div><dt>執行方式</dt><dd id="schedule-executor">Windows 工作排程器</dd></div></dl>
+              <div class="schedule-workflow"><p>匯入流程</p><ol><li>搬入檔案</li><li id="schedule-flow-tag">辨識與打標</li><li id="schedule-flow-organize">依畫師歸檔</li></ol></div>
+            </section>
+          </aside>
+          <section class="schedule-card schedule-history-card" aria-labelledby="schedule-history-title">
+            <div class="schedule-card-heading"><div><h2 id="schedule-history-title">執行紀錄</h2><p id="schedule-history-count" class="settings-note">最近的匯入結果</p></div><button type="button" class="btn" id="schedule-refresh-status">重新整理</button></div>
+            <p class="schedule-live"><span class="schedule-dot" aria-hidden="true"></span><span id="sch-live-status" role="status">讀取中…</span></p>
+            <div id="sch-history-box">讀取中…</div>
+            <button type="button" class="btn btn-text schedule-history-more" id="schedule-history-more" aria-controls="sch-history-box" aria-expanded="false" hidden>查看全部紀錄</button>
+          </section>
         </section>
 
         <section class="settings-panel" id="settings-history" role="tabpanel" aria-labelledby="settings-tab-history" hidden>
           <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px; flex-wrap:wrap;">
             <div>
               <h3>系統操作與處理日誌 (Activity Logs)</h3>
-              <p class="settings-note">自動記錄除搜尋與過濾外的所有功能處理（AI 打標、Pixiv 反查、以圖搜圖、歸檔、改名、標籤變更、去碼、掃描與排程），並同步寫入 <code>.tag_gallery/activity.log</code>。</p>
+              <p class="settings-note">自動記錄除搜尋與過濾外的所有功能處理（AI 打標、Pixiv 反查、以圖搜圖、歸檔、改名、標籤變更、去碼、索引同步與排程），並同步寫入 <code>.tag_gallery/activity.log</code>。</p>
             </div>
             <div style="display:flex; gap:6px; flex-wrap:wrap;">
               <button class="btn" onclick="loadOperationLogs()" title="重新讀取最新操作日誌">🔄 重新整理</button>
@@ -732,18 +734,13 @@
               <button type="button" class="cat-pill" data-log-cat="tag_edit" onclick="setOpLogCategory('tag_edit', this)">🏷️ 標籤變更</button>
               <button type="button" class="cat-pill" data-log-cat="decensor" onclick="setOpLogCategory('decensor', this)">✨ 去馬賽克</button>
               <button type="button" class="cat-pill" data-log-cat="semantic" onclick="setOpLogCategory('semantic', this)">🧠 語意主題</button>
-              <button type="button" class="cat-pill" data-log-cat="scan" onclick="setOpLogCategory('scan', this)">🔄 圖庫掃描</button>
+              <button type="button" class="cat-pill" data-log-cat="scan" onclick="setOpLogCategory('scan', this)">🔄 索引同步</button>
               <button type="button" class="cat-pill" data-log-cat="schedule" onclick="setOpLogCategory('schedule', this)">🕒 定時排程</button>
             </div>
             <input type="text" id="op-log-search" class="search-input" placeholder="🔍 篩選日誌關鍵字（例如：Pixiv、Camie、歸檔、畫師名稱）..." oninput="debounceLoadOperationLogs()" />
             <div id="op-log-list" style="max-height:380px; overflow-y:auto; display:flex; flex-direction:column; gap:6px; padding-right:4px;">讀取中…</div>
           </div>
 
-          <details class="settings-section">
-            <summary>定時排程專屬狀態與紀錄</summary>
-            <div style="margin-top:6px; font-size:12px;"><span class="muted">目前排程狀態：</span><span id="sch-live-status" role="status">讀取中…</span></div>
-            <div id="sch-history-box" style="margin-top:6px; font-size:12px;">讀取中…</div>
-          </details>
         </section>
       </div>
       <div class="settings-footer">

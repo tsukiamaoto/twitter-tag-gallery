@@ -1,22 +1,32 @@
 # -*- coding: utf-8 -*-
-"""Exact and perceptual/visual duplicate image detection and safe cleanup."""
+"""Exact file and full-resolution pixel duplicate detection and safe cleanup."""
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
-import filecmp
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+import hashlib
 from pathlib import Path
 import sqlite3
-import time
+import struct
+import zlib
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import cv2
 import numpy as np
-from PIL import Image, ImageFile
+from PIL import Image
 
 import database
 from background_work import exclusive_job, update_job
 from file_safety import gallery_path
-from tag_policy import AUTOMATIC_CATEGORIES, allows_tag
+from tag_policy import allows_tag
 
-ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+PIXEL_CACHE_VERSION = "opencv-bgra-v1:" + cv2.__version__
+HEADER_CACHE_VERSION = "metadata-v1"
+
+
+def _report(progress=None, **values):
+    update_job(**values)
+    if progress is not None:
+        progress(**values)
 
 
 def _visual_hash_db_path() -> Path:
@@ -29,410 +39,322 @@ def _open_visual_hash_db() -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path), timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS visual_hashes (
-            id INTEGER PRIMARY KEY,
-            rel_path TEXT,
-            folder TEXT,
-            filename TEXT,
-            ext TEXT,
-            size_bytes INTEGER,
-            width INTEGER,
-            height INTEGER,
-            dhash TEXT,
-            phash TEXT,
-            updated_at REAL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS visual_pair_cache (
-            id1 INTEGER,
-            id2 INTEGER,
-            size1 INTEGER,
-            size2 INTEGER,
-            mae REAL,
-            ssim REAL,
-            significant_frac REAL,
-            ar_diff REAL,
-            PRIMARY KEY (id1, id2)
-        )
-        """
-    )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_vh_folder ON visual_hashes(folder)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_vh_dhash ON visual_hashes(dhash)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_vh_phash ON visual_hashes(phash)")
+    # Keep legacy tables for compatibility, but never read their perceptual matches.
+    conn.execute("""CREATE TABLE IF NOT EXISTS visual_hashes (
+        id INTEGER PRIMARY KEY, rel_path TEXT, folder TEXT, filename TEXT, ext TEXT,
+        size_bytes INTEGER, width INTEGER, height INTEGER, dhash TEXT, phash TEXT, updated_at REAL
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS visual_pair_cache (
+        id1 INTEGER, id2 INTEGER, size1 INTEGER, size2 INTEGER, mae REAL, ssim REAL,
+        significant_frac REAL, ar_diff REAL, PRIMARY KEY (id1, id2)
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS pixel_hashes (
+        id INTEGER PRIMARY KEY, rel_path TEXT NOT NULL, size_bytes INTEGER NOT NULL,
+        mtime_ns INTEGER NOT NULL, ctime_ns INTEGER NOT NULL, version TEXT NOT NULL,
+        width INTEGER NOT NULL, height INTEGER NOT NULL, pixel_hash TEXT NOT NULL
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS image_headers (
+        id INTEGER PRIMARY KEY, rel_path TEXT NOT NULL, size_bytes INTEGER NOT NULL,
+        mtime_ns INTEGER NOT NULL, ctime_ns INTEGER NOT NULL, version TEXT NOT NULL,
+        width INTEGER NOT NULL, height INTEGER NOT NULL
+    )""")
     return conn
 
 
 def _is_animated_image(img: Image.Image) -> bool:
+    # A failure to determine frame count must not allow first-frame deduplication.
+    return bool(getattr(img, "is_animated", False) or int(getattr(img, "n_frames", 1)) > 1)
+
+
+def _file_signature(path: Path) -> Tuple[int, int, int]:
+    stat = path.stat()
+    return stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+def _files_identical(path1: Path, path2: Path) -> bool:
+    """Read every byte, including the middle of large files; do not reuse filecmp's cache."""
     try:
-        return bool(getattr(img, "is_animated", False) or int(getattr(img, "n_frames", 1)) > 1)
-    except Exception:
+        before1, before2 = _file_signature(path1), _file_signature(path2)
+        if before1[0] != before2[0]:
+            return False
+        with path1.open("rb") as first, path2.open("rb") as second:
+            while True:
+                block = first.read(1024 * 1024)
+                if block != second.read(1024 * 1024):
+                    return False
+                if not block:
+                    break
+        return before1 == _file_signature(path1) and before2 == _file_signature(path2)
+    except OSError:
         return False
 
 
-def _compute_single_visual_hash(full_path: Path) -> Optional[Tuple[int, int, str, str]]:
-    import imagehash
+def _png_metadata(path: Path) -> Dict[str, Any]:
+    """Read display metadata, including chunks after IDAT, without inflating pixels."""
+    info = {}
+    with path.open("rb") as stream:
+        if stream.read(8) != b"\x89PNG\r\n\x1a\n":
+            raise ValueError("load_error")
+        size = path.stat().st_size
+        while True:
+            header = stream.read(8)
+            if len(header) != 8:
+                raise ValueError("load_error")
+            length, kind = struct.unpack(">I4s", header)
+            end = stream.tell() + length + 4
+            if end > size:
+                raise ValueError("load_error")
+            if kind in (b"eXIf", b"iCCP", b"gAMA", b"sRGB", b"cHRM", b"acTL"):
+                if length > 16 * 1024 * 1024:
+                    raise ValueError("oversized_metadata")
+                data = stream.read(length)
+                if kind == b"eXIf":
+                    info["exif"] = data
+                elif kind == b"iCCP":
+                    _, compressed = data.split(b"\0", 1)
+                    if not compressed or compressed[0] != 0:
+                        raise ValueError("invalid_icc_profile")
+                    profile = zlib.decompressobj().decompress(compressed[1:], 16 * 1024 * 1024 + 1)
+                    if len(profile) > 16 * 1024 * 1024:
+                        raise ValueError("oversized_metadata")
+                    info["icc_profile"] = profile
+                elif kind == b"gAMA":
+                    info["gamma"] = struct.unpack(">I", data)[0] / 100000.0
+                elif kind == b"sRGB":
+                    info["srgb"] = data[0]
+                elif kind == b"cHRM":
+                    info["chromaticity"] = tuple(v / 100000.0 for v in struct.unpack(">8I", data))
+                elif struct.unpack(">II", data)[0] > 1:
+                    raise ValueError("animated_media")
+            stream.seek(end)
+            if kind == b"IEND":
+                return info
 
-    if full_path.suffix.lower() in (".gif", ".mp4"):
-        return None
+
+def _image_header(path: Path) -> Tuple[int, int, str]:
+    """Read dimensions and display semantics without a Pillow raster decode."""
+    if path.suffix.lower() in (".gif", ".mp4"):
+        raise ValueError("animated_media")
+    with Image.open(path) as image:
+        if _is_animated_image(image):
+            raise ValueError("animated_media")
+        width, height = image.size
+        if image.format == "PNG":
+            info = _png_metadata(path)
+            exif = Image.Exif()
+            if info.get("exif"):
+                exif.load(info["exif"])
+        else:
+            info = image.info
+            exif = image.getexif()
+        display_metadata = repr((
+            exif.get(274, 1), info.get("icc_profile"),
+            info.get("gamma"), info.get("srgb"), info.get("chromaticity"),
+        ))
+        return width, height, display_metadata
+
+
+def _load_full_image(path: Path, header=None) -> Tuple[np.ndarray, str]:
+    """Decode once, without resizing, preserving alpha, bit depth and display metadata."""
+    _, _, display_metadata = header or _image_header(path)
+    # Reading the bytes ourselves also supports Windows paths containing Chinese.
+    pixels = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+    if pixels is None or pixels.size == 0 or pixels.dtype not in (np.uint8, np.uint16):
+        raise ValueError("load_error")
+    if pixels.ndim == 2:
+        pixels = cv2.cvtColor(pixels, cv2.COLOR_GRAY2BGRA)
+    elif pixels.ndim == 3 and pixels.shape[2] == 3:
+        pixels = cv2.cvtColor(pixels, cv2.COLOR_BGR2BGRA)
+    elif pixels.ndim != 3 or pixels.shape[2] != 4:
+        raise ValueError("unsupported_channels")
+    return pixels, display_metadata
+
+
+def _compute_pixel_fingerprint(path: Path) -> Optional[Dict[str, Any]]:
     try:
-        with Image.open(full_path) as img:
-            if _is_animated_image(img):
-                return None
-            w, h = img.size
-            try:
-                img.draft("RGB", (128, 128))
-            except Exception:
-                pass
-            rgb = img.convert("RGB")
-            dhash_str = str(imagehash.dhash(rgb, hash_size=8))
-            phash_str = str(imagehash.phash(rgb, hash_size=8))
-            return w, h, dhash_str, phash_str
-    except Exception:
+        before = _file_signature(path)
+        pixels, display_metadata = _load_full_image(path)
+        fingerprint = hashlib.sha256()
+        fingerprint.update(repr((pixels.shape, pixels.dtype.str, display_metadata)).encode("utf-8"))
+        fingerprint.update(memoryview(pixels))
+        if before != _file_signature(path):
+            return None
+        return {
+            "width": int(pixels.shape[1]), "height": int(pixels.shape[0]),
+            "pixel_hash": fingerprint.hexdigest(),
+            "size_bytes": before[0], "mtime_ns": before[1], "ctime_ns": before[2],
+        }
+    except (OSError, ValueError, cv2.error, struct.error, zlib.error):
         return None
 
 
-def ensure_visual_hashes(rows: List[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
-    """Ensure dHash, pHash, width, and height are cached for all non-video rows."""
-    vconn = _open_visual_hash_db()
+def ensure_pixel_hashes(rows: List[Dict[str, Any]], progress=None) -> Dict[int, Dict[str, Any]]:
+    """Cache full pixel fingerprints; invalidate on path, size, timestamps or decoder changes."""
+    conn = _open_visual_hash_db()
     try:
-        cached_rows = vconn.execute(
-            "SELECT id, rel_path, size_bytes, width, height, dhash, phash FROM visual_hashes"
-        ).fetchall()
-        cached_map: Dict[int, Dict[str, Any]] = {}
-        for r in cached_rows:
-            if r["dhash"] and r["phash"]:
-                cached_map[r["id"]] = dict(r)
-
+        cached = {row["id"]: dict(row) for row in conn.execute("SELECT * FROM pixel_hashes")}
         result: Dict[int, Dict[str, Any]] = {}
-        to_compute: List[Dict[str, Any]] = []
-
-        for r in rows:
-            ext = str(r.get("ext") or "").lower()
-            if ext in (".mp4", ".gif") or r.get("media_type") in ("video", "gif"):
+        pending = []
+        for row in rows:
+            if str(row.get("ext") or "").lower() in (".gif", ".mp4") or row.get("media_type") in ("video", "gif"):
                 continue
-            iid = r["id"]
-            c = cached_map.get(iid)
-            if (
-                c
-                and c.get("size_bytes") == r["size_bytes"]
-                and c.get("width", 0) > 0
-                and c.get("height", 0) > 0
-            ):
-                result[iid] = {
-                    "width": int(c["width"]),
-                    "height": int(c["height"]),
-                    "dhash": str(c["dhash"]),
-                    "phash": str(c["phash"]),
-                    "d_int": int(c["dhash"], 16),
-                    "p_int": int(c["phash"], 16),
-                }
+            try:
+                path = gallery_path(database.GALLERY_ROOT, row["rel_path"])
+                signature = _file_signature(path)
+            except (OSError, ValueError):
+                continue
+            entry = cached.get(row["id"])
+            if (entry and entry["rel_path"] == row["rel_path"]
+                    and entry["version"] == PIXEL_CACHE_VERSION
+                    and (entry["size_bytes"], entry["mtime_ns"], entry["ctime_ns"]) == signature):
+                result[row["id"]] = entry
             else:
-                to_compute.append(r)
+                pending.append((row, path))
 
-        if to_compute:
-            batch_inserts = []
-            now = time.time()
-            total_new = len(to_compute)
+        def compute(item):
+            row, path = item
+            return row, _compute_pixel_fingerprint(path)
 
-            def _worker(r: Dict[str, Any]):
-                try:
-                    full_path = gallery_path(database.GALLERY_ROOT, r["rel_path"])
-                    if not full_path.is_file():
-                        return None
-                    computed = _compute_single_visual_hash(full_path)
-                    if not computed:
-                        return None
-                    return (r, computed)
-                except Exception:
-                    return None
+        pending_inserts = []
 
-            with ThreadPoolExecutor(max_workers=8) as pool:
-                for idx, item in enumerate(pool.map(_worker, to_compute)):
-                    if idx % 50 == 0:
-                        update_job(
-                            stage=f"計算視覺特徵雜湊 ({idx}/{total_new})",
-                            processed_count=idx,
-                            total_target=total_new,
-                        )
-                    if not item:
-                        continue
-                    r, (w, h, dhash_str, phash_str) = item
-                    iid = r["id"]
-                    result[iid] = {
-                        "width": w,
-                        "height": h,
-                        "dhash": dhash_str,
-                        "phash": phash_str,
-                        "d_int": int(dhash_str, 16),
-                        "p_int": int(phash_str, 16),
-                    }
-                    batch_inserts.append(
-                        (
-                            iid,
-                            r["rel_path"],
-                            r.get("folder") or "",
-                            r.get("filename") or "",
-                            r.get("ext") or "",
-                            int(r.get("size_bytes") or 0),
-                            w,
-                            h,
-                            dhash_str,
-                            phash_str,
-                            now,
-                        )
-                    )
-                    if len(batch_inserts) >= 250:
-                        with vconn:
-                            vconn.executemany(
-                                """
-                                INSERT OR REPLACE INTO visual_hashes
-                                (id, rel_path, folder, filename, ext, size_bytes, width, height, dhash, phash, updated_at)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                """,
-                                batch_inserts,
-                            )
-                        batch_inserts.clear()
+        def flush():
+            with conn:
+                conn.executemany("""INSERT OR REPLACE INTO pixel_hashes
+                    (id, rel_path, size_bytes, mtime_ns, ctime_ns, version, width, height, pixel_hash)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""", pending_inserts)
+            pending_inserts.clear()
 
-            if batch_inserts:
-                with vconn:
-                    vconn.executemany(
-                        """
-                        INSERT OR REPLACE INTO visual_hashes
-                        (id, rel_path, folder, filename, ext, size_bytes, width, height, dhash, phash, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        batch_inserts,
-                    )
+        _report(progress, stage="建立候選圖像素索引", processed_count=len(result),
+                total_target=len(result) + len(pending), cached_images=len(result), decode_target=len(pending))
+        # Finish small images without waiting for an earlier large image's decode.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            iterator = iter(pending)
+            futures = {pool.submit(compute, item) for item in list(pending[:2])}
+            for _ in range(min(2, len(pending))):
+                next(iterator)
+            cached_count = len(result)
+            index = 0
+            while futures:
+                done, futures = wait(futures, return_when=FIRST_COMPLETED)
+                for future in done:
+                    row, entry = future.result()
+                    index += 1
+                    _report(progress, stage="建立候選圖像素索引", processed_count=cached_count + index,
+                            total_target=cached_count + len(pending), decoded_images=index,
+                            cached_images=cached_count, decode_target=len(pending))
+                    if entry is not None:
+                        result[row["id"]] = entry
+                        pending_inserts.append((
+                            row["id"], row["rel_path"], entry["size_bytes"], entry["mtime_ns"],
+                            entry["ctime_ns"], PIXEL_CACHE_VERSION, entry["width"], entry["height"], entry["pixel_hash"],
+                        ))
+                    if len(pending_inserts) >= 250:
+                        flush()
+                    item = next(iterator, None)
+                    if item is not None:
+                        futures.add(pool.submit(compute, item))
+        if pending_inserts:
+            flush()
         return result
     finally:
-        vconn.close()
+        conn.close()
 
 
-def _load_512_array(path: Path) -> Optional[Tuple[int, int, np.ndarray]]:
-    if path.suffix.lower() in (".gif", ".mp4"):
-        return None
+def _pixel_candidates(rows, scope, progress=None):
+    """Only dimensions with another possible match require full raster decoding."""
+    conn = _open_visual_hash_db()
     try:
-        with Image.open(path) as img:
-            if _is_animated_image(img):
-                return None
-            w, h = img.size
-            if w <= 0 or h <= 0:
-                return None
+        headers = {r["id"]: dict(r) for r in conn.execute("SELECT * FROM image_headers")}
+        pixels = {r["id"]: dict(r) for r in conn.execute("SELECT * FROM pixel_hashes")}
+        buckets = defaultdict(list)
+        inserts = []
+        eligible = [r for r in rows if str(r.get("ext") or "").lower() not in (".gif", ".mp4")
+                    and r.get("media_type") not in ("gif", "video")]
+        for index, row in enumerate(eligible, 1):
             try:
-                img.draft("RGB", (512, 512))
-            except Exception:
-                pass
-            rgb = img.convert("RGB").resize((512, 512), Image.Resampling.BICUBIC)
-            return w, h, np.asarray(rgb, dtype=np.float32)
-    except Exception:
-        return None
-
-
-def _compute_metrics_from_arrays(
-    arr1: np.ndarray,
-    arr2: np.ndarray,
-    w1: int,
-    h1: int,
-    w2: int,
-    h2: int,
-) -> Dict[str, float]:
-    ar1 = w1 / h1
-    ar2 = w2 / h2
-    ar_diff = abs(ar1 - ar2) / max(ar1, ar2)
-
-    diff = np.abs(arr1 - arr2)
-    mae = float(np.mean(diff))
-    max_ch_diff = np.max(diff, axis=2)
-    significant_frac = float(np.mean(max_ch_diff > 45.0))
-
-    mu1 = float(np.mean(arr1))
-    mu2 = float(np.mean(arr2))
-    sigma1_sq = float(np.var(arr1))
-    sigma2_sq = float(np.var(arr2))
-    sigma12 = float(np.mean((arr1 - mu1) * (arr2 - mu2)))
-    c1 = (0.01 * 255) ** 2
-    c2 = (0.03 * 255) ** 2
-    ssim = ((2 * mu1 * mu2 + c1) * (2 * sigma12 + c2)) / (
-        (mu1 ** 2 + mu2 ** 2 + c1) * (sigma1_sq + sigma2_sq + c2)
-    )
-    return {
-        "mae": round(mae, 3),
-        "ssim": round(float(ssim), 4),
-        "significant_frac": round(significant_frac, 5),
-        "ar_diff": round(ar_diff, 4),
-    }
+                path = gallery_path(database.GALLERY_ROOT, row["rel_path"])
+                signature = _file_signature(path)
+                entry = None
+                for cache, version in ((pixels, PIXEL_CACHE_VERSION), (headers, HEADER_CACHE_VERSION)):
+                    candidate = cache.get(row["id"])
+                    if (candidate and candidate["rel_path"] == row["rel_path"] and candidate["version"] == version
+                            and (candidate["size_bytes"], candidate["mtime_ns"], candidate["ctime_ns"]) == signature):
+                        entry = candidate
+                        break
+                if entry is None:
+                    # Dimensions and frame count live in the header; no EXIF or
+                    # display metadata is needed until this file has a candidate.
+                    with Image.open(path) as image:
+                        if _is_animated_image(image):
+                            continue
+                        width, height = image.size
+                    if signature != _file_signature(path):
+                        continue
+                    entry = {"width": width, "height": height}
+                    inserts.append((row["id"], row["rel_path"], *signature, HEADER_CACHE_VERSION, width, height))
+                row["width"], row["height"] = entry["width"], entry["height"]
+                key = (str(row.get("folder") or "") if scope == "same_folder" else "__ALL__",
+                       row["width"], row["height"])
+                buckets[key].append(row)
+            except (OSError, ValueError, cv2.error, struct.error, zlib.error):
+                continue
+            finally:
+                if index == 1 or index % 25 == 0 or index == len(eligible):
+                    _report(progress, stage="檢查尺寸與快取", processed_count=index, total_target=len(eligible))
+            if len(inserts) >= 250:
+                with conn:
+                    conn.executemany("INSERT OR REPLACE INTO image_headers VALUES(?,?,?,?,?,?,?,?)", inserts)
+                inserts.clear()
+        if inserts:
+            with conn:
+                conn.executemany("INSERT OR REPLACE INTO image_headers VALUES(?,?,?,?,?,?,?,?)", inserts)
+        candidates = [r for bucket in buckets.values() if len(bucket) > 1 for r in bucket]
+        _report(progress, candidate_images=len(candidates), skipped_images=len(eligible) - len(candidates))
+        return candidates
+    finally:
+        conn.close()
 
 
 def compare_visual_identity(
-    path1: Path,
-    path2: Path,
-    w1: int = 0,
-    h1: int = 0,
-    w2: int = 0,
-    h2: int = 0,
-    max_mae: float = 6.5,
-    min_ssim: float = 0.95,
-    max_diff_frac: float = 0.005,
-    max_ar_diff: float = 0.025,
+    path1: Path, path2: Path,
+    w1: int = 0, h1: int = 0, w2: int = 0, h2: int = 0,
+    max_mae: float = 6.5, min_ssim: float = 0.95,
+    max_diff_frac: float = 0.005, max_ar_diff: float = 0.025,
 ) -> Tuple[bool, Dict[str, Any]]:
-    """
-    Compare two images at 512x512 RGB to determine if they are true visual duplicates
-    (resize, recompression, format conversion) while strictly preserving artist variations
-    (differentials / 差分圖 such as expression, clothing, text, or watermark changes).
+    """Require identical full-resolution pixels, including alpha.
+
+    Legacy dimensions and similarity thresholds are accepted for client compatibility
+    only. They cannot relax equality; decoded dimensions always take precedence.
     """
     try:
-        with Image.open(path1) as im1, Image.open(path2) as im2:
-            if _is_animated_image(im1) or _is_animated_image(im2):
-                return False, {"reason": "animated_media"}
-    except Exception as exc:
-        return False, {"reason": f"error: {exc}"}
-
-    loaded1 = _load_512_array(path1)
-    loaded2 = _load_512_array(path2)
-    if not loaded1 or not loaded2:
-        return False, {"reason": "load_error"}
-    lw1, lh1, arr1 = loaded1
-    lw2, lh2, arr2 = loaded2
-    w1 = w1 or lw1
-    h1 = h1 or lh1
-    w2 = w2 or lw2
-    h2 = h2 or lh2
-    ar1 = w1 / h1
-    ar2 = w2 / h2
-    ar_diff = abs(ar1 - ar2) / max(ar1, ar2)
-    if ar_diff > max_ar_diff:
-        return False, {"reason": "aspect_ratio_mismatch", "ar_diff": round(ar_diff, 4)}
-
-    metrics = _compute_metrics_from_arrays(arr1, arr2, w1, h1, w2, h2)
-    is_dup = (
-        metrics["mae"] <= max_mae
-        and metrics["ssim"] >= min_ssim
-        and metrics["significant_frac"] <= max_diff_frac
-    )
-    return is_dup, metrics
-
-
-def _verify_candidate_pairs_cached(
-    candidate_pairs: List[Tuple[int, int, int, int]],
-    by_id: Dict[int, Dict[str, Any]],
-) -> Dict[Tuple[int, int], Dict[str, float]]:
-    """
-    Return {(min_id, max_id): metrics} for all candidate pairs, reading from and updating
-    the persistent visual_pair_cache table in visual_hashes.db.
-    """
-    if not candidate_pairs:
-        return {}
-
-    vconn = _open_visual_hash_db()
-    try:
-        cached_rows = vconn.execute(
-            "SELECT id1, id2, size1, size2, mae, ssim, significant_frac, ar_diff FROM visual_pair_cache"
-        ).fetchall()
-        pair_map: Dict[Tuple[int, int], Dict[str, float]] = {}
-        for r in cached_rows:
-            k = (int(r["id1"]), int(r["id2"]))
-            r1 = by_id.get(k[0])
-            r2 = by_id.get(k[1])
-            if (
-                r1
-                and r2
-                and int(r1.get("size_bytes") or 0) == int(r["size1"])
-                and int(r2.get("size_bytes") or 0) == int(r["size2"])
-            ):
-                pair_map[k] = {
-                    "mae": float(r["mae"]),
-                    "ssim": float(r["ssim"]),
-                    "significant_frac": float(r["significant_frac"]),
-                    "ar_diff": float(r["ar_diff"]),
-                }
-
-        uncached_pairs: List[Tuple[int, int]] = []
-        needed_ids: Set[int] = set()
-        for id1, id2, _, _ in candidate_pairs:
-            k = (id1, id2) if id1 < id2 else (id2, id1)
-            if k not in pair_map:
-                uncached_pairs.append(k)
-                needed_ids.add(k[0])
-                needed_ids.add(k[1])
-
-        if uncached_pairs:
-            # Group uncached pairs by bucket/chunk so memory stays bounded while decoding each image at most once per chunk
-            new_cache_rows = []
-            total_uncached = len(uncached_pairs)
-            chunk_size = 400
-            for start in range(0, total_uncached, chunk_size):
-                sub_pairs = uncached_pairs[start : start + chunk_size]
-                update_job(
-                    stage=f"像素級結構比對快取建立 ({start}/{total_uncached})",
-                    processed_count=start,
-                    total_target=total_uncached,
-                )
-                sub_ids = sorted({iid for p in sub_pairs for iid in p})
-
-                def _load_id(iid: int):
-                    row = by_id.get(iid)
-                    if not row:
-                        return (iid, None)
-                    try:
-                        p = gallery_path(database.GALLERY_ROOT, row["rel_path"])
-                        if not p.is_file():
-                            return (iid, None)
-                        return (iid, _load_512_array(p))
-                    except Exception:
-                        return (iid, None)
-
-                loaded_arrays: Dict[int, Tuple[int, int, np.ndarray]] = {}
-                with ThreadPoolExecutor(max_workers=8) as pool:
-                    for iid, data in pool.map(_load_id, sub_ids):
-                        if data is not None:
-                            loaded_arrays[iid] = data
-
-                for id1, id2 in sub_pairs:
-                    d1 = loaded_arrays.get(id1)
-                    d2 = loaded_arrays.get(id2)
-                    if not d1 or not d2:
-                        continue
-                    r1 = by_id[id1]
-                    r2 = by_id[id2]
-                    w1 = r1.get("width") or d1[0]
-                    h1 = r1.get("height") or d1[1]
-                    w2 = r2.get("width") or d2[0]
-                    h2 = r2.get("height") or d2[1]
-                    metrics = _compute_metrics_from_arrays(d1[2], d2[2], w1, h1, w2, h2)
-                    pair_map[(id1, id2)] = metrics
-                    new_cache_rows.append(
-                        (
-                            id1,
-                            id2,
-                            int(r1.get("size_bytes") or 0),
-                            int(r2.get("size_bytes") or 0),
-                            metrics["mae"],
-                            metrics["ssim"],
-                            metrics["significant_frac"],
-                            metrics["ar_diff"],
-                        )
-                    )
-
-                if new_cache_rows:
-                    with vconn:
-                        vconn.executemany(
-                            """
-                            INSERT OR REPLACE INTO visual_pair_cache
-                            (id1, id2, size1, size2, mae, ssim, significant_frac, ar_diff)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            new_cache_rows,
-                        )
-                    new_cache_rows.clear()
-
-        return pair_map
-    finally:
-        vconn.close()
+        before1, before2 = _file_signature(path1), _file_signature(path2)
+        header1, header2 = _image_header(path1), _image_header(path2)
+        if header1[:2] != header2[:2]:
+            return False, {"reason": "dimensions_mismatch"}
+        if header1[2] != header2[2]:
+            return False, {"reason": "display_metadata_mismatch"}
+        arr1, metadata1 = _load_full_image(path1, header1)
+        arr2, metadata2 = _load_full_image(path2, header2)
+        if arr1.shape != arr2.shape:
+            return False, {"reason": "dimensions_mismatch"}
+        if arr1.dtype != arr2.dtype:
+            return False, {"reason": "bit_depth_mismatch"}
+        if metadata1 != metadata2:
+            return False, {"reason": "display_metadata_mismatch"}
+        changed_pixels = 0
+        max_channel_diff = 0
+        # Compare every channel at every original pixel in bounded-size strips.
+        for start in range(0, arr1.shape[0], 128):
+            diff = cv2.absdiff(arr1[start:start + 128], arr2[start:start + 128])
+            changed_pixels += int(np.count_nonzero(np.any(diff != 0, axis=2)))
+            max_channel_diff = max(max_channel_diff, int(diff.max()))
+        if before1 != _file_signature(path1) or before2 != _file_signature(path2):
+            return False, {"reason": "file_changed"}
+        metrics = {"method": "opencv_exact_pixels", "changed_pixels": changed_pixels,
+                   "total_pixels": int(arr1.shape[0] * arr1.shape[1]), "max_channel_diff": max_channel_diff}
+        return changed_pixels == 0, metrics
+    except (OSError, ValueError, cv2.error, struct.error, zlib.error) as error:
+        return False, {"reason": str(error)}
 
 
 def _quality_rank_key(item: Dict[str, Any]) -> Tuple[int, int, int, int, int, int]:
@@ -476,27 +398,6 @@ def _format_image_summary(item: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _connected_components(nodes: Set[int], adj: Dict[int, Set[int]]) -> List[List[int]]:
-    visited: Set[int] = set()
-    components: List[List[int]] = []
-    for start in sorted(nodes):
-        if start in visited:
-            continue
-        comp: List[int] = []
-        stack = [start]
-        visited.add(start)
-        while stack:
-            curr = stack.pop()
-            comp.append(curr)
-            for nxt in adj.get(curr, ()):
-                if nxt not in visited:
-                    visited.add(nxt)
-                    stack.append(nxt)
-        if len(comp) > 1:
-            components.append(comp)
-    return components
-
-
 def scan_duplicates(
     mode: str = "both",
     scope: str = "same_folder",
@@ -505,10 +406,12 @@ def scan_duplicates(
     min_ssim: float = 0.95,
     max_diff_frac: float = 0.005,
     max_groups: Optional[int] = 300,
+    progress=None,
 ) -> Dict[str, Any]:
     """
     Scan the gallery for exact duplicates (SHA-256 + byte-for-byte verification)
-    and/or visually similar duplicates (dHash/pHash + 512x512 SSIM/MAE verification).
+    and/or identical decoded static images (OpenCV full-resolution pixel equality).
+    Legacy similarity thresholds are ignored and never relax pixel equality.
     """
     if mode not in ("both", "exact", "visual"):
         raise ValueError("mode 必須為 'both'、'exact' 或 'visual'")
@@ -553,23 +456,9 @@ def scan_duplicates(
             "groups": [],
         }
 
-    update_job(stage="準備視覺特徵與尺寸索引", processed_count=0, total_target=total_scanned)
-    vh_map = ensure_visual_hashes(rows)
-    by_id: Dict[int, Dict[str, Any]] = {}
-    for r in rows:
-        iid = r["id"]
-        vh = vh_map.get(iid)
-        if vh:
-            r["width"] = vh["width"]
-            r["height"] = vh["height"]
-            r["dhash"] = vh["dhash"]
-            r["phash"] = vh["phash"]
-            r["d_int"] = vh["d_int"]
-            r["p_int"] = vh["p_int"]
-        else:
-            r["width"] = 0
-            r["height"] = 0
-        by_id[iid] = r
+    _report(progress, stage="讀取圖庫索引", processed_count=0, total_target=total_scanned)
+    for row in rows:
+        row["width"] = row["height"] = 0
 
     groups: List[Dict[str, Any]] = []
     exact_deleted_ids: Set[int] = set()
@@ -578,9 +467,9 @@ def scan_duplicates(
     exact_duplicate_images = 0
     visual_duplicate_images = 0
 
-    # --- Phase 1: Exact Duplicate Scan (content_hash + byte-for-byte filecmp) ---
+    # --- Phase 1: Exact Duplicate Scan (content_hash + full byte verification) ---
     if mode in ("both", "exact"):
-        update_job(stage="比對 SHA-256 與位元組完全重複檔案", processed_count=0, total_target=total_scanned)
+        _report(progress, stage="驗證完全相同的檔案", processed_count=0, total_target=total_scanned)
         hash_buckets: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
         for r in rows:
             chash = str(r.get("content_hash") or "").strip()
@@ -589,7 +478,9 @@ def scan_duplicates(
             bucket_folder = str(r.get("folder") or "") if scope == "same_folder" else "__ALL__"
             hash_buckets[(bucket_folder, chash)].append(r)
 
-        for (_, chash), bucket in hash_buckets.items():
+        for bucket_index, ((_, chash), bucket) in enumerate(hash_buckets.items(), 1):
+            if bucket_index % 50 == 0 or bucket_index == len(hash_buckets):
+                _report(progress, stage="驗證完全相同的檔案", processed_count=bucket_index, total_target=len(hash_buckets))
             if len(bucket) < 2:
                 continue
             ranked = sorted(bucket, key=_quality_rank_key, reverse=True)
@@ -612,21 +503,7 @@ def scan_duplicates(
                         other_path = gallery_path(database.GALLERY_ROOT, other["rel_path"])
                         if not other_path.is_file():
                             continue
-                        st1 = keep_path.stat()
-                        st2 = other_path.stat()
-                        if st1.st_size != st2.st_size:
-                            is_identical = False
-                        elif st1.st_size <= 8 * 1024 * 1024:
-                            is_identical = filecmp.cmp(str(keep_path), str(other_path), shallow=False)
-                        else:
-                            with keep_path.open("rb") as f1, other_path.open("rb") as f2:
-                                head_match = f1.read(65536) == f2.read(65536)
-                                if head_match:
-                                    f1.seek(max(0, st1.st_size - 65536))
-                                    f2.seek(max(0, st2.st_size - 65536))
-                                    is_identical = f1.read(65536) == f2.read(65536)
-                                else:
-                                    is_identical = False
+                        is_identical = _files_identical(keep_path, other_path)
                     except Exception:
                         is_identical = False
                     if is_identical:
@@ -634,7 +511,7 @@ def scan_duplicates(
                         exact_deleted_ids.add(other["id"])
                         dup_summary = _format_image_summary(other)
                         dup_summary["reason"] = "完全重複 (SHA-256 與位元組 100% 相同)"
-                        dup_summary["metrics"] = {"mae": 0.0, "ssim": 1.0, "significant_frac": 0.0, "d_dist": 0, "p_dist": 0}
+                        dup_summary["metrics"] = {"method": "exact_bytes", "changed_bytes": 0}
                         verified_dups.append(dup_summary)
 
                 if verified_dups:
@@ -655,183 +532,91 @@ def scan_duplicates(
                         }
                     )
 
-    # --- Phase 2: Visual Similarity / Recompression Scan (dHash + pHash + 512x512 SSIM/MAE) ---
+    # --- Phase 2: full-resolution pixel equality, never perceptual similarity ---
     if mode in ("both", "visual"):
-        update_job(stage="比對視覺感知雜湊與像素結構相似度 (SSIM/MAE)", processed_count=0, total_target=total_scanned)
-        visual_buckets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-        for r in rows:
-            iid = r["id"]
-            if iid in exact_deleted_ids:
+        remaining = [row for row in rows if row["id"] not in exact_deleted_ids]
+        _report(progress, exact_copies_skipped=len(exact_deleted_ids))
+        candidates = _pixel_candidates(remaining, scope, progress)
+        by_id = {row["id"]: row for row in rows}
+        for group in groups:
+            keep = by_id[group["keep"]["id"]]
+            for summary in [group["keep"], *group["duplicates"]]:
+                summary.update(width=keep["width"], height=keep["height"], pixels=keep["width"] * keep["height"])
+        pixel_map = ensure_pixel_hashes(candidates, progress)
+        pixel_buckets: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            entry = pixel_map.get(row["id"])
+            if row["id"] in exact_deleted_ids or not entry:
                 continue
-            if "d_int" not in r or "p_int" not in r:
-                continue
-            if r.get("width", 0) <= 0 or r.get("height", 0) <= 0:
-                continue
-            bucket_key = str(r.get("folder") or "") if scope == "same_folder" else "__ALL__"
-            visual_buckets[bucket_key].append(r)
+            bucket_folder = str(row.get("folder") or "") if scope == "same_folder" else "__ALL__"
+            pixel_buckets[(bucket_folder, entry["pixel_hash"])].append(row)
 
-        candidate_pairs: List[Tuple[int, int, int, int]] = []
-        for bucket_key, items in visual_buckets.items():
-            n = len(items)
-            if n < 2:
+        matching_buckets = [bucket for bucket in pixel_buckets.values() if len(bucket) > 1]
+        _report(progress, stage="原尺寸逐像素驗證", processed_count=0, total_target=len(matching_buckets))
+        for bucket_index, bucket in enumerate(matching_buckets, 1):
+            if len(bucket) < 2:
                 continue
-            if n > 600:
-                block_index: Dict[Tuple[int, int], List[int]] = defaultdict(list)
-                for idx, it in enumerate(items):
-                    d_val = it["d_int"]
-                    for blk in range(4):
-                        part = (d_val >> (blk * 16)) & 0xFFFF
-                        block_index[(blk, part)].append(idx)
-                seen_idx_pairs: Set[Tuple[int, int]] = set()
-                for indices in block_index.values():
-                    if len(indices) < 2:
-                        continue
-                    for a_i in range(len(indices)):
-                        i = indices[a_i]
-                        it1 = items[i]
-                        ar1 = it1["width"] / it1["height"]
-                        for b_i in range(a_i + 1, len(indices)):
-                            j = indices[b_i]
-                            pair_key = (i, j) if i < j else (j, i)
-                            if pair_key in seen_idx_pairs:
-                                continue
-                            seen_idx_pairs.add(pair_key)
-                            it2 = items[j]
-                            if (
-                                scope == "all"
-                                and it1.get("folder") != it2.get("folder")
-                                and (
-                                    it1.get("folder") in database.NON_ARTIST_FOLDERS
-                                    or it2.get("folder") in database.NON_ARTIST_FOLDERS
-                                )
-                            ):
-                                continue
-                            ar2 = it2["width"] / it2["height"]
-                            if abs(ar1 - ar2) / max(ar1, ar2) > 0.025:
-                                continue
-                            d_dist = (it1["d_int"] ^ it2["d_int"]).bit_count()
-                            if d_dist > 4:
-                                continue
-                            p_dist = (it1["p_int"] ^ it2["p_int"]).bit_count()
-                            if (d_dist <= 2 and p_dist <= 4) or (d_dist <= 4 and p_dist <= 2):
-                                candidate_pairs.append((it1["id"], it2["id"], d_dist, p_dist))
-            else:
-                for i in range(n):
-                    it1 = items[i]
-                    ar1 = it1["width"] / it1["height"]
-                    for j in range(i + 1, n):
-                        it2 = items[j]
-                        ar2 = it2["width"] / it2["height"]
-                        if abs(ar1 - ar2) / max(ar1, ar2) > 0.025:
-                            continue
-                        d_dist = (it1["d_int"] ^ it2["d_int"]).bit_count()
-                        if d_dist > 4:
-                            continue
-                        p_dist = (it1["p_int"] ^ it2["p_int"]).bit_count()
-                        if (d_dist <= 2 and p_dist <= 4) or (d_dist <= 4 and p_dist <= 2):
-                            candidate_pairs.append((it1["id"], it2["id"], d_dist, p_dist))
-
-        pair_metrics_map = _verify_candidate_pairs_cached(candidate_pairs, by_id)
-
-        adj: Dict[int, Set[int]] = defaultdict(set)
-        nodes: Set[int] = set()
-        pair_dist_map: Dict[Tuple[int, int], Tuple[int, int]] = {}
-
-        for id1, id2, d_dist, p_dist in candidate_pairs:
-            k = (id1, id2) if id1 < id2 else (id2, id1)
-            metrics = pair_metrics_map.get(k)
-            if not metrics:
-                continue
-            if (
-                metrics["ar_diff"] <= 0.025
-                and metrics["mae"] <= max_mae
-                and metrics["ssim"] >= min_ssim
-                and metrics["significant_frac"] <= max_diff_frac
-            ):
-                nodes.add(id1)
-                nodes.add(id2)
-                adj[id1].add(id2)
-                adj[id2].add(id1)
-                pair_dist_map[k] = (d_dist, p_dist)
-
-        components = _connected_components(nodes, adj)
-        for comp in components:
-            comp_items = [by_id[iid] for iid in comp if iid in by_id]
-            if len(comp_items) < 2:
-                continue
-            ranked = sorted(comp_items, key=_quality_rank_key, reverse=True)
-            keep_item = ranked[0]
-            try:
+            ranked = sorted(bucket, key=_quality_rank_key, reverse=True)
+            used: Set[int] = set()
+            for index, keep_item in enumerate(ranked):
+                if keep_item["id"] in used:
+                    continue
                 keep_path = gallery_path(database.GALLERY_ROOT, keep_item["rel_path"])
-            except Exception:
-                continue
-            if not keep_path.is_file():
-                continue
+                verified_dups = []
+                for other in ranked[index + 1:]:
+                    if other["id"] in used:
+                        continue
+                    other_path = gallery_path(database.GALLERY_ROOT, other["rel_path"])
+                    matched, metrics = compare_visual_identity(keep_path, other_path)
+                    if not matched:
+                        continue
+                    used.add(other["id"])
+                    summary = _format_image_summary(other)
+                    summary["reason"] = "原尺寸逐像素完全相同 (OpenCV，差異像素 0)"
+                    summary["metrics"] = metrics
+                    verified_dups.append(summary)
+                if verified_dups:
+                    used.add(keep_item["id"])
+                    # Fold byte-identical subgroups into the pixel group so a kept
+                    # image never becomes a deletion target in another group.
+                    matched_ids = {keep_item["id"]} | {d["id"] for d in verified_dups}
+                    absorbed = [g for g in groups if g["keep"]["id"] in matched_ids]
+                    for group in absorbed:
+                        for duplicate in group["duplicates"]:
+                            duplicate_path = gallery_path(database.GALLERY_ROOT, duplicate["rel_path"])
+                            matched, metrics = compare_visual_identity(keep_path, duplicate_path)
+                            if matched:
+                                duplicate["reason"] = "原尺寸逐像素完全相同 (OpenCV，差異像素 0)"
+                                duplicate["metrics"] = metrics
+                                verified_dups.append(duplicate)
+                        groups.remove(group)
+                    for duplicate in verified_dups:
+                        duplicate_path = gallery_path(database.GALLERY_ROOT, duplicate["rel_path"])
+                        if _files_identical(keep_path, duplicate_path):
+                            duplicate["reason"] = "完全重複 (SHA-256 與位元組 100% 相同)"
+                            duplicate["metrics"] = {"method": "exact_bytes", "changed_bytes": 0}
+                    folders = {keep_item.get("folder") or ""} | {d["folder"] for d in verified_dups}
+                    groups.append({
+                        "group_id": len(groups) + 1, "match_type": "visual",
+                        "folder": next(iter(folders)) if len(folders) == 1 else "跨資料夾",
+                        "keep": _format_image_summary(keep_item), "duplicates": verified_dups,
+                        "reclaim_bytes": sum(d["size_bytes"] for d in verified_dups),
+                    })
+            _report(progress, stage="原尺寸逐像素驗證", processed_count=bucket_index, total_target=len(matching_buckets))
 
-            verified_dups = []
-            for other in ranked[1:]:
-                k = (min(keep_item["id"], other["id"]), max(keep_item["id"], other["id"]))
-                metrics = pair_metrics_map.get(k)
-                if metrics is None:
-                    try:
-                        other_path = gallery_path(database.GALLERY_ROOT, other["rel_path"])
-                    except Exception:
-                        continue
-                    if not other_path.is_file():
-                        continue
-                    is_dup, metrics = compare_visual_identity(
-                        keep_path,
-                        other_path,
-                        w1=keep_item["width"],
-                        h1=keep_item["height"],
-                        w2=other["width"],
-                        h2=other["height"],
-                        max_mae=max_mae,
-                        min_ssim=min_ssim,
-                        max_diff_frac=max_diff_frac,
-                    )
-                    if not is_dup:
-                        continue
-                else:
-                    if not (
-                        metrics["ar_diff"] <= 0.025
-                        and metrics["mae"] <= max_mae
-                        and metrics["ssim"] >= min_ssim
-                        and metrics["significant_frac"] <= max_diff_frac
-                    ):
-                        continue
-                metrics = dict(metrics)
-                d_dist, p_dist = pair_dist_map.get(k, (0, 0))
-                metrics["d_dist"] = d_dist
-                metrics["p_dist"] = p_dist
-                dup_summary = _format_image_summary(other)
-                dup_summary["reason"] = (
-                    f"視覺相同/重壓縮或縮圖 (SSIM {metrics['ssim']:.3f}, MAE {metrics['mae']:.2f})"
-                )
-                dup_summary["metrics"] = metrics
-                verified_dups.append(dup_summary)
-
-            if verified_dups:
-                visual_groups_count += 1
-                visual_duplicate_images += len(verified_dups)
-                reclaim = sum(d["size_bytes"] for d in verified_dups)
-                folders_involved = {keep_item.get("folder") or ""} | {d.get("folder") or "" for d in verified_dups}
-                group_folder = next(iter(folders_involved)) if len(folders_involved) == 1 else "跨資料夾"
-                groups.append(
-                    {
-                        "group_id": len(groups) + 1,
-                        "match_type": "visual",
-                        "folder": group_folder,
-                        "keep": _format_image_summary(keep_item),
-                        "duplicates": verified_dups,
-                        "reclaim_bytes": reclaim,
-                    }
-                )
-
+    for index, group in enumerate(groups, 1):
+        group["group_id"] = index
+        if all(d["metrics"]["method"] == "exact_bytes" for d in group["duplicates"]):
+            group["match_type"] = "exact"
+    exact_groups_count = sum(g["match_type"] == "exact" for g in groups)
+    visual_groups_count = len(groups) - exact_groups_count
+    exact_duplicate_images = sum(d["metrics"]["method"] == "exact_bytes" for g in groups for d in g["duplicates"])
+    visual_duplicate_images = sum(len(g["duplicates"]) for g in groups) - exact_duplicate_images
     all_delete_ids = [d["id"] for g in groups for d in g["duplicates"]]
     total_reclaim_bytes = sum(g["reclaim_bytes"] for g in groups)
     shown_groups = groups if max_groups is None else groups[:max_groups]
 
+    _report(progress, stage="比對完成", processed_count=total_scanned, total_target=total_scanned)
     return {
         "mode": mode,
         "scope": scope,
@@ -851,14 +636,14 @@ def scan_duplicates(
     }
 
 
-@exclusive_job("清除重複與相似圖片")
+@exclusive_job("清除重複圖片")
 def execute_dedup_groups(
     groups: List[Dict[str, Any]],
     selected_delete_ids: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     """
     Safely execute duplicate cleanup for the given groups:
-    1. Create a verified SQLite backup via backup_service.backup().
+    1. Revalidate current file contents, then create a verified SQLite backup.
     2. Merge core tags (artist, character, copyright, source) and manual tags from duplicates onto kept images.
     3. Move duplicate files to the Windows Recycle Bin via gallery_deletion.delete_images().
     4. Clean up visual_hashes.db and write an operation log entry.
@@ -869,7 +654,6 @@ def execute_dedup_groups(
     allowed_ids: Optional[Set[int]] = set(selected_delete_ids) if selected_delete_ids is not None else None
     keep_to_dups: List[Tuple[int, List[int]]] = []
     delete_ids: List[int] = []
-    reclaim_bytes = 0
 
     for g in groups:
         keep_id = int(g["keep"]["id"])
@@ -881,9 +665,6 @@ def execute_dedup_groups(
         if dups:
             keep_to_dups.append((keep_id, dups))
             delete_ids.extend(dups)
-            for d in g.get("duplicates", []):
-                if int(d["id"]) in dups:
-                    reclaim_bytes += int(d.get("size_bytes") or 0)
 
     delete_ids = list(dict.fromkeys(delete_ids))
     if not delete_ids:
@@ -896,6 +677,40 @@ def execute_dedup_groups(
             "deleted_ids": [],
             "message": "沒有需要清除的重複圖片",
         }
+
+    # Web clients can submit old previews. Never trust their paths or similarity results.
+    keep_ids = {keep_id for keep_id, _ in keep_to_dups}
+    if keep_ids.intersection(delete_ids):
+        raise ValueError("保留圖片同時被選為刪除對象，請重新掃描")
+    needed_ids = sorted(keep_ids | set(delete_ids))
+    conn = database.get_db()
+    current_rows = {}
+    try:
+        for start in range(0, len(needed_ids), 500):
+            chunk = needed_ids[start:start + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            current_rows.update({row["id"]: dict(row) for row in conn.execute(
+                f"SELECT id, rel_path FROM images WHERE missing_since IS NULL AND id IN ({placeholders})", chunk
+            )})
+    finally:
+        conn.close()
+    reclaim_bytes = 0
+    counted_ids = set()
+    for keep_id, dup_ids in keep_to_dups:
+        for dup_id in dup_ids:
+            update_job(stage="清除前重新驗證原始檔案", processed_count=len(counted_ids), total_target=len(delete_ids))
+            if keep_id not in current_rows or dup_id not in current_rows:
+                raise ValueError("圖片已變更或不存在，請重新掃描後再清除")
+            keep_path = gallery_path(database.GALLERY_ROOT, current_rows[keep_id]["rel_path"])
+            dup_path = gallery_path(database.GALLERY_ROOT, current_rows[dup_id]["rel_path"])
+            identical = _files_identical(keep_path, dup_path)
+            if not identical:
+                identical, _ = compare_visual_identity(keep_path, dup_path)
+            if not identical:
+                raise ValueError(f"圖片內容不同或已變更，已停止清除，請重新掃描（ID {keep_id} / {dup_id}）")
+            if dup_id not in counted_ids:
+                reclaim_bytes += dup_path.stat().st_size
+                counted_ids.add(dup_id)
 
     update_job(stage="建立資料庫安全備份", processed_count=0, total_target=len(delete_ids))
     backup_info = backup_service.backup()
@@ -996,6 +811,14 @@ def execute_dedup_groups(
                     [(iid,) for iid in all_deleted_ids],
                 )
                 vconn.executemany(
+                    "DELETE FROM pixel_hashes WHERE id = ?",
+                    [(iid,) for iid in all_deleted_ids],
+                )
+                vconn.executemany(
+                    "DELETE FROM image_headers WHERE id = ?",
+                    [(iid,) for iid in all_deleted_ids],
+                )
+                vconn.executemany(
                     "DELETE FROM visual_pair_cache WHERE id1 = ? OR id2 = ?",
                     [(iid, iid) for iid in all_deleted_ids],
                 )
@@ -1005,9 +828,9 @@ def execute_dedup_groups(
     reclaimed_mb = round(reclaim_bytes / (1024 * 1024), 2)
     database.log_operation(
         category="files",
-        action="清除重複與相似圖片",
+        action="清除重複圖片",
         summary=(
-            f"已清除 {total_deleted} 張重複/相似圖片（{total_recycled} 個檔案移至系統資源回收筒，"
+            f"已清除 {total_deleted} 張重複圖片（{total_recycled} 個檔案移至系統資源回收筒，"
             f"釋放 {reclaimed_mb} MB，合併 {merged_tag_links} 筆標籤，備份檔：{backup_info.get('filename', '')}）"
         ),
         affected_count=total_deleted,
@@ -1044,7 +867,8 @@ def clean_duplicates(
     max_groups: int = 200,
 ) -> Dict[str, Any]:
     """
-    Scan and optionally delete exact and visually identical/recompressed duplicate images.
+    Scan and optionally delete byte-identical or full-resolution pixel-identical images.
+    Legacy similarity thresholds are ignored.
     When execute_delete=False, returns a non-destructive preview of all duplicate groups.
     When execute_delete=True, merges core/manual tags onto the highest-resolution kept image,
     creates a DB backup, and moves redundant copies to the Windows Recycle Bin.

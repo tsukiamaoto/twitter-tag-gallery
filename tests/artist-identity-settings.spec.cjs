@@ -39,6 +39,7 @@ const html = fs.readFileSync(path.join(root, 'static/index.html'), 'utf8').repla
     await page.locator('.mcp-list-card[data-server-id="gallery"]').click();
     assert.equal(await page.locator('#mcp-modal').isVisible(), true);
     assert.equal(await page.locator('#mcp-client-target').count(), 0);
+    await page.locator('#mcp-modal-client-details > summary').click();
     await page.locator('#mcp-export').click();
     await page.waitForSelector('#mcp-client-config:visible');
     assert.equal(JSON.parse(await page.locator('#mcp-client-config').inputValue()).mcpServers.gallery.disabled, false);
@@ -50,7 +51,7 @@ const html = fs.readFileSync(path.join(root, 'static/index.html'), 'utf8').repla
     assert.ok((await page.locator('#artist-model-requests').textContent()).includes('等待 MCP 模型補查'));
     assert.equal(await page.locator('#artist-model-enabled').count(), 0);
     assert.equal(await page.locator('#artist-model-executable').count(), 0);
-    assert.ok((await page.locator('#artist-mcp-prompt').inputValue()).includes('gallery_confirm_artist_identity'));
+    assert.ok((await page.locator('#artist-mcp-prompt').inputValue()).includes('待補查畫師身分'));
     await page.getByRole('button', { name: '重查 Danbooru', exact: true }).click();
     await page.waitForFunction(() => document.querySelector('#artist-model-feedback').textContent.includes('圖庫不啟動模型'));
     assert.deepEqual(writes, [{ endpoint: '/api/settings/mcp/tools/gallery_resolve_artist_identity/run', arguments: { arguments: { artist_name: '待查畫師', profile_urls: [], force_refresh: true } } }]);

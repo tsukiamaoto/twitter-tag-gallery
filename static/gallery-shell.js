@@ -119,8 +119,6 @@
     const toolLabels = [
       ['openRenameModal()', '批次改名與排序'],
       ['openOrganizeModal()', '資料夾歸檔精靈'],
-      ["openSettings('history')", '系統操作與處理日誌'],
-      ['rescanLibrary()', '重新掃描圖庫'],
       ['openDedupModal()', '清除重複圖片'],
       ['unloadAiModel(false)', '卸載模型・釋放記憶體'],
     ];

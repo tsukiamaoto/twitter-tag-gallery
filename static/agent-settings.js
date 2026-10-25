@@ -2,18 +2,18 @@
 (() => {
   'use strict';
   const app = window.GalleryApp, el = id => document.getElementById(id);
-  let catalog = [], selected = null, modalOpen = false, lastTrigger = null, poll = null, currentJob = null, previewSequence = 0;
+  let catalog = [], permissions = null, permissionBusy = false, selected = null, modalOpen = false, lastTrigger = null, poll = null, currentJob = null, previewSequence = 0;
   const states = { queued: '等待 Antigravity', waiting: '等待 Antigravity', launching: '啟動對話中', running: '查證與改名中', launch_uncertain: '啟動結果待核對', succeeded: '完成', partial: '部分失敗', failed: '失敗', interrupted: '已中斷', cancelled: '已停止' };
   const active = status => ['queued', 'waiting', 'launching', 'running', 'launch_uncertain'].includes(status);
   function note(id, text, error = false) { const node = el(id); if (node) { node.textContent = text; node.classList.toggle('error', error); } }
   function button(text, action) { const node = document.createElement('button'); node.type = 'button'; node.className = 'btn'; node.textContent = text; node.addEventListener('click', action); return node; }
   function toolMeta(tool) {
-    return `${tool.enabled ? '已啟用' : '已停用'} · ${tool.writes ? '寫入' : '唯讀'} · ${tool.workflow ? '模型查證 · Gemini 3.8 Flash' : '程式工具'}${tool.customized ? ' · 已自訂' : ''}`;
+    return `${tool.enabled ? '已啟用' : '已停用'} · ${tool.writes ? '寫入' : '唯讀'} · 程式工具${tool.background ? ' · 背景執行' : ''}${tool.customized ? ' · 已自訂' : ''}`;
   }
   function dirty() {
     if (!selected) return false;
     const baseUsage = selected.usage_prompt ?? selected.description;
-    return el('agent-usage-prompt').value !== baseUsage || Boolean(selected.task_prompt && el('agent-task-prompt').value !== selected.task_prompt.prompt);
+    return el('agent-usage-prompt').value !== baseUsage;
   }
   function syncModal() {
     const modal = el('agent-tool-modal'), editor = el('agent-prompt-editor');
@@ -34,14 +34,11 @@
     selected = tool;
     el('agent-prompt-name').textContent = `${tool.label} · ${tool.name}`;
     el('agent-prompt-meta').textContent = toolMeta(tool);
+    el('agent-tool-schema').textContent = JSON.stringify(tool.inputSchema || {}, null, 2);
     if (!preserveDraft) {
       el('agent-usage-prompt').value = tool.usage_prompt ?? tool.description;
-      el('agent-task-prompt').value = tool.task_prompt?.prompt || '';
-      note('agent-prompt-feedback', `目前版本 ${tool.prompt_revision ?? 0}；儲存後套用新任務。MCP 客戶端請重新整理工具清單。`);
+      note('agent-prompt-feedback', `目前版本 ${tool.prompt_revision ?? 0}；MCP 客戶端請重新整理工具清單。`);
     }
-    el('agent-task-prompt').disabled = !tool.workflow;
-    el('agent-task-prompt').hidden = !tool.workflow;
-    el('agent-task-label').textContent = tool.workflow ? `模型任務 Prompt · ${tool.workflow}（共用）` : '直接執行程式，無模型任務 Prompt';
   }
   function selectTool(tool, trigger = null) {
     if (trigger) lastTrigger = trigger;
@@ -51,12 +48,55 @@
     syncModal();
     el('agent-usage-prompt').focus({ preventScroll: true });
   }
+  function permissionBlock(tool) {
+    if (!permissions) return '正在讀取工具權限';
+    if (!permissions.mcp_enabled) return '請先在 MCP 管理啟用圖庫服務';
+    if (permissions.mcp_read_only && tool.writes) return '唯讀模式下無法啟用寫入工具';
+    return '';
+  }
+  function applyToolPermissions() {
+    if (permissions) {
+      const disabled = new Set(permissions.disabled_tools || []);
+      catalog = catalog.map(tool => ({ ...tool, enabled: !permissionBlock(tool) && !disabled.has(tool.name) }));
+      if (selected) {
+        selected = { ...selected, enabled: catalog.find(tool => tool.name === selected.name)?.enabled ?? selected.enabled };
+        el('agent-prompt-meta').textContent = toolMeta(selected);
+      }
+    }
+    renderCatalog();
+  }
+  async function toggleTool(tool, input) {
+    if (permissionBusy) return;
+    const enabled = input.checked, restoreFocus = input === document.activeElement;
+    permissionBusy = true;
+    for (const control of el('agent-tool-catalog').querySelectorAll('input')) control.disabled = true;
+    note('agent-tool-feedback', `正在${enabled ? '啟用' : '停用'}「${tool.label}」…`);
+    let saved = null;
+    try {
+      permissions = await app.api('/api/settings/integrations');
+      const blocked = permissionBlock(tool);
+      if (blocked) throw new Error(blocked);
+      const disabled = new Set(permissions.disabled_tools || []);
+      if (enabled) disabled.delete(tool.name); else disabled.add(tool.name);
+      saved = await app.api('/api/settings/integrations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ disabled_tools: [...disabled] }) });
+      permissions = saved;
+      note('agent-tool-feedback', `「${tool.label}」已${enabled ? '啟用' : '停用'}並儲存。MCP 客戶端請重新整理工具清單。`);
+    } catch (error) { note('agent-tool-feedback', error.message, true); }
+    finally {
+      const canRestoreFocus = restoreFocus && (document.activeElement === input || document.activeElement === document.body);
+      permissionBusy = false;
+      applyToolPermissions();
+      if (canRestoreFocus) el('agent-tool-catalog').querySelector(`[data-tool="${tool.name}"] .agent-tool-toggle`)?.focus({ preventScroll: true });
+    }
+    if (saved) app.emit('tools:permissions', saved);
+  }
   function renderCatalog() {
     const query = el('agent-tool-search').value.trim().toLowerCase(), list = el('agent-tool-catalog'); list.replaceChildren();
     const matching = catalog.filter(t => `${t.name} ${t.label} ${t.usage_prompt ?? t.description} ${t.description}`.toLowerCase().includes(query));
     note('agent-tool-count', `${matching.length} / ${catalog.length} 個工具（含停用項目）`);
     for (const tool of matching) {
-      const row = button('', () => selectTool(tool, row)); row.classList.add('agent-tool-row'); row.dataset.tool = tool.name;
+      const row = document.createElement('div'); row.className = 'agent-tool-row'; row.dataset.tool = tool.name;
+      const edit = button('', () => selectTool(tool, edit)); edit.classList.add('agent-tool-open');
       const header = document.createElement('div'); header.className = 'agent-tool-row-header';
       const titleGroup = document.createElement('div'); titleGroup.className = 'agent-tool-row-title';
       const title = document.createElement('strong'); title.textContent = tool.label;
@@ -65,23 +105,33 @@
       const info = document.createElement('span'); info.className = 'agent-tool-row-meta'; info.textContent = toolMeta(tool);
       header.append(titleGroup, info);
       const content = document.createElement('p'); content.className = 'agent-tool-row-content'; content.textContent = tool.usage_prompt ?? tool.description;
-      row.append(header, content); list.append(row);
+      edit.append(header, content);
+      const toggle = document.createElement('label'); toggle.className = 'agent-tool-switch';
+      const input = document.createElement('input'); input.type = 'checkbox'; input.className = 'agent-tool-toggle';
+      input.setAttribute('role', 'switch'); input.setAttribute('aria-label', `啟用 ${tool.label}`);
+      input.checked = Boolean(tool.enabled); input.disabled = permissionBusy || Boolean(permissionBlock(tool));
+      toggle.title = permissionBlock(tool) || `${tool.enabled ? '停用' : '啟用'}「${tool.label}」`;
+      input.addEventListener('change', () => { void toggleTool(tool, input); });
+      const track = document.createElement('span'); track.setAttribute('aria-hidden', 'true');
+      toggle.append(input, track);
+      row.append(edit, toggle); list.append(row);
     }
   }
   async function loadCatalog(discard = false) {
-    const data = await app.api('/api/settings/mcp/tools'); catalog = data.tools;
-    renderCatalog();
+    const [data, config] = await Promise.all([app.api('/api/settings/mcp/tools'), app.api('/api/settings/integrations')]);
+    catalog = data.tools; permissions = config;
+    applyToolPermissions();
     if (selected && catalog.some(t => t.name === selected.name)) {
       const fresh = catalog.find(t => t.name === selected.name);
       populateTool(fresh, !discard && dirty());
     }
   }
-  async function savePrompt(reset = false) {
+  async function savePrompt() {
     if (!selected) return;
     const button = el('agent-prompt-save'); button.disabled = true;
     try {
-      await app.api(`/api/settings/mcp/tools/${encodeURIComponent(selected.name)}/prompt`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ usage_prompt: el('agent-usage-prompt').value, task_prompt: selected.workflow ? el('agent-task-prompt').value : null, revision: selected.prompt_revision, reset }) });
-      await loadCatalog(true); note('agent-prompt-feedback', '已儲存。新任務使用新版 Prompt；目前執行中的任務保持原版本。');
+      await app.api(`/api/settings/mcp/tools/${encodeURIComponent(selected.name)}/prompt`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ usage_prompt: el('agent-usage-prompt').value, revision: selected.prompt_revision }) });
+      await loadCatalog(true); note('agent-prompt-feedback', '工具說明已儲存。MCP 客戶端請重新整理工具清單。');
     } catch (error) { note('agent-prompt-feedback', error.message, true); }
     finally { button.disabled = false; }
   }
@@ -149,24 +199,19 @@
     const panel = el('settings-mcp'), toolsPanel = el('settings-tools');
     if (!panel || !toolsPanel) return;
     const section = document.createElement('section'); section.className = 'agent-management';
-    section.innerHTML = `<div class="agent-management-header"><h3>工具列表與 Prompt</h3><p class="settings-note">查看全部圖庫 MCP 工具內容，點擊工具可彈出視窗檢視與編輯工具使用說明及共用模型任務 Prompt。</p></div><div class="agent-tool-toolbar"><input id="agent-tool-search" class="search-input" placeholder="搜尋工具名稱、ID 或用途" aria-label="搜尋工具"><p id="agent-tool-count" class="settings-note"></p></div><div id="agent-tool-catalog" class="agent-tool-catalog"></div>`;
-    const permissions = toolsPanel.querySelector('details.settings-section');
+    section.innerHTML = `<div class="agent-management-header"><h3>工具列表與使用說明</h3><p class="settings-note">切換開關可啟用或停用工具並立即儲存；點擊工具可檢視與編輯工具本身的使用說明。</p></div><div class="agent-tool-toolbar"><input id="agent-tool-search" class="search-input" placeholder="搜尋工具名稱、ID 或用途" aria-label="搜尋工具"><p id="agent-tool-count" class="settings-note"></p><p id="agent-tool-feedback" class="settings-feedback" role="status"></p></div><div id="agent-tool-catalog" class="agent-tool-catalog"></div>`;
     toolsPanel.prepend(section);
-    if (permissions) section.querySelector('.agent-management-header').after(permissions);
     const modal = document.createElement('div');
     modal.id = 'agent-tool-modal';
     modal.className = 'modal-backdrop';
     modal.hidden = true;
-    modal.innerHTML = `<div id="agent-prompt-editor" class="dialog-box agent-tool-dialog" role="dialog" aria-modal="true" aria-labelledby="agent-prompt-name" tabindex="-1" hidden><div class="agent-tool-dialog-header"><div class="agent-tool-dialog-heading"><p class="agent-tool-dialog-eyebrow">Tool 設定 · 工具列表與 Prompt</p><h3 id="agent-prompt-name"></h3><p id="agent-prompt-meta" class="settings-note"></p></div><button id="agent-prompt-close" type="button" class="btn" aria-label="關閉工具視窗">✕</button></div><div class="agent-tool-dialog-body"><label>工具使用說明／Prompt<textarea id="agent-usage-prompt" class="search-input" rows="6" maxlength="16000"></textarea></label><label id="agent-task-field"><span id="agent-task-label"></span><textarea id="agent-task-prompt" class="search-input" rows="10" maxlength="24000"></textarea></label><p id="agent-prompt-feedback" class="settings-feedback" role="status"></p></div><div class="agent-tool-dialog-footer"><div class="settings-actions"><button id="agent-prompt-save" type="button" class="btn btn-primary">儲存 Prompt</button><button id="agent-prompt-reset" type="button" class="btn">恢復預設並儲存</button><button id="agent-prompt-reload" type="button" class="btn">放棄編輯並重新載入</button></div><button id="agent-prompt-cancel" type="button" class="btn">關閉</button></div></div>`;
+    modal.innerHTML = `<div id="agent-prompt-editor" class="dialog-box agent-tool-dialog" role="dialog" aria-modal="true" aria-labelledby="agent-prompt-name" tabindex="-1" hidden><div class="agent-tool-dialog-header"><div class="agent-tool-dialog-heading"><p class="agent-tool-dialog-eyebrow">Tool 設定 · 工具列表與使用說明</p><h3 id="agent-prompt-name"></h3><p id="agent-prompt-meta" class="settings-note"></p></div><button id="agent-prompt-close" type="button" class="btn" aria-label="關閉工具視窗">✕</button></div><div class="agent-tool-dialog-body"><label>工具使用說明／Prompt<textarea id="agent-usage-prompt" class="search-input" rows="6" maxlength="16000"></textarea></label><details><summary>參數格式</summary><pre id="agent-tool-schema" class="tool-output"></pre></details><p id="agent-prompt-feedback" class="settings-feedback" role="status"></p></div><div class="agent-tool-dialog-footer"><button id="agent-prompt-save" type="button" class="btn btn-primary">儲存</button></div></div>`;
     document.body.append(modal);
     const tasks = document.createElement('section'); tasks.className = 'settings-section'; tasks.innerHTML = '<h3>Antigravity 桌面背景查證</h3><p id="agent-bridge-status" role="status"></p><p class="settings-note">由桌面版 Sidecar 執行，請保持 Antigravity 在背景運作。圖庫頁面可關閉。所有模型查證固定使用已確認的 Gemini 3.8 Flash。</p><div id="agent-jobs"></div>';
     panel.append(tasks);
     el('agent-tool-search').addEventListener('input', renderCatalog);
     el('agent-prompt-save').addEventListener('click', () => savePrompt());
-    el('agent-prompt-reset').addEventListener('click', () => savePrompt(true));
-    el('agent-prompt-reload').addEventListener('click', () => loadCatalog(true).catch(error => note('agent-prompt-feedback', error.message, true)));
     el('agent-prompt-close').addEventListener('click', closeModal);
-    el('agent-prompt-cancel').addEventListener('click', closeModal);
     modal.addEventListener('click', event => { if (event.target === modal) closeModal(); });
     window.addEventListener('keydown', event => {
       if (modal.hidden) return;
@@ -195,10 +240,15 @@
     app.use('switchSettingsTab', (next, tab) => { const result = next(tab); clearTimeout(poll); if (tab === 'tasks') void refreshJobs(); return result; });
     app.on('workspace:change', () => {
       syncModal();
-      if (app.runtime.navigation.isVisible('tools')) void loadCatalog().catch(error => note('agent-prompt-feedback', error.message, true));
+      if (app.runtime.navigation.isVisible('tools')) void loadCatalog().catch(error => note('agent-tool-feedback', error.message, true));
       if (!jobsVisible()) clearTimeout(poll);
     });
-    app.on('tools:permissions', () => { void loadCatalog().catch(error => note('agent-prompt-feedback', error.message, true)); });
+    app.on('tools:permissions', config => {
+      if (!config) { void loadCatalog().catch(error => note('agent-tool-feedback', error.message, true)); return; }
+      if (config === permissions) return;
+      permissions = config;
+      applyToolPermissions();
+    });
     window.closeAgentToolModal = closeModal;
     app.use('closeScheduleModal', (next, ...args) => { closeModal(); const result = next(...args); if (!jobsVisible()) clearTimeout(poll); return result; });
     document.addEventListener('visibilitychange', () => { if (jobsVisible()) void refreshJobs(); else clearTimeout(poll); });
